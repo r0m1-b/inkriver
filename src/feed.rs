@@ -32,14 +32,32 @@ impl Feed {
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
         crate::article::Article {
             id: entry.id.clone(),
-            title: entry.title.as_ref().map_or("No title".to_string(), |t| t.content.clone()),
+            title: entry
+                .title
+                .as_ref()
+                .map_or("No title".to_string(), |t| t.content.clone()),
             author: entry.authors.first().map(|a| a.name.clone()),
             published_at: entry.published,
-            url: entry.links.first().map_or_else(|| "".into(), |l| l.href.clone()),
-            content: entry.content.as_ref().map_or("No content".to_string(), |c| c.body.as_ref().map_or("No body".to_string(), |b| b.clone())),
-            source: self.source
+            url: entry
+                .links
+                .first()
+                .map_or_else(|| "".into(), |l| l.href.clone()),
+            content: entry
+                .content
+                .as_ref()
+                .map_or("No content".to_string(), |c| {
+                    c.body.as_ref().map_or("No body".to_string(), |b| b.clone())
+                }),
+            source: self.source,
         }
     }
+
+    pub fn get_articles(&self) -> Vec<crate::article::Article> {
+        self.entries
+            .iter()
+            .map(|entry| self.article_from_entry(entry))
+            .collect()
+    }   
 
     pub fn display_entries(&self) {
         for entry in &self.entries {
@@ -134,18 +152,44 @@ mod tests {
 
         let article = crate::article::Article {
             id: jupiter.id.clone(),
-            title: jupiter.title.as_ref().map_or("No title".to_string(), |t| t.content.clone()),
+            title: jupiter
+                .title
+                .as_ref()
+                .map_or("No title".to_string(), |t| t.content.clone()),
             author: jupiter.authors.first().map(|a| a.name.clone()),
             published_at: jupiter.published.clone(),
-            url: jupiter.links.first().map_or_else(|| "".into(), |l| l.href.clone()),
-            content: jupiter.content.as_ref().map_or("No content".to_string(), |c| c.body.as_ref().map_or("No body".to_string(), |b| b.clone())),
+            url: jupiter
+                .links
+                .first()
+                .map_or_else(|| "".into(), |l| l.href.clone()),
+            content: jupiter
+                .content
+                .as_ref()
+                .map_or("No content".to_string(), |c| {
+                    c.body.as_ref().map_or("No body".to_string(), |b| b.clone())
+                }),
             source: crate::article::Source::Substack,
         };
         assert_eq!(article.id, jupiter.id.clone());
-        assert_eq!(article.title, jupiter.title.as_ref().map_or("No title".to_string(), |t| t.content.clone()));
-        assert_eq!(article.author, jupiter.authors.first().map(|a| a.name.clone()));
+        assert_eq!(
+            article.title,
+            jupiter
+                .title
+                .as_ref()
+                .map_or("No title".to_string(), |t| t.content.clone())
+        );
+        assert_eq!(
+            article.author,
+            jupiter.authors.first().map(|a| a.name.clone())
+        );
         assert_eq!(article.published_at, jupiter.published.clone());
-        assert_eq!(article.url, jupiter.links.first().map_or_else(|| "".into(), |l| l.href.clone()));
+        assert_eq!(
+            article.url,
+            jupiter
+                .links
+                .first()
+                .map_or_else(|| "".into(), |l| l.href.clone())
+        );
         assert_eq!(article.source, crate::article::Source::Substack);
     }
 
@@ -154,7 +198,7 @@ mod tests {
         let feeds = mock_feeds();
         let feed = &feeds[0];
         let entry = feed.entry_from_id(&feed.entries[0].id).unwrap();
-        assert_eq!(entry.id, feed.entries[0].id);        
+        assert_eq!(entry.id, feed.entries[0].id);
     }
 
     #[test]
@@ -168,7 +212,42 @@ mod tests {
         assert_eq!(article.title, "Repérer Jupiter sans télescope");
         assert_eq!(article.author, None);
         assert_eq!(article.published_at, entry.published.clone());
-        assert_eq!(article.url, "https://carnet-du-ciel.example/p/reperer-jupiter");
+        assert_eq!(
+            article.url,
+            "https://carnet-du-ciel.example/p/reperer-jupiter"
+        );
         assert_eq!(article.source, crate::article::Source::Substack);
+    }
+
+    #[test]
+    fn test_get_articles() {
+        let feeds = mock_feeds();
+        let feed = &feeds[0];
+        let articles = feed.get_articles();
+
+        assert_eq!(articles.len(), feed.entries.len());
+        for (article, entry) in articles.iter().zip(feed.entries.iter()) {
+            assert_eq!(article.id, entry.id);
+            assert_eq!(
+                article.title,
+                entry
+                    .title
+                    .as_ref()
+                    .map_or("No title".to_string(), |t| t.content.clone())
+            );
+            assert_eq!(
+                article.author,
+                entry.authors.first().map(|a| a.name.clone())
+            );
+            assert_eq!(article.published_at, entry.published.clone());
+            assert_eq!(
+                article.url,
+                entry
+                    .links
+                    .first()
+                    .map_or_else(|| "".into(), |l| l.href.clone())
+            );
+            assert_eq!(article.source, feed.source);
+        }
     }
 }
