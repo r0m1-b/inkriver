@@ -1,3 +1,4 @@
+use reader::article::Source;
 use feed_rs::parser;
 use reader::feed;
 use reader::http;
@@ -20,6 +21,7 @@ fn main() -> Result<(), String> {
         raw_feed.title.unwrap().content,
         raw_feed.links[0].href.clone(),
         raw_feed.description.unwrap().content,
+        Source::Substack,
         raw_feed.entries,
     );
 

@@ -5,5 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+chrono = "0.4.45"
 feed-rs = "2.4.0"
 reqwest = { version = "0.13.4", features = ["blocking"] }

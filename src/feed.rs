@@ -1,7 +1,10 @@
+use crate::article::Source;
+
 pub struct Feed {
     pub title: String,
     pub link: String,
     pub description: String,
+    pub source: Source,
     pub entries: Vec<feed_rs::model::Entry>,
 }
 
@@ -10,13 +13,31 @@ impl Feed {
         title: String,
         link: String,
         description: String,
+        source: Source,
         entries: Vec<feed_rs::model::Entry>,
     ) -> Self {
         Self {
             title,
             link,
             description,
+            source,
             entries,
+        }
+    }
+
+    pub fn entry_from_id(&self, id: &str) -> Option<&feed_rs::model::Entry> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
+        crate::article::Article {
+            id: entry.id.clone(),
+            title: entry.title.as_ref().map_or("No title".to_string(), |t| t.content.clone()),
+            author: entry.authors.first().map(|a| a.name.clone()),
+            published_at: entry.published,
+            url: entry.links.first().map_or_else(|| "".into(), |l| l.href.clone()),
+            content: entry.content.as_ref().map_or("No content".to_string(), |c| c.body.as_ref().map_or("No body".to_string(), |b| b.clone())),
+            source: self.source
         }
     }
 
@@ -64,12 +85,14 @@ mod tests {
             "Test Feed".into(),
             "https://example.com".into(),
             "A simple test feed".into(),
+            Source::Other,
             Vec::new(),
         );
 
         assert_eq!(feed.title, "Test Feed");
         assert_eq!(feed.link, "https://example.com");
         assert_eq!(feed.description, "A simple test feed");
+        assert_eq!(feed.source, Source::Other);
     }
 
     #[test]
@@ -102,5 +125,50 @@ mod tests {
                 .unwrap()
                 .contains("Jupiter ressemble à une étoile très brillante")
         );
+    }
+
+    #[test]
+    fn build_article_from_mock_feed() {
+        let feeds = mock_feeds();
+        let jupiter = &feeds[0].entries[0];
+
+        let article = crate::article::Article {
+            id: jupiter.id.clone(),
+            title: jupiter.title.as_ref().map_or("No title".to_string(), |t| t.content.clone()),
+            author: jupiter.authors.first().map(|a| a.name.clone()),
+            published_at: jupiter.published.clone(),
+            url: jupiter.links.first().map_or_else(|| "".into(), |l| l.href.clone()),
+            content: jupiter.content.as_ref().map_or("No content".to_string(), |c| c.body.as_ref().map_or("No body".to_string(), |b| b.clone())),
+            source: crate::article::Source::Substack,
+        };
+        assert_eq!(article.id, jupiter.id.clone());
+        assert_eq!(article.title, jupiter.title.as_ref().map_or("No title".to_string(), |t| t.content.clone()));
+        assert_eq!(article.author, jupiter.authors.first().map(|a| a.name.clone()));
+        assert_eq!(article.published_at, jupiter.published.clone());
+        assert_eq!(article.url, jupiter.links.first().map_or_else(|| "".into(), |l| l.href.clone()));
+        assert_eq!(article.source, crate::article::Source::Substack);
+    }
+
+    #[test]
+    fn test_entry_from_id() {
+        let feeds = mock_feeds();
+        let feed = &feeds[0];
+        let entry = feed.entry_from_id(&feed.entries[0].id).unwrap();
+        assert_eq!(entry.id, feed.entries[0].id);        
+    }
+
+    #[test]
+    fn test_article_from_entry() {
+        let feeds = mock_feeds();
+        let feed = &feeds[0];
+        let entry = feed.entry_from_id(&feed.entries[0].id).unwrap();
+
+        let article = feed.article_from_entry(entry);
+        assert_eq!(article.id, "substack-astronomie-1");
+        assert_eq!(article.title, "Repérer Jupiter sans télescope");
+        assert_eq!(article.author, None);
+        assert_eq!(article.published_at, entry.published.clone());
+        assert_eq!(article.url, "https://carnet-du-ciel.example/p/reperer-jupiter");
+        assert_eq!(article.source, crate::article::Source::Substack);
     }
 }

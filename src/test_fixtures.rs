@@ -3,12 +3,12 @@ use feed_rs::parser;
 
 pub(crate) fn mock_feeds() -> Vec<Feed> {
     vec![
-        parse_mock_feed(SUBSTACK_ASTRONOMY_FEED),
-        parse_mock_feed(MEDIUM_BREAD_FEED),
+        parse_mock_feed(SUBSTACK_ASTRONOMY_FEED, crate::article::Source::Substack),
+        parse_mock_feed(MEDIUM_BREAD_FEED, crate::article::Source::Medium),
     ]
 }
 
-fn parse_mock_feed(xml: &str) -> Feed {
+fn parse_mock_feed(xml: &str, source: crate::article::Source) -> Feed {
     let raw_feed = parser::parse(xml.as_bytes()).expect("the mock RSS feed must be valid");
 
     Feed::new(
@@ -26,6 +26,7 @@ fn parse_mock_feed(xml: &str) -> Feed {
             .description
             .expect("the mock feed must have a description")
             .content,
+        source,
         raw_feed.entries,
     )
 }
