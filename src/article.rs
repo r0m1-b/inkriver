@@ -20,6 +20,7 @@ pub struct Article {
 mod tests {
     use super::*;
 
+    /// Verifies that an article retains every value supplied during construction.
     #[test]
     fn test_article_creation() {
         let article = Article {

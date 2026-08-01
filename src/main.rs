@@ -6,6 +6,7 @@ use reader::http;
 
 const CONFIG_PATH: &str = "feeds.toml";
 
+/// Maps a configured platform to the corresponding article source.
 fn get_source_from(platform: Platform) -> Source {
     match platform {
         Platform::Medium => Source::Medium,
@@ -14,6 +15,11 @@ fn get_source_from(platform: Platform) -> Source {
     }
 }
 
+/// Extracts the primary link from a parsed feed.
+///
+/// # Errors
+///
+/// Returns an error when the feed does not contain any link.
 fn get_link_from(raw_feed: &feed_rs::model::Feed) -> Result<String, String> {
     let link = raw_feed
         .links
@@ -23,6 +29,11 @@ fn get_link_from(raw_feed: &feed_rs::model::Feed) -> Result<String, String> {
     Ok(link)
 }
 
+/// Extracts the title from a parsed feed.
+///
+/// # Errors
+///
+/// Returns an error when the feed does not contain a title.
 fn get_title_from(raw_feed: &feed_rs::model::Feed) -> Result<String, String> {
     let title: &str = raw_feed
         .title
@@ -32,6 +43,7 @@ fn get_title_from(raw_feed: &feed_rs::model::Feed) -> Result<String, String> {
     Ok(title.to_string())
 }
 
+/// Extracts the feed description or returns an empty string when it is absent.
 fn get_description_from(raw_feed: &feed_rs::model::Feed) -> String {
     raw_feed
         .description
@@ -40,6 +52,12 @@ fn get_description_from(raw_feed: &feed_rs::model::Feed) -> String {
         .unwrap_or_default()
 }
 
+/// Builds the application's feed model from a parsed feed and configured platform.
+///
+/// # Errors
+///
+/// Returns an error when required feed metadata, such as the title or primary
+/// link, is missing.
 fn build_feed_from_data(
     raw_feed: feed_rs::model::Feed,
     platform: Platform,
@@ -53,6 +71,12 @@ fn build_feed_from_data(
     ))
 }
 
+/// Downloads every configured feed and appends its converted articles to a vector.
+///
+/// # Errors
+///
+/// Returns an error when a request fails, a response body cannot be read, an RSS
+/// document cannot be parsed, or required feed metadata is missing.
 fn get_articles_vector(
     config: reader::config::Config,
     articles: &mut Vec<reader::article::Article>,
@@ -82,6 +106,11 @@ fn get_articles_vector(
     Ok(())
 }
 
+/// Loads the feed configuration, collects all articles, and sorts them newest first.
+///
+/// # Errors
+///
+/// Returns an error when configuration loading or article collection fails.
 fn main() -> Result<(), String> {
     let config = reader::config::load_config(std::path::Path::new(CONFIG_PATH))
         .map_err(|error| error.to_string())?;

@@ -9,6 +9,7 @@ pub struct Feed {
 }
 
 impl Feed {
+    /// Creates a feed from its metadata, source platform, and parsed entries.
     pub fn new(
         title: String,
         link: String,
@@ -25,10 +26,16 @@ impl Feed {
         }
     }
 
+    /// Finds an entry by its feed-specific identifier.
+    ///
+    /// Returns `None` when the feed does not contain a matching entry.
     pub fn entry_from_id(&self, id: &str) -> Option<&feed_rs::model::Entry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
 
+    /// Converts a parsed feed entry into the application's common article model.
+    ///
+    /// Missing optional feed fields are replaced with explicit fallback values.
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
         crate::article::Article {
             id: entry.id.clone(),
@@ -52,6 +59,7 @@ impl Feed {
         }
     }
 
+    /// Converts every parsed entry in this feed into an application article.
     pub fn get_articles(&self) -> Vec<crate::article::Article> {
         self.entries
             .iter()
@@ -59,6 +67,7 @@ impl Feed {
             .collect()
     }
 
+    /// Prints the title, primary link, and publication date of every feed entry.
     pub fn display_entries(&self) {
         for entry in &self.entries {
             println!(
@@ -79,6 +88,7 @@ impl Feed {
         }
     }
 
+    /// Prints the feed metadata and an entries heading to standard output.
     pub fn display_feed_info(&self) {
         println!("Title: {}", self.title);
         println!("Link: {}", self.link);
@@ -86,6 +96,7 @@ impl Feed {
         println!("Entries:");
     }
 
+    /// Prints the feed metadata followed by all of its entries.
     pub fn display(&self) {
         self.display_feed_info();
         self.display_entries();
@@ -97,6 +108,7 @@ mod tests {
     use super::*;
     use crate::test_fixtures::mock_feeds;
 
+    /// Verifies that the feed constructor retains all supplied metadata.
     #[test]
     fn test_feed_creation() {
         let feed = Feed::new(
@@ -113,6 +125,7 @@ mod tests {
         assert_eq!(feed.source, Source::Other);
     }
 
+    /// Verifies that the mock dataset contains two feeds with five entries each.
     #[test]
     fn mock_feeds_contain_two_sources_with_five_entries_each() {
         let feeds = mock_feeds();
@@ -124,6 +137,7 @@ mod tests {
         assert_eq!(feeds[1].entries.len(), 5);
     }
 
+    /// Verifies that a mock article title is consistent with its body content.
     #[test]
     fn mock_article_title_matches_its_content() {
         let feeds = mock_feeds();
@@ -145,6 +159,7 @@ mod tests {
         );
     }
 
+    /// Verifies manual conversion of a mock feed entry into an article model.
     #[test]
     fn build_article_from_mock_feed() {
         let feeds = mock_feeds();
@@ -193,6 +208,7 @@ mod tests {
         assert_eq!(article.source, crate::article::Source::Substack);
     }
 
+    /// Verifies that an existing entry can be found by its identifier.
     #[test]
     fn test_entry_from_id() {
         let feeds = mock_feeds();
@@ -201,6 +217,7 @@ mod tests {
         assert_eq!(entry.id, feed.entries[0].id);
     }
 
+    /// Verifies that `article_from_entry` maps the expected entry fields.
     #[test]
     fn test_article_from_entry() {
         let feeds = mock_feeds();
@@ -219,6 +236,7 @@ mod tests {
         assert_eq!(article.source, crate::article::Source::Substack);
     }
 
+    /// Verifies that all feed entries are converted into corresponding articles.
     #[test]
     fn test_get_articles() {
         let feeds = mock_feeds();

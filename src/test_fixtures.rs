@@ -1,6 +1,7 @@
 use crate::feed::Feed;
 use feed_rs::parser;
 
+/// Builds the complete in-memory feed dataset used by unit tests.
 pub(crate) fn mock_feeds() -> Vec<Feed> {
     vec![
         parse_mock_feed(SUBSTACK_ASTRONOMY_FEED, crate::article::Source::Substack),
@@ -8,6 +9,10 @@ pub(crate) fn mock_feeds() -> Vec<Feed> {
     ]
 }
 
+/// Parses an in-memory RSS fixture and converts it into the application feed model.
+///
+/// This helper intentionally panics when fixture data is invalid because malformed
+/// static test data represents a programming error rather than a runtime failure.
 fn parse_mock_feed(xml: &str, source: crate::article::Source) -> Feed {
     let raw_feed = parser::parse(xml.as_bytes()).expect("the mock RSS feed must be valid");
 

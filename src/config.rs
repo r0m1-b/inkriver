@@ -23,6 +23,15 @@ pub enum Platform {
     Other,
 }
 
+/// Loads and parses a configuration by using the supplied file-reading function.
+///
+/// The injected reader keeps parsing independent from the filesystem and makes
+/// configuration loading straightforward to unit test.
+///
+/// # Errors
+///
+/// Returns an error when the reader cannot load the requested path or when the
+/// resulting content is not valid TOML for [`Config`].
 fn load_config_from_reader<F>(path: &Path, read_file: F) -> Result<Config>
 where
     F: FnOnce(&Path) -> std::io::Result<String>,
@@ -36,6 +45,12 @@ where
     Ok(config)
 }
 
+/// Loads the reader configuration from a TOML file.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or its content cannot be
+/// deserialized into [`Config`].
 pub fn load_config(path: &Path) -> Result<Config> {
     load_config_from_reader(path, |path| fs::read_to_string(path))
 }
@@ -58,6 +73,7 @@ mod tests {
         url = "https://medium.com/feed/@bread"
     "#;
 
+    /// Verifies that a valid TOML document produces the expected feed configuration.
     #[test]
     fn load_valid_config_from_reader() {
         let fake_reader = |_path: &Path| Ok(VALID_CONFIG.to_string());
@@ -74,6 +90,7 @@ mod tests {
         assert_eq!(config.feeds[1].url, "https://medium.com/feed/@bread");
     }
 
+    /// Verifies that an underlying file-reading error is returned to the caller.
     #[test]
     fn return_error_for_invalid_file() {
         let fake_reader: fn(&Path) -> std::io::Result<String> = |_path: &Path| {
@@ -91,6 +108,7 @@ mod tests {
         assert!(message.contains("Reading forbidden."));
     }
 
+    /// Verifies that malformed TOML produces a configuration parsing error.
     #[test]
     fn return_error_for_invalid_toml() {
         let fake_reader: fn(&Path) -> std::io::Result<String> = |_path: &Path| {
