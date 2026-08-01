@@ -57,7 +57,7 @@ impl Feed {
             .iter()
             .map(|entry| self.article_from_entry(entry))
             .collect()
-    }   
+    }
 
     pub fn display_entries(&self) {
         for entry in &self.entries {
