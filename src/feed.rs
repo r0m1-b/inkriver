@@ -172,7 +172,7 @@ mod tests {
                 .as_ref()
                 .map_or("No title".to_string(), |t| t.content.clone()),
             author: jupiter.authors.first().map(|a| a.name.clone()),
-            published_at: jupiter.published.clone(),
+            published_at: jupiter.published,
             url: jupiter
                 .links
                 .first()
