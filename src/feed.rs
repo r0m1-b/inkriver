@@ -1,6 +1,7 @@
 use crate::article::Source;
 
 pub struct Feed {
+    pub id: String,
     pub title: String,
     pub link: String,
     pub description: String,
@@ -11,6 +12,7 @@ pub struct Feed {
 impl Feed {
     /// Creates a feed from its metadata, source platform, and parsed entries.
     pub fn new(
+        id: String,
         title: String,
         link: String,
         description: String,
@@ -18,6 +20,7 @@ impl Feed {
         entries: Vec<feed_rs::model::Entry>,
     ) -> Self {
         Self {
+            id,
             title,
             link,
             description,
@@ -38,7 +41,7 @@ impl Feed {
     /// Missing optional feed fields are replaced with explicit fallback values.
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
         crate::article::Article {
-            id: entry.id.clone(),
+            id: format!("{}::{}", self.id, entry.id),
             title: entry
                 .title
                 .as_ref()
@@ -112,6 +115,7 @@ mod tests {
     #[test]
     fn test_feed_creation() {
         let feed = Feed::new(
+            "test-feed".into(),
             "Test Feed".into(),
             "https://example.com".into(),
             "A simple test feed".into(),
@@ -119,6 +123,7 @@ mod tests {
             Vec::new(),
         );
 
+        assert_eq!(feed.id, "test-feed");
         assert_eq!(feed.title, "Test Feed");
         assert_eq!(feed.link, "https://example.com");
         assert_eq!(feed.description, "A simple test feed");
@@ -166,7 +171,7 @@ mod tests {
         let jupiter = &feeds[0].entries[0];
 
         let article = crate::article::Article {
-            id: jupiter.id.clone(),
+            id: format!("{}::{}", feeds[0].id, jupiter.id),
             title: jupiter
                 .title
                 .as_ref()
@@ -185,7 +190,7 @@ mod tests {
                 }),
             source: crate::article::Source::Substack,
         };
-        assert_eq!(article.id, jupiter.id.clone());
+        assert_eq!(article.id, format!("{}::{}", feeds[0].id, jupiter.id));
         assert_eq!(
             article.title,
             jupiter
@@ -225,7 +230,7 @@ mod tests {
         let entry = feed.entry_from_id(&feed.entries[0].id).unwrap();
 
         let article = feed.article_from_entry(entry);
-        assert_eq!(article.id, "substack-astronomie-1");
+        assert_eq!(article.id, "carnet-du-ciel::substack-astronomie-1");
         assert_eq!(article.title, "Repérer Jupiter sans télescope");
         assert_eq!(article.author, None);
         assert_eq!(article.published_at, entry.published.clone());
@@ -245,7 +250,7 @@ mod tests {
 
         assert_eq!(articles.len(), feed.entries.len());
         for (article, entry) in articles.iter().zip(feed.entries.iter()) {
-            assert_eq!(article.id, entry.id);
+            assert_eq!(article.id, format!("{}::{}", feed.id, entry.id));
             assert_eq!(
                 article.title,
                 entry
@@ -267,5 +272,34 @@ mod tests {
             );
             assert_eq!(article.source, feed.source);
         }
+    }
+
+    /// Verifies that equal entry identifiers from different feeds stay unique.
+    #[test]
+    fn article_ids_are_unique_between_feeds() {
+        let duplicate_entry = mock_feeds()[0].entries[0].clone();
+        let first_feed = Feed::new(
+            "first".to_string(),
+            "First feed".to_string(),
+            "https://first.example".to_string(),
+            String::new(),
+            Source::Substack,
+            vec![duplicate_entry.clone()],
+        );
+        let second_feed = Feed::new(
+            "second".to_string(),
+            "Second feed".to_string(),
+            "https://second.example".to_string(),
+            String::new(),
+            Source::Medium,
+            vec![duplicate_entry],
+        );
+
+        let first_article = first_feed.get_articles().remove(0);
+        let second_article = second_feed.get_articles().remove(0);
+
+        assert_eq!(first_article.id, "first::substack-astronomie-1");
+        assert_eq!(second_article.id, "second::substack-astronomie-1");
+        assert_ne!(first_article.id, second_article.id);
     }
 }

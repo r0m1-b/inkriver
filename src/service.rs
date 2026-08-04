@@ -36,6 +36,7 @@ pub struct CollectionReport {
 /// Returns an error when the parsed feed has no title or no primary link.
 fn build_feed_from_data(
     raw_feed: feed_rs::model::Feed,
+    feed_id: &str,
     platform: Platform,
 ) -> Result<Feed, String> {
     let title = raw_feed
@@ -61,6 +62,7 @@ fn build_feed_from_data(
     };
 
     Ok(Feed::new(
+        feed_id.to_string(),
         title,
         link,
         description,
@@ -80,7 +82,7 @@ fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, String> {
     let content = response.text().map_err(|error| error.to_string())?;
     let raw_feed = parser::parse(content.as_bytes()).map_err(|error| error.to_string())?;
 
-    build_feed_from_data(raw_feed, feed_config.platform)
+    build_feed_from_data(raw_feed, &feed_config.id, feed_config.platform)
 }
 
 /// Sorts articles from newest to oldest, placing undated articles last.
@@ -176,8 +178,9 @@ mod tests {
     fn build_feed_from_parsed_data() {
         let raw_feed = parser::parse(SIMPLE_RSS.as_bytes()).unwrap();
 
-        let feed = build_feed_from_data(raw_feed, Platform::Substack).unwrap();
+        let feed = build_feed_from_data(raw_feed, "astronomy", Platform::Substack).unwrap();
 
+        assert_eq!(feed.id, "astronomy");
         assert_eq!(feed.title, "Test astronomy feed");
         assert_eq!(feed.link, "https://astronomy.example/");
         assert_eq!(feed.description, "A test feed about the night sky.");
@@ -206,8 +209,14 @@ mod tests {
 
         sort_articles_newest_first(&mut articles);
 
-        assert_eq!(articles.first().unwrap().id, "medium-pain-5");
-        assert_eq!(articles.last().unwrap().id, "substack-astronomie-1");
+        assert_eq!(
+            articles.first().unwrap().id,
+            "le-pain-patient::medium-pain-5"
+        );
+        assert_eq!(
+            articles.last().unwrap().id,
+            "carnet-du-ciel::substack-astronomie-1"
+        );
         assert!(
             articles
                 .windows(2)
@@ -243,7 +252,10 @@ mod tests {
                 .count(),
             5
         );
-        assert_eq!(report.articles.first().unwrap().id, "medium-pain-5");
+        assert_eq!(
+            report.articles.first().unwrap().id,
+            "le-pain-patient::medium-pain-5"
+        );
     }
 
     /// Verifies that one failed feed does not discard articles from later feeds.
