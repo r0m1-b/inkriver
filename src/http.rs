@@ -1,21 +1,14 @@
-const SERVER_ERROR: &str = "Server error occurred";
-const UNEXPECTED_ERROR: &str = "Unexpected error occurred";
-
-/// Accepts successful HTTP statuses and classifies all other statuses as errors.
+/// Accepts successful HTTP statuses and preserves unsuccessful status details.
 ///
 /// # Errors
 ///
-/// Returns [`SERVER_ERROR`] for server-side failures and [`UNEXPECTED_ERROR`]
-/// for every other non-successful status.
+/// Returns an error containing the exact status code and reason for every
+/// non-successful response.
 fn validate_status(status: reqwest::StatusCode) -> Result<(), String> {
     if status.is_success() {
         Ok(())
-    } else if status.is_server_error() {
-        println!("server error!");
-        Err(SERVER_ERROR.into())
     } else {
-        println!("Something else happened. Status: {:?}", status);
-        Err(UNEXPECTED_ERROR.into())
+        Err(format!("HTTP status {status}"))
     }
 }
 
@@ -46,19 +39,19 @@ mod tests {
         assert_eq!(result, Ok(()));
     }
 
-    /// Verifies that a server-side HTTP failure returns the server error message.
+    /// Verifies that a server-side HTTP failure preserves its exact status.
     #[test]
     fn server_error_is_rejected() {
         let result = validate_status(StatusCode::INTERNAL_SERVER_ERROR);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), SERVER_ERROR);
+        assert_eq!(result.unwrap_err(), "HTTP status 500 Internal Server Error");
     }
 
-    /// Verifies that a missing resource returns the unexpected-status error message.
+    /// Verifies that a missing resource preserves its exact status.
     #[test]
     fn not_found_is_rejected_as_unexpected_status() {
         let result = validate_status(StatusCode::NOT_FOUND);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), UNEXPECTED_ERROR);
+        assert_eq!(result.unwrap_err(), "HTTP status 404 Not Found");
     }
 }

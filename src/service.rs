@@ -5,12 +5,47 @@ use crate::http;
 use feed_rs::parser;
 use std::fmt;
 
+/// Identifies the operation that failed while loading a feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedLoadStage {
+    HttpRequest,
+    ResponseBody,
+    FeedParsing,
+    FeedMetadata,
+}
+
+impl fmt::Display for FeedLoadStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::HttpRequest => "HTTP request",
+            Self::ResponseBody => "response body",
+            Self::FeedParsing => "feed parsing",
+            Self::FeedMetadata => "feed metadata",
+        };
+
+        formatter.write_str(label)
+    }
+}
+
+/// Describes one failed operation while loading a feed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FeedLoadError {
+    pub stage: FeedLoadStage,
+    pub message: String,
+}
+
+impl fmt::Display for FeedLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.stage, self.message)
+    }
+}
+
 /// Describes a configured feed that could not be collected.
 #[derive(Debug, PartialEq, Eq)]
 pub struct FeedCollectionError {
     pub feed_id: String,
     pub feed_url: String,
-    pub message: String,
+    pub error: FeedLoadError,
 }
 
 impl fmt::Display for FeedCollectionError {
@@ -18,7 +53,7 @@ impl fmt::Display for FeedCollectionError {
         write!(
             formatter,
             "Feed {:?} ({}): {}",
-            self.feed_id, self.feed_url, self.message
+            self.feed_id, self.feed_url, self.error
         )
     }
 }
@@ -77,12 +112,26 @@ fn build_feed_from_data(
 ///
 /// Returns an error when the request, response reading, RSS parsing, or feed
 /// model conversion fails.
-fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, String> {
-    let response = http::check_feed_url(&feed_config.url)?;
-    let content = response.text().map_err(|error| error.to_string())?;
-    let raw_feed = parser::parse(content.as_bytes()).map_err(|error| error.to_string())?;
+fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, FeedLoadError> {
+    let response = http::check_feed_url(&feed_config.url).map_err(|message| FeedLoadError {
+        stage: FeedLoadStage::HttpRequest,
+        message,
+    })?;
+    let content = response.text().map_err(|error| FeedLoadError {
+        stage: FeedLoadStage::ResponseBody,
+        message: error.to_string(),
+    })?;
+    let raw_feed = parser::parse(content.as_bytes()).map_err(|error| FeedLoadError {
+        stage: FeedLoadStage::FeedParsing,
+        message: error.to_string(),
+    })?;
 
-    build_feed_from_data(raw_feed, &feed_config.id, feed_config.platform)
+    build_feed_from_data(raw_feed, &feed_config.id, feed_config.platform).map_err(|message| {
+        FeedLoadError {
+            stage: FeedLoadStage::FeedMetadata,
+            message,
+        }
+    })
 }
 
 /// Sorts articles from newest to oldest, placing undated articles last.
@@ -97,7 +146,7 @@ fn sort_articles_newest_first(articles: &mut [Article]) {
 ///
 fn collect_articles_with_loader<F>(config: &Config, mut load_feed: F) -> CollectionReport
 where
-    F: FnMut(&FeedConfig) -> Result<Feed, String>,
+    F: FnMut(&FeedConfig) -> Result<Feed, FeedLoadError>,
 {
     let mut articles = Vec::new();
     let mut errors = Vec::new();
@@ -105,10 +154,10 @@ where
     for feed_config in &config.feeds {
         match load_feed(feed_config) {
             Ok(feed) => articles.extend(feed.get_articles()),
-            Err(message) => errors.push(FeedCollectionError {
+            Err(error) => errors.push(FeedCollectionError {
                 feed_id: feed_config.id.clone(),
                 feed_url: feed_config.url.clone(),
-                message,
+                error,
             }),
         }
     }
@@ -199,7 +248,12 @@ mod tests {
 
         let result = load_feed_from_http(&feed_config);
 
-        assert!(result.is_err());
+        let error = match result {
+            Ok(_) => panic!("an invalid URL should be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage, FeedLoadStage::HttpRequest);
+        assert!(error.to_string().starts_with("HTTP request:"));
     }
 
     /// Verifies chronological sorting and placement of the oldest article last.
@@ -231,7 +285,10 @@ mod tests {
         let mut feeds = mock_feeds().into_iter();
 
         let report = collect_articles_with_loader(&config, |_feed_config| {
-            feeds.next().ok_or_else(|| "Missing mock feed".to_string())
+            feeds.next().ok_or_else(|| FeedLoadError {
+                stage: FeedLoadStage::FeedMetadata,
+                message: "Missing mock feed".to_string(),
+            })
         });
 
         assert!(report.errors.is_empty());
@@ -269,11 +326,15 @@ mod tests {
             loader_calls += 1;
 
             if feed_config.id == "astronomy" {
-                Err("Astronomy feed unavailable".to_string())
+                Err(FeedLoadError {
+                    stage: FeedLoadStage::HttpRequest,
+                    message: "Astronomy feed unavailable".to_string(),
+                })
             } else {
-                successful_feed
-                    .take()
-                    .ok_or_else(|| "Missing successful mock feed".to_string())
+                successful_feed.take().ok_or_else(|| FeedLoadError {
+                    stage: FeedLoadStage::FeedMetadata,
+                    message: "Missing successful mock feed".to_string(),
+                })
             }
         });
 
@@ -290,7 +351,10 @@ mod tests {
             vec![FeedCollectionError {
                 feed_id: "astronomy".to_string(),
                 feed_url: "https://astronomy.example/feed".to_string(),
-                message: "Astronomy feed unavailable".to_string(),
+                error: FeedLoadError {
+                    stage: FeedLoadStage::HttpRequest,
+                    message: "Astronomy feed unavailable".to_string(),
+                },
             }]
         );
     }
@@ -312,13 +376,42 @@ mod tests {
         let error = FeedCollectionError {
             feed_id: "astronomy".to_string(),
             feed_url: "https://astronomy.example/feed".to_string(),
-            message: "Connection refused".to_string(),
+            error: FeedLoadError {
+                stage: FeedLoadStage::HttpRequest,
+                message: "Connection refused".to_string(),
+            },
         };
 
         assert_eq!(
             error.to_string(),
-            "Feed \"astronomy\" (https://astronomy.example/feed): Connection refused"
+            "Feed \"astronomy\" (https://astronomy.example/feed): HTTP request: Connection refused"
         );
+    }
+
+    /// Verifies the stable human-readable labels of every loading stage.
+    #[test]
+    fn format_feed_load_stages() {
+        let cases = [
+            (FeedLoadStage::HttpRequest, "HTTP request"),
+            (FeedLoadStage::ResponseBody, "response body"),
+            (FeedLoadStage::FeedParsing, "feed parsing"),
+            (FeedLoadStage::FeedMetadata, "feed metadata"),
+        ];
+
+        for (stage, expected) in cases {
+            assert_eq!(stage.to_string(), expected);
+        }
+    }
+
+    /// Verifies that a loading error combines its stage and underlying message.
+    #[test]
+    fn format_feed_load_error() {
+        let error = FeedLoadError {
+            stage: FeedLoadStage::FeedParsing,
+            message: "invalid XML".to_string(),
+        };
+
+        assert_eq!(error.to_string(), "feed parsing: invalid XML");
     }
 
     /// Verifies the CLI representation of an article.
