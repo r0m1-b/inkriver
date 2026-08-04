@@ -11,9 +11,13 @@ const CONFIG_PATH: &str = "feeds.toml";
 /// loaded.
 fn main() -> Result<(), String> {
     let config = config::load_config(Path::new(CONFIG_PATH)).map_err(|error| error.to_string())?;
-    let articles = service::collect_articles(&config)?;
+    let report = service::collect_articles(&config);
 
-    for article in &articles {
+    for error in &report.errors {
+        eprintln!("{error}");
+    }
+
+    for article in &report.articles {
         println!("{}", service::format_article_summary(article));
     }
 

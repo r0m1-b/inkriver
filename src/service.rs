@@ -3,6 +3,31 @@ use crate::config::{Config, FeedConfig, Platform};
 use crate::feed::Feed;
 use crate::http;
 use feed_rs::parser;
+use std::fmt;
+
+/// Describes a configured feed that could not be collected.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FeedCollectionError {
+    pub feed_id: String,
+    pub feed_url: String,
+    pub message: String,
+}
+
+impl fmt::Display for FeedCollectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Feed {:?} ({}): {}",
+            self.feed_id, self.feed_url, self.message
+        )
+    }
+}
+
+/// Contains all successfully collected articles and per-feed failures.
+pub struct CollectionReport {
+    pub articles: Vec<Article>,
+    pub errors: Vec<FeedCollectionError>,
+}
 
 /// Builds the application feed model from data parsed by `feed-rs`.
 ///
@@ -68,33 +93,30 @@ fn sort_articles_newest_first(articles: &mut [Article]) {
 /// The loader parameter keeps aggregation independent from HTTP and makes the
 /// complete workflow deterministic in unit tests.
 ///
-/// # Errors
-///
-/// Returns the first error produced by the feed loader.
-fn collect_articles_with_loader<F>(
-    config: &Config,
-    mut load_feed: F,
-) -> Result<Vec<Article>, String>
+fn collect_articles_with_loader<F>(config: &Config, mut load_feed: F) -> CollectionReport
 where
     F: FnMut(&FeedConfig) -> Result<Feed, String>,
 {
     let mut articles = Vec::new();
+    let mut errors = Vec::new();
 
     for feed_config in &config.feeds {
-        let feed = load_feed(feed_config)?;
-        articles.extend(feed.get_articles());
+        match load_feed(feed_config) {
+            Ok(feed) => articles.extend(feed.get_articles()),
+            Err(message) => errors.push(FeedCollectionError {
+                feed_id: feed_config.id.clone(),
+                feed_url: feed_config.url.clone(),
+                message,
+            }),
+        }
     }
 
     sort_articles_newest_first(&mut articles);
-    Ok(articles)
+    CollectionReport { articles, errors }
 }
 
-/// Downloads all configured feeds and returns one chronological article list.
-///
-/// # Errors
-///
-/// Returns an error when any configured feed cannot be downloaded or parsed.
-pub fn collect_articles(config: &Config) -> Result<Vec<Article>, String> {
+/// Downloads all configured feeds and reports successes and failures separately.
+pub fn collect_articles(config: &Config) -> CollectionReport {
     collect_articles_with_loader(config, load_feed_from_http)
 }
 
@@ -199,27 +221,66 @@ mod tests {
         let config = test_config();
         let mut feeds = mock_feeds().into_iter();
 
-        let articles = collect_articles_with_loader(&config, |_feed_config| {
+        let report = collect_articles_with_loader(&config, |_feed_config| {
             feeds.next().ok_or_else(|| "Missing mock feed".to_string())
-        })
-        .unwrap();
+        });
 
-        assert_eq!(articles.len(), 10);
+        assert!(report.errors.is_empty());
+        assert_eq!(report.articles.len(), 10);
         assert_eq!(
-            articles
+            report
+                .articles
                 .iter()
                 .filter(|article| article.source == Source::Substack)
                 .count(),
             5
         );
         assert_eq!(
-            articles
+            report
+                .articles
                 .iter()
                 .filter(|article| article.source == Source::Medium)
                 .count(),
             5
         );
-        assert_eq!(articles.first().unwrap().id, "medium-pain-5");
+        assert_eq!(report.articles.first().unwrap().id, "medium-pain-5");
+    }
+
+    /// Verifies that one failed feed does not discard articles from later feeds.
+    #[test]
+    fn collect_articles_continues_after_feed_failure() {
+        let config = test_config();
+        let mut successful_feed = mock_feeds().pop();
+        let mut loader_calls = 0;
+
+        let report = collect_articles_with_loader(&config, |feed_config| {
+            loader_calls += 1;
+
+            if feed_config.id == "astronomy" {
+                Err("Astronomy feed unavailable".to_string())
+            } else {
+                successful_feed
+                    .take()
+                    .ok_or_else(|| "Missing successful mock feed".to_string())
+            }
+        });
+
+        assert_eq!(loader_calls, 2);
+        assert_eq!(report.articles.len(), 5);
+        assert!(
+            report
+                .articles
+                .iter()
+                .all(|article| article.source == Source::Medium)
+        );
+        assert_eq!(
+            report.errors,
+            vec![FeedCollectionError {
+                feed_id: "astronomy".to_string(),
+                feed_url: "https://astronomy.example/feed".to_string(),
+                message: "Astronomy feed unavailable".to_string(),
+            }]
+        );
     }
 
     /// Verifies that the public collector handles an empty configuration.
@@ -227,9 +288,25 @@ mod tests {
     fn collect_articles_from_empty_config() {
         let config = Config { feeds: Vec::new() };
 
-        let articles = collect_articles(&config).unwrap();
+        let report = collect_articles(&config);
 
-        assert!(articles.is_empty());
+        assert!(report.articles.is_empty());
+        assert!(report.errors.is_empty());
+    }
+
+    /// Verifies that a feed collection error includes actionable context.
+    #[test]
+    fn format_feed_collection_error() {
+        let error = FeedCollectionError {
+            feed_id: "astronomy".to_string(),
+            feed_url: "https://astronomy.example/feed".to_string(),
+            message: "Connection refused".to_string(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Feed \"astronomy\" (https://astronomy.example/feed): Connection refused"
+        );
     }
 
     /// Verifies the CLI representation of an article.
