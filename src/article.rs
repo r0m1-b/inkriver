@@ -1,13 +1,40 @@
 use chrono::{DateTime, Utc};
 
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Source {
     Medium,
     Substack,
     Other,
 }
+
+impl Source {
+    /// Returns the stable lowercase representation stored in SQLite.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::Substack => "substack",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl TryFrom<&str> for Source {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "medium" => Ok(Self::Medium),
+            "substack" => Ok(Self::Substack),
+            "other" => Ok(Self::Other),
+            _ => Err(format!("Unknown article source: {value}")),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Article {
     pub id: String,
+    pub feed_id: String,
     pub title: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
@@ -25,6 +52,7 @@ mod tests {
     fn test_article_creation() {
         let article = Article {
             id: "1".to_string(),
+            feed_id: "test-feed".to_string(),
             title: Some("Test Article".to_string()),
             author: None,
             published_at: None,
@@ -33,11 +61,29 @@ mod tests {
             source: Source::Other,
         };
         assert_eq!(article.id, "1");
+        assert_eq!(article.feed_id, "test-feed");
         assert_eq!(article.title.as_deref(), Some("Test Article"));
         assert_eq!(article.author, None);
         assert_eq!(article.published_at, None);
         assert_eq!(article.url.as_deref(), Some("https://example.com/article"));
         assert_eq!(article.source, Source::Other);
         assert_eq!(article.content.as_deref(), Some("Test content"));
+    }
+
+    /// Verifies every source has a stable SQLite representation and round-trips.
+    #[test]
+    fn source_round_trips_through_storage_value() {
+        for source in [Source::Medium, Source::Substack, Source::Other] {
+            assert_eq!(Source::try_from(source.as_str()), Ok(source));
+        }
+    }
+
+    /// Verifies corrupted or future source values are not silently accepted.
+    #[test]
+    fn unknown_storage_source_is_rejected() {
+        assert_eq!(
+            Source::try_from("newsletter"),
+            Err("Unknown article source: newsletter".to_string())
+        );
     }
 }

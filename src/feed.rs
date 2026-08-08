@@ -54,6 +54,7 @@ impl Feed {
 
         crate::article::Article {
             id: format!("{}::{entry_identity}", self.id),
+            feed_id: self.id.clone(),
             title: entry.title.as_ref().map(|title| title.content.clone()),
             author: entry.authors.first().map(|a| a.name.clone()),
             published_at: entry.published,
@@ -183,6 +184,7 @@ mod tests {
 
         let article = crate::article::Article {
             id: format!("{}::{}", feeds[0].id, jupiter.id),
+            feed_id: feeds[0].id.clone(),
             title: jupiter.title.as_ref().map(|title| title.content.clone()),
             author: jupiter.authors.first().map(|a| a.name.clone()),
             published_at: jupiter.published,
@@ -200,6 +202,7 @@ mod tests {
             source: crate::article::Source::Substack,
         };
         assert_eq!(article.id, format!("{}::{}", feeds[0].id, jupiter.id));
+        assert_eq!(article.feed_id, feeds[0].id);
         assert_eq!(
             article.title.as_deref(),
             jupiter.title.as_ref().map(|title| title.content.as_str())

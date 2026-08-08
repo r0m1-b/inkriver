@@ -35,6 +35,30 @@ impl From<Platform> for Source {
     }
 }
 
+impl Platform {
+    /// Returns the stable lowercase representation stored in SQLite.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::Substack => "substack",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl TryFrom<&str> for Platform {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "medium" => Ok(Self::Medium),
+            "substack" => Ok(Self::Substack),
+            "other" => Ok(Self::Other),
+            _ => Err(format!("Unknown feed platform: {value}")),
+        }
+    }
+}
+
 /// Validates identifiers used to namespace articles from configured feeds.
 ///
 /// # Errors
@@ -121,6 +145,23 @@ mod tests {
         for (platform, expected_source) in cases {
             assert_eq!(crate::article::Source::from(platform), expected_source);
         }
+    }
+
+    /// Verifies every platform has a stable SQLite representation and round-trips.
+    #[test]
+    fn platform_round_trips_through_storage_value() {
+        for platform in [Platform::Medium, Platform::Substack, Platform::Other] {
+            assert_eq!(Platform::try_from(platform.as_str()), Ok(platform));
+        }
+    }
+
+    /// Verifies corrupted or future platform values are not silently accepted.
+    #[test]
+    fn unknown_storage_platform_is_rejected() {
+        assert_eq!(
+            Platform::try_from("blog"),
+            Err("Unknown feed platform: blog".to_string())
+        );
     }
 
     /// Verifies that a valid TOML document produces the expected feed configuration.
