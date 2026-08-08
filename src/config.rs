@@ -17,7 +17,7 @@ pub struct FeedConfig {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     Medium,

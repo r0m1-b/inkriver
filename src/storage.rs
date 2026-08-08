@@ -1,3 +1,4 @@
+use crate::config::{FeedConfig, Platform};
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
@@ -9,6 +10,15 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 /// Owns the SQLite connection pool used by the reader core.
 pub struct Storage {
     pool: SqlitePool,
+}
+
+/// Represents one subscription as persisted by the application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFeed {
+    pub id: String,
+    pub platform: Platform,
+    pub url: String,
+    pub is_active: bool,
 }
 
 impl Storage {
@@ -43,6 +53,76 @@ impl Storage {
         Ok(Self { pool })
     }
 
+    /// Imports the configured subscriptions as the active feed set.
+    ///
+    /// Feeds absent from the imported set are marked inactive. Existing rows
+    /// are retained so their article history can remain available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the complete import transaction cannot be applied.
+    pub async fn import_feeds(&self, feeds: &[FeedConfig]) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de commencer l'import des abonnements")?;
+
+        sqlx::query("UPDATE feeds SET is_active = 0")
+            .execute(&mut *transaction)
+            .await
+            .context("Impossible de désactiver les anciens abonnements")?;
+
+        for feed in feeds {
+            sqlx::query(
+                r#"
+                    INSERT INTO feeds (id, platform, url, is_active)
+                    VALUES (?, ?, ?, 1)
+                    ON CONFLICT(id) DO UPDATE SET
+                        platform = excluded.platform,
+                        url = excluded.url,
+                        is_active = 1
+                "#,
+            )
+            .bind(&feed.id)
+            .bind(feed.platform.as_str())
+            .bind(&feed.url)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Impossible d'importer l'abonnement {:?}", feed.id))?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider l'import des abonnements")
+    }
+
+    /// Lists every persisted feed, including inactive subscriptions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when rows cannot be loaded or contain an unknown platform.
+    pub async fn list_feeds(&self) -> Result<Vec<StoredFeed>> {
+        let rows: Vec<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, platform, url, is_active FROM feeds ORDER BY id ASC")
+                .fetch_all(&self.pool)
+                .await
+                .context("Impossible de charger les abonnements")?;
+
+        rows.into_iter()
+            .map(|(id, platform, url, is_active)| {
+                let platform = Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
+                Ok(StoredFeed {
+                    id,
+                    platform,
+                    url,
+                    is_active,
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) async fn open_in_memory() -> Result<Self> {
         let options = SqliteConnectOptions::new()
@@ -61,6 +141,14 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feed(id: &str, platform: Platform, url: &str) -> FeedConfig {
+        FeedConfig {
+            id: id.to_string(),
+            platform,
+            url: url.to_string(),
+        }
+    }
 
     /// Verifies a file database is created with migrations and foreign keys enabled.
     #[tokio::test]
@@ -102,5 +190,114 @@ mod tests {
         assert_eq!(migration_count, 1);
 
         storage.close().await;
+    }
+
+    /// Verifies a feed import persists every configured value as active.
+    #[tokio::test]
+    async fn import_feeds_inserts_active_subscriptions() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let feeds = vec![
+            feed(
+                "astronomy",
+                Platform::Substack,
+                "https://astronomy.example/feed",
+            ),
+            feed("bread", Platform::Medium, "https://medium.com/feed/@bread"),
+        ];
+
+        storage.import_feeds(&feeds).await.unwrap();
+
+        assert_eq!(
+            storage.list_feeds().await.unwrap(),
+            vec![
+                StoredFeed {
+                    id: "astronomy".to_string(),
+                    platform: Platform::Substack,
+                    url: "https://astronomy.example/feed".to_string(),
+                    is_active: true,
+                },
+                StoredFeed {
+                    id: "bread".to_string(),
+                    platform: Platform::Medium,
+                    url: "https://medium.com/feed/@bread".to_string(),
+                    is_active: true,
+                },
+            ]
+        );
+    }
+
+    /// Verifies a later import updates retained feeds and only deactivates missing ones.
+    #[tokio::test]
+    async fn import_feeds_updates_and_deactivates_without_deleting() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[
+                feed(
+                    "astronomy",
+                    Platform::Substack,
+                    "https://astronomy.example/feed",
+                ),
+                feed("bread", Platform::Medium, "https://medium.com/feed/@bread"),
+            ])
+            .await
+            .unwrap();
+
+        storage
+            .import_feeds(&[feed(
+                "astronomy",
+                Platform::Other,
+                "https://astronomy.example/new-feed",
+            )])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.list_feeds().await.unwrap(),
+            vec![
+                StoredFeed {
+                    id: "astronomy".to_string(),
+                    platform: Platform::Other,
+                    url: "https://astronomy.example/new-feed".to_string(),
+                    is_active: true,
+                },
+                StoredFeed {
+                    id: "bread".to_string(),
+                    platform: Platform::Medium,
+                    url: "https://medium.com/feed/@bread".to_string(),
+                    is_active: false,
+                },
+            ]
+        );
+    }
+
+    /// Verifies a failed import rolls back its preliminary deactivation.
+    #[tokio::test]
+    async fn import_feeds_is_atomic() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let original = feed(
+            "astronomy",
+            Platform::Substack,
+            "https://astronomy.example/feed",
+        );
+        storage
+            .import_feeds(std::slice::from_ref(&original))
+            .await
+            .unwrap();
+
+        let duplicate_url = vec![
+            feed("one", Platform::Other, "https://duplicate.example/feed"),
+            feed("two", Platform::Other, "https://duplicate.example/feed"),
+        ];
+        assert!(storage.import_feeds(&duplicate_url).await.is_err());
+
+        assert_eq!(
+            storage.list_feeds().await.unwrap(),
+            vec![StoredFeed {
+                id: original.id,
+                platform: original.platform,
+                url: original.url,
+                is_active: true,
+            }]
+        );
     }
 }
