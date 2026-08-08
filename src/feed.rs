@@ -38,25 +38,24 @@ impl Feed {
 
     /// Converts a parsed feed entry into the application's common article model.
     ///
-    /// Missing optional feed fields are replaced with explicit fallback values.
+    /// Missing optional feed fields remain `None`; a summary is used only when
+    /// the full content body is unavailable.
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
         crate::article::Article {
             id: format!("{}::{}", self.id, entry.id),
-            title: entry
-                .title
-                .as_ref()
-                .map_or("No title".to_string(), |t| t.content.clone()),
+            title: entry.title.as_ref().map(|title| title.content.clone()),
             author: entry.authors.first().map(|a| a.name.clone()),
             published_at: entry.published,
-            url: entry
-                .links
-                .first()
-                .map_or_else(|| "".into(), |l| l.href.clone()),
+            url: entry.links.first().map(|link| link.href.clone()),
             content: entry
                 .content
                 .as_ref()
-                .map_or("No content".to_string(), |c| {
-                    c.body.as_ref().map_or("No body".to_string(), |b| b.clone())
+                .and_then(|content| content.body.clone())
+                .or_else(|| {
+                    entry
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.content.clone())
                 }),
             source: self.source,
         }
@@ -172,31 +171,26 @@ mod tests {
 
         let article = crate::article::Article {
             id: format!("{}::{}", feeds[0].id, jupiter.id),
-            title: jupiter
-                .title
-                .as_ref()
-                .map_or("No title".to_string(), |t| t.content.clone()),
+            title: jupiter.title.as_ref().map(|title| title.content.clone()),
             author: jupiter.authors.first().map(|a| a.name.clone()),
             published_at: jupiter.published,
-            url: jupiter
-                .links
-                .first()
-                .map_or_else(|| "".into(), |l| l.href.clone()),
+            url: jupiter.links.first().map(|link| link.href.clone()),
             content: jupiter
                 .content
                 .as_ref()
-                .map_or("No content".to_string(), |c| {
-                    c.body.as_ref().map_or("No body".to_string(), |b| b.clone())
+                .and_then(|content| content.body.clone())
+                .or_else(|| {
+                    jupiter
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.content.clone())
                 }),
             source: crate::article::Source::Substack,
         };
         assert_eq!(article.id, format!("{}::{}", feeds[0].id, jupiter.id));
         assert_eq!(
-            article.title,
-            jupiter
-                .title
-                .as_ref()
-                .map_or("No title".to_string(), |t| t.content.clone())
+            article.title.as_deref(),
+            jupiter.title.as_ref().map(|title| title.content.as_str())
         );
         assert_eq!(
             article.author,
@@ -204,11 +198,8 @@ mod tests {
         );
         assert_eq!(article.published_at, jupiter.published.clone());
         assert_eq!(
-            article.url,
-            jupiter
-                .links
-                .first()
-                .map_or_else(|| "".into(), |l| l.href.clone())
+            article.url.as_deref(),
+            jupiter.links.first().map(|link| link.href.as_str())
         );
         assert_eq!(article.source, crate::article::Source::Substack);
     }
@@ -231,12 +222,22 @@ mod tests {
 
         let article = feed.article_from_entry(entry);
         assert_eq!(article.id, "carnet-du-ciel::substack-astronomie-1");
-        assert_eq!(article.title, "Repérer Jupiter sans télescope");
+        assert_eq!(
+            article.title.as_deref(),
+            Some("Repérer Jupiter sans télescope")
+        );
         assert_eq!(article.author, None);
         assert_eq!(article.published_at, entry.published.clone());
         assert_eq!(
-            article.url,
-            "https://carnet-du-ciel.example/p/reperer-jupiter"
+            article.url.as_deref(),
+            Some("https://carnet-du-ciel.example/p/reperer-jupiter")
+        );
+        assert_eq!(
+            article.content.as_deref(),
+            entry
+                .content
+                .as_ref()
+                .and_then(|content| content.body.as_deref())
         );
         assert_eq!(article.source, crate::article::Source::Substack);
     }
@@ -252,11 +253,8 @@ mod tests {
         for (article, entry) in articles.iter().zip(feed.entries.iter()) {
             assert_eq!(article.id, format!("{}::{}", feed.id, entry.id));
             assert_eq!(
-                article.title,
-                entry
-                    .title
-                    .as_ref()
-                    .map_or("No title".to_string(), |t| t.content.clone())
+                article.title.as_deref(),
+                entry.title.as_ref().map(|title| title.content.as_str())
             );
             assert_eq!(
                 article.author,
@@ -264,11 +262,8 @@ mod tests {
             );
             assert_eq!(article.published_at, entry.published.clone());
             assert_eq!(
-                article.url,
-                entry
-                    .links
-                    .first()
-                    .map_or_else(|| "".into(), |l| l.href.clone())
+                article.url.as_deref(),
+                entry.links.first().map(|link| link.href.as_str())
             );
             assert_eq!(article.source, feed.source);
         }
@@ -301,5 +296,48 @@ mod tests {
         assert_eq!(first_article.id, "first::substack-astronomie-1");
         assert_eq!(second_article.id, "second::substack-astronomie-1");
         assert_ne!(first_article.id, second_article.id);
+    }
+
+    /// Verifies that the entry summary is used when full content is unavailable.
+    #[test]
+    fn article_uses_summary_when_content_is_missing() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        let expected_summary = entry.summary.as_ref().unwrap().content.clone();
+        entry.content = None;
+
+        let article = feed.article_from_entry(&entry);
+
+        assert_eq!(article.content, Some(expected_summary));
+    }
+
+    /// Verifies that the entry summary replaces content with no inline body.
+    #[test]
+    fn article_uses_summary_when_content_body_is_missing() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        let expected_summary = entry.summary.as_ref().unwrap().content.clone();
+        entry.content.as_mut().unwrap().body = None;
+
+        let article = feed.article_from_entry(&entry);
+
+        assert_eq!(article.content, Some(expected_summary));
+    }
+
+    /// Verifies that absent display fields remain explicit in the article model.
+    #[test]
+    fn article_preserves_missing_display_fields() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        entry.title = None;
+        entry.links.clear();
+        entry.content = None;
+        entry.summary = None;
+
+        let article = feed.article_from_entry(&entry);
+
+        assert_eq!(article.title, None);
+        assert_eq!(article.url, None);
+        assert_eq!(article.content, None);
     }
 }

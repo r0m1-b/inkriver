@@ -194,10 +194,12 @@ pub fn format_article_summary(article: &Article) -> String {
         .published_at
         .map(|date| date.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "unknown date".to_string());
+    let title = article.title.as_deref().unwrap_or("(untitled)");
+    let url = article.url.as_deref().unwrap_or("(no URL)");
 
     format!(
         "{published_at} | {:?} | {} | {}",
-        article.source, article.title, article.url
+        article.source, title, url
     )
 }
 
@@ -541,5 +543,17 @@ mod tests {
             summary,
             "2026-07-06 | Substack | Repérer Jupiter sans télescope | https://carnet-du-ciel.example/p/reperer-jupiter"
         );
+    }
+
+    /// Verifies that the CLI alone supplies labels for missing display fields.
+    #[test]
+    fn format_article_with_missing_display_fields() {
+        let mut article = mock_feeds()[0].get_articles().remove(0);
+        article.title = None;
+        article.url = None;
+
+        let summary = format_article_summary(&article);
+
+        assert_eq!(summary, "2026-07-06 | Substack | (untitled) | (no URL)");
     }
 }
