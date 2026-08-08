@@ -145,7 +145,9 @@ mod tests {
     /// Verifies refresh, local state, deduplication, and feed removal work together.
     #[tokio::test]
     async fn refresh_preserves_history_and_local_state_when_feed_is_removed() {
-        let storage = Storage::open_in_memory().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("reader.db");
+        let storage = Storage::open(&database_path).await.unwrap();
         let complete_config = Config {
             feeds: vec![
                 feed("astronomy", Platform::Substack),
@@ -163,7 +165,9 @@ mod tests {
             .unwrap();
         storage.set_read(&bread.id, true).await.unwrap();
         storage.set_favorite(&bread.id, true).await.unwrap();
+        storage.close().await;
 
+        let storage = Storage::open(&database_path).await.unwrap();
         let second_collection = CollectionReport {
             articles: vec![astronomy, bread.clone()],
             errors: Vec::new(),
@@ -172,7 +176,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(storage.list_articles().await.unwrap().len(), 2);
+        storage.close().await;
 
+        let storage = Storage::open(&database_path).await.unwrap();
         let reduced_config = Config {
             feeds: vec![feed("astronomy", Platform::Substack)],
         };
@@ -200,5 +206,6 @@ mod tests {
             .unwrap();
         assert!(stored_bread.is_read);
         assert!(stored_bread.is_favorite);
+        storage.close().await;
     }
 }
