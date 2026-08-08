@@ -38,11 +38,22 @@ impl Feed {
 
     /// Converts a parsed feed entry into the application's common article model.
     ///
-    /// Missing optional feed fields remain `None`; a summary is used only when
-    /// the full content body is unavailable.
+    /// The feed entry ID is namespaced by the configured feed ID, with the
+    /// entry URL as a fallback. Missing optional display fields remain `None`;
+    /// a summary is used only when the full content body is unavailable.
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
+        let entry_identity = if entry.id.trim().is_empty() {
+            entry
+                .links
+                .first()
+                .map(|link| format!("url::{}", link.href))
+                .unwrap_or_else(|| "unidentified".to_string())
+        } else {
+            entry.id.clone()
+        };
+
         crate::article::Article {
-            id: format!("{}::{}", self.id, entry.id),
+            id: format!("{}::{entry_identity}", self.id),
             title: entry.title.as_ref().map(|title| title.content.clone()),
             author: entry.authors.first().map(|a| a.name.clone()),
             published_at: entry.published,
@@ -296,6 +307,21 @@ mod tests {
         assert_eq!(first_article.id, "first::substack-astronomie-1");
         assert_eq!(second_article.id, "second::substack-astronomie-1");
         assert_ne!(first_article.id, second_article.id);
+    }
+
+    /// Verifies that an entry URL provides a stable identity when its ID is absent.
+    #[test]
+    fn article_id_falls_back_to_entry_url() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        entry.id.clear();
+
+        let article = feed.article_from_entry(&entry);
+
+        assert_eq!(
+            article.id,
+            "carnet-du-ciel::url::https://carnet-du-ciel.example/p/reperer-jupiter"
+        );
     }
 
     /// Verifies that the entry summary is used when full content is unavailable.

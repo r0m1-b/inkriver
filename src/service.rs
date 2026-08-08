@@ -3,6 +3,7 @@ use crate::config::{Config, FeedConfig, Platform};
 use crate::feed::Feed;
 use crate::http;
 use feed_rs::parser;
+use std::collections::HashSet;
 use std::fmt;
 
 /// Identifies the operation that failed while loading a feed.
@@ -118,10 +119,15 @@ where
     F: FnOnce(&FeedConfig) -> Result<String, FeedLoadError>,
 {
     let content = load_content(feed_config)?;
-    let raw_feed = parser::parse(content.as_bytes()).map_err(|error| FeedLoadError {
-        stage: FeedLoadStage::FeedParsing,
-        message: error.to_string(),
-    })?;
+    let feed_parser = parser::Builder::new()
+        .base_uri(Some(&feed_config.url))
+        .build();
+    let raw_feed = feed_parser
+        .parse(content.as_bytes())
+        .map_err(|error| FeedLoadError {
+            stage: FeedLoadStage::FeedParsing,
+            message: error.to_string(),
+        })?;
 
     build_feed_from_data(raw_feed, &feed_config.id, feed_config.platform).map_err(|message| {
         FeedLoadError {
@@ -167,10 +173,17 @@ where
 {
     let mut articles = Vec::new();
     let mut errors = Vec::new();
+    let mut article_ids = HashSet::new();
 
     for feed_config in &config.feeds {
         match load_feed(feed_config) {
-            Ok(feed) => articles.extend(feed.get_articles()),
+            Ok(feed) => {
+                for article in feed.get_articles() {
+                    if article_ids.insert(article.id.clone()) {
+                        articles.push(article);
+                    }
+                }
+            }
             Err(error) => errors.push(FeedCollectionError {
                 feed_id: feed_config.id.clone(),
                 feed_url: feed_config.url.clone(),
@@ -237,6 +250,19 @@ mod tests {
           <channel>
             <title>Test astronomy feed</title>
             <description>A feed without a link.</description>
+          </channel>
+        </rss>"#;
+
+    const RSS_WITHOUT_ENTRY_ID_OR_LINK: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Test astronomy feed</title>
+            <link>https://astronomy.example</link>
+            <description>A feed whose entry has no GUID or link.</description>
+            <item>
+              <title>Finding Mars without an entry link</title>
+              <description>Mars has a recognizable orange hue.</description>
+            </item>
           </channel>
         </rss>"#;
 
@@ -332,6 +358,26 @@ mod tests {
 
         assert_eq!(error.stage, FeedLoadStage::FeedMetadata);
         assert_eq!(error.message, "This RSS feed has no link");
+    }
+
+    /// Verifies that generated entry identities stay stable across refreshes.
+    #[test]
+    fn load_feed_generates_stable_id_without_entry_guid_or_link() {
+        let feed_config = &test_config().feeds[0];
+
+        let first_feed = load_feed_with_content_loader(feed_config, |_feed_config| {
+            Ok(RSS_WITHOUT_ENTRY_ID_OR_LINK.to_string())
+        })
+        .unwrap();
+        let second_feed = load_feed_with_content_loader(feed_config, |_feed_config| {
+            Ok(RSS_WITHOUT_ENTRY_ID_OR_LINK.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            first_feed.get_articles()[0].id,
+            second_feed.get_articles()[0].id
+        );
     }
 
     /// Verifies that the HTTP loader rejects an invalid URL without network IO.
@@ -475,6 +521,39 @@ mod tests {
                 },
             }]
         );
+    }
+
+    /// Verifies that duplicate entries from one feed produce one aggregated article.
+    #[test]
+    fn collect_articles_deduplicates_same_article_identity() {
+        let config = Config {
+            feeds: vec![FeedConfig {
+                id: "astronomy".to_string(),
+                platform: Platform::Substack,
+                url: "https://astronomy.example/feed".to_string(),
+            }],
+        };
+        let source_feed = &mock_feeds()[0];
+        let duplicate_entry = source_feed.entries[0].clone();
+        let mut feed = Some(Feed::new(
+            "astronomy".to_string(),
+            source_feed.title.clone(),
+            source_feed.link.clone(),
+            source_feed.description.clone(),
+            source_feed.source,
+            vec![duplicate_entry.clone(), duplicate_entry],
+        ));
+
+        let report = collect_articles_with_loader(&config, |_feed_config| {
+            feed.take().ok_or_else(|| FeedLoadError {
+                stage: FeedLoadStage::FeedMetadata,
+                message: "Mock feed already loaded".to_string(),
+            })
+        });
+
+        assert!(report.errors.is_empty());
+        assert_eq!(report.articles.len(), 1);
+        assert_eq!(report.articles[0].id, "astronomy::substack-astronomie-1");
     }
 
     /// Verifies that the public collector handles an empty configuration.
