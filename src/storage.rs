@@ -248,6 +248,44 @@ impl Storage {
             .collect()
     }
 
+    /// Changes the read state of an article.
+    ///
+    /// Returns `true` when the article exists and was targeted, even if its
+    /// stored value was already identical.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot execute the update.
+    pub async fn set_read(&self, article_id: &str, is_read: bool) -> Result<bool> {
+        let result = sqlx::query("UPDATE articles SET is_read = ? WHERE id = ?")
+            .bind(is_read)
+            .bind(article_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("Impossible de modifier l'état lu de {article_id:?}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Changes the favorite state of an article.
+    ///
+    /// Returns `true` when the article exists and was targeted, even if its
+    /// stored value was already identical.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot execute the update.
+    pub async fn set_favorite(&self, article_id: &str, is_favorite: bool) -> Result<bool> {
+        let result = sqlx::query("UPDATE articles SET is_favorite = ? WHERE id = ?")
+            .bind(is_favorite)
+            .bind(article_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("Impossible de modifier le favori {article_id:?}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     #[cfg(test)]
     pub(crate) async fn open_in_memory() -> Result<Self> {
         let options = SqliteConnectOptions::new()
@@ -551,5 +589,72 @@ mod tests {
 
         assert!(storage.upsert_articles(&[valid, invalid]).await.is_err());
         assert!(storage.list_articles().await.unwrap().is_empty());
+    }
+
+    /// Verifies read state can be enabled, disabled, and detects an unknown article.
+    #[tokio::test]
+    async fn set_read_updates_existing_article_only() {
+        let storage = storage_with_feed().await;
+        let article = article("astronomy::jupiter", "astronomy", None);
+        storage.upsert_articles(&[article]).await.unwrap();
+
+        assert!(storage.set_read("astronomy::jupiter", true).await.unwrap());
+        assert!(storage.list_articles().await.unwrap()[0].is_read);
+
+        assert!(storage.set_read("astronomy::jupiter", false).await.unwrap());
+        assert!(!storage.list_articles().await.unwrap()[0].is_read);
+        assert!(!storage.set_read("missing", true).await.unwrap());
+    }
+
+    /// Verifies favorite state can be enabled, disabled, and detects an unknown article.
+    #[tokio::test]
+    async fn set_favorite_updates_existing_article_only() {
+        let storage = storage_with_feed().await;
+        let article = article("astronomy::jupiter", "astronomy", None);
+        storage.upsert_articles(&[article]).await.unwrap();
+
+        assert!(
+            storage
+                .set_favorite("astronomy::jupiter", true)
+                .await
+                .unwrap()
+        );
+        assert!(storage.list_articles().await.unwrap()[0].is_favorite);
+
+        assert!(
+            storage
+                .set_favorite("astronomy::jupiter", false)
+                .await
+                .unwrap()
+        );
+        assert!(!storage.list_articles().await.unwrap()[0].is_favorite);
+        assert!(!storage.set_favorite("missing", true).await.unwrap());
+    }
+
+    /// Verifies refreshed remote data never resets either local state flag.
+    #[tokio::test]
+    async fn upsert_articles_preserves_read_and_favorite_states() {
+        let storage = storage_with_feed().await;
+        let original = article("astronomy::jupiter", "astronomy", None);
+        storage
+            .upsert_articles(std::slice::from_ref(&original))
+            .await
+            .unwrap();
+        storage.set_read("astronomy::jupiter", true).await.unwrap();
+        storage
+            .set_favorite("astronomy::jupiter", true)
+            .await
+            .unwrap();
+
+        let refreshed = Article {
+            title: Some("A refreshed title".to_string()),
+            ..original
+        };
+        storage.upsert_articles(&[refreshed]).await.unwrap();
+
+        let stored = &storage.list_articles().await.unwrap()[0];
+        assert_eq!(stored.article.title.as_deref(), Some("A refreshed title"));
+        assert!(stored.is_read);
+        assert!(stored.is_favorite);
     }
 }
