@@ -1,3 +1,4 @@
+use crate::article::Source;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -22,6 +23,16 @@ pub enum Platform {
     Medium,
     Substack,
     Other,
+}
+
+impl From<Platform> for Source {
+    fn from(platform: Platform) -> Self {
+        match platform {
+            Platform::Medium => Self::Medium,
+            Platform::Substack => Self::Substack,
+            Platform::Other => Self::Other,
+        }
+    }
 }
 
 /// Validates identifiers used to namespace articles from configured feeds.
@@ -97,6 +108,20 @@ mod tests {
         platform = "medium"
         url = "https://medium.com/feed/@bread"
     "#;
+
+    /// Verifies the exhaustive conversion from configured platforms to domain sources.
+    #[test]
+    fn convert_platforms_to_sources() {
+        let cases = [
+            (Platform::Medium, crate::article::Source::Medium),
+            (Platform::Substack, crate::article::Source::Substack),
+            (Platform::Other, crate::article::Source::Other),
+        ];
+
+        for (platform, expected_source) in cases {
+            assert_eq!(crate::article::Source::from(platform), expected_source);
+        }
+    }
 
     /// Verifies that a valid TOML document produces the expected feed configuration.
     #[test]

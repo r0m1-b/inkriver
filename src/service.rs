@@ -91,11 +91,7 @@ fn build_feed_from_data(
         .map(|description| description.content)
         .unwrap_or_default();
 
-    let source = match platform {
-        Platform::Medium => Source::Medium,
-        Platform::Substack => Source::Substack,
-        Platform::Other => Source::Other,
-    };
+    let source = Source::from(platform);
 
     Ok(Feed::new(
         feed_id.to_string(),
