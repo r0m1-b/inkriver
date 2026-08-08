@@ -1,5 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -23,6 +24,28 @@ pub enum Platform {
     Other,
 }
 
+/// Validates identifiers used to namespace articles from configured feeds.
+///
+/// # Errors
+///
+/// Returns an error when an identifier is blank or already used by another
+/// configured feed.
+fn validate_feed_ids(config: &Config) -> Result<()> {
+    let mut feed_ids = HashSet::new();
+
+    for feed in &config.feeds {
+        if feed.id.trim().is_empty() {
+            bail!("Feed id must not be blank");
+        }
+
+        if !feed_ids.insert(feed.id.as_str()) {
+            bail!("Duplicate feed id: {}", feed.id);
+        }
+    }
+
+    Ok(())
+}
+
 /// Loads and parses a configuration by using the supplied file-reading function.
 ///
 /// The injected reader keeps parsing independent from the filesystem and makes
@@ -41,6 +64,8 @@ where
 
     let config = toml::from_str(&content)
         .with_context(|| format!("Invalid TOML format in {}", path.display()))?;
+
+    validate_feed_ids(&config)?;
 
     Ok(config)
 }
@@ -126,5 +151,48 @@ mod tests {
         let error = result.unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("Invalid TOML format"));
+    }
+
+    /// Verifies that empty and whitespace-only feed identifiers are rejected.
+    #[test]
+    fn reject_blank_feed_ids() {
+        for id in ["", "   "] {
+            let content = format!(
+                r#"
+                    [[feeds]]
+                    id = "{id}"
+                    platform = "substack"
+                    url = "https://astronomy.example/feed"
+                "#
+            );
+            let fake_reader = |_path: &Path| Ok(content);
+
+            let error = load_config_from_reader(Path::new("blank-id.toml"), fake_reader)
+                .expect_err("a blank feed id should be rejected");
+
+            assert!(error.to_string().contains("Feed id must not be blank"));
+        }
+    }
+
+    /// Verifies that two configured feeds cannot share the same identifier.
+    #[test]
+    fn reject_duplicate_feed_ids() {
+        let content = r#"
+            [[feeds]]
+            id = "astronomy"
+            platform = "substack"
+            url = "https://astronomy.example/feed"
+
+            [[feeds]]
+            id = "astronomy"
+            platform = "medium"
+            url = "https://medium.com/feed/@astronomy"
+        "#;
+        let fake_reader = |_path: &Path| Ok(content.to_string());
+
+        let error = load_config_from_reader(Path::new("duplicate-id.toml"), fake_reader)
+            .expect_err("duplicate feed ids should be rejected");
+
+        assert!(error.to_string().contains("Duplicate feed id: astronomy"));
     }
 }
