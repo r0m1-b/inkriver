@@ -2,4 +2,4 @@
 /reader.db
 /reader.db-shm
 /reader.db-wal
-target
+target/
