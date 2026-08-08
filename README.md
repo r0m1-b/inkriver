@@ -1,0 +1,293 @@
+# Reader
+
+Reader est un lecteur de flux RSS/Atom écrit en Rust. Son objectif est de réunir
+les abonnements Medium, Substack et les autres flux compatibles dans une même
+chronologie, puis de rendre les articles disponibles hors ligne.
+
+Le projet est actuellement un prototype en ligne de commande. Le cœur Rust et
+le stockage SQLite sont conçus pour être réutilisés plus tard dans une interface
+Tauri sous Linux et Android.
+
+## Fonctionnalités actuelles
+
+- chargement de plusieurs flux depuis `feeds.toml` ;
+- prise en charge de Medium, Substack et des autres flux RSS/Atom ;
+- téléchargement asynchrone avec `reqwest` et Tokio ;
+- nettoyage du HTML reçu avant son stockage ;
+- déduplication des articles avec un identifiant propre à chaque flux ;
+- stockage local dans SQLite avec migrations automatiques ;
+- conservation des articles lorsqu'un abonnement est retiré ;
+- états locaux « lu » et « favori » dans le cœur Rust ;
+- affichage des articles du plus récent au plus ancien ;
+- lecture du cache même lorsque certains flux sont indisponibles.
+
+## Prérequis sous Ubuntu
+
+Le projet nécessite :
+
+- une installation récente de Rust et Cargo, de préférence avec
+  [rustup](https://rustup.rs/) ;
+- un compilateur C pour construire la copie embarquée de SQLite ;
+- Git pour récupérer le dépôt.
+
+Les outils système peuvent être installés avec :
+
+```bash
+sudo apt update
+sudo apt install build-essential git
+```
+
+SQLite est compilé avec l'application. Il n'est pas nécessaire d'installer un
+serveur SQLite ni les bibliothèques de développement du système.
+
+Le programme `sqlite3` est toutefois pratique pour inspecter ou sauvegarder la
+base manuellement :
+
+```bash
+sudo apt install sqlite3
+```
+
+## Installation du projet
+
+Depuis une copie locale du dépôt :
+
+```bash
+cargo build
+```
+
+Cargo télécharge les crates déclarées dans `Cargo.toml` et produit le binaire de
+développement dans `target/debug/reader`.
+
+Pour une compilation optimisée :
+
+```bash
+cargo build --release
+```
+
+Le binaire se trouve alors dans `target/release/reader`.
+
+## Configurer les abonnements
+
+Créer un fichier `feeds.toml` à la racine du projet :
+
+```toml
+[[feeds]]
+id = "mon-substack"
+platform = "substack"
+url = "https://exemple.substack.com/feed"
+
+[[feeds]]
+id = "mon-medium"
+platform = "medium"
+url = "https://medium.com/feed/@exemple"
+
+[[feeds]]
+id = "autre-blog"
+platform = "other"
+url = "https://example.org/feed.xml"
+```
+
+Règles de configuration :
+
+- chaque `id` doit être non vide et unique ;
+- `platform` accepte `medium`, `substack` ou `other`, en minuscules ;
+- `url` doit désigner directement un flux RSS ou Atom public ;
+- deux abonnements actifs ne peuvent pas utiliser exactement la même URL.
+
+`feeds.toml` est volontairement ignoré par Git : il représente la configuration
+personnelle du développeur.
+
+## Lancer Reader
+
+```bash
+cargo run
+```
+
+À chaque lancement, le CLI :
+
+1. lit `feeds.toml` ;
+2. ouvre ou crée `reader.db` ;
+3. applique les migrations SQLite manquantes ;
+4. importe la liste courante des abonnements ;
+5. télécharge les flux ;
+6. insère ou met à jour les articles ;
+7. affiche tous les articles stockés, du plus récent au plus ancien.
+
+Une erreur sur un flux est écrite sur la sortie d'erreur, mais elle n'efface pas
+les articles déjà enregistrés. Les autres flux continuent d'être traités.
+
+Le CLI actuel utilise des chemins déterminés à la compilation et ancrés à la
+racine du projet. Il s'agit d'un comportement de développement, pas encore d'une
+installation système portable.
+
+## Base de données SQLite
+
+### Installation et création
+
+Il n'existe aucune étape d'installation séparée pour la base. Au premier
+`cargo run`, SQLx crée automatiquement à la racine du projet :
+
+```text
+reader.db
+```
+
+Les migrations présentes dans `migrations/` sont intégrées au binaire puis
+appliquées à l'ouverture. La base contient actuellement :
+
+- `feeds` : abonnements, plateforme, URL et état actif ;
+- `articles` : contenu distant, relation au flux, état lu et favori ;
+- `_sqlx_migrations` : migrations déjà appliquées par SQLx.
+
+SQLite peut aussi créer temporairement `reader.db-wal` et `reader.db-shm`. Ces
+fichiers, comme la base principale, sont ignorés par Git.
+
+### Inspecter la base
+
+Avec le client optionnel `sqlite3` :
+
+```bash
+sqlite3 reader.db ".tables"
+sqlite3 reader.db ".schema feeds"
+sqlite3 reader.db ".schema articles"
+```
+
+Quelques requêtes de diagnostic en lecture seule :
+
+```bash
+sqlite3 -header -column reader.db \
+  "SELECT id, platform, is_active, url FROM feeds ORDER BY id;"
+
+sqlite3 -header -column reader.db \
+  "SELECT id, title, published_at, is_read, is_favorite FROM articles ORDER BY published_at DESC LIMIT 20;"
+```
+
+Il vaut mieux éviter de modifier manuellement ces tables : l'API Rust garantit
+les contraintes et préserve les états locaux pendant les rafraîchissements.
+
+### Sauvegarder la base
+
+Après avoir arrêté Reader, utiliser la commande de sauvegarde SQLite :
+
+```bash
+sqlite3 reader.db ".backup 'reader-backup.db'"
+```
+
+Une simple copie est également possible lorsque Reader et tout client SQLite
+sont fermés :
+
+```bash
+cp reader.db reader-backup.db
+```
+
+Le fichier contient les articles, les abonnements importés et les états lu et
+favori. `feeds.toml` doit être sauvegardé séparément.
+
+### Réinitialiser complètement la base
+
+Attention : cette opération supprime l'historique, les favoris et les états de
+lecture. Arrêter Reader, effectuer éventuellement une sauvegarde, puis exécuter
+depuis la racine du projet :
+
+```bash
+rm -f reader.db reader.db-shm reader.db-wal
+cargo run
+```
+
+Le lancement suivant recrée une base vide, réapplique toutes les migrations,
+importe `feeds.toml` et télécharge les articles encore présents dans les flux.
+Les anciens articles qui ne figurent plus dans les flux ne pourront pas être
+récupérés sans sauvegarde.
+
+### Retirer ou réactiver un abonnement
+
+Retirer une entrée de `feeds.toml`, puis relancer Reader, marque l'abonnement
+comme inactif. Ses articles, favoris et états de lecture restent dans SQLite.
+
+Remettre ultérieurement le même `id` dans `feeds.toml` réactive l'abonnement et
+met à jour son URL et sa plateforme si nécessaire.
+
+### Faire évoluer le schéma
+
+Ne pas modifier une migration déjà appliquée. Pour faire évoluer la base :
+
+1. ajouter un nouveau fichier SQL versionné dans `migrations/` ;
+2. conserver les migrations précédentes ;
+3. compiler et exécuter les tests ;
+4. relancer Reader pour appliquer la nouvelle migration.
+
+Le script `build.rs` demande à Cargo de reconstruire le binaire lorsque le
+dossier des migrations change.
+
+## Développement et qualité
+
+Commandes usuelles :
+
+```bash
+cargo fmt
+cargo check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+Les tests de collecte utilisent des contenus injectés et des fixtures locales.
+Les tests SQLite utilisent des bases en mémoire ou des fichiers temporaires :
+ils ne modifient pas `reader.db`.
+
+Organisation principale :
+
+```text
+src/config.rs   lecture et validation de feeds.toml
+src/http.rs     téléchargement HTTP asynchrone
+src/feed.rs     conversion RSS/Atom vers le modèle commun
+src/service.rs  collecte, déduplication et tri
+src/storage.rs  stockage SQLite et états locaux
+src/refresh.rs  orchestration import → collecte → stockage
+src/main.rs     point d'entrée du CLI
+migrations/     évolution versionnée du schéma SQLite
+```
+
+## Limites actuelles
+
+- le programme rafraîchit automatiquement les flux à chaque lancement ;
+- le CLI ne permet pas encore de sélectionner et lire un article complet ;
+- les méthodes Rust pour marquer un article comme lu ou favori existent, mais
+  ne sont pas encore exposées par une commande CLI ;
+- les contenus nécessitant une connexion ou un abonnement payant ne sont pas
+  pris en charge ;
+- `reader.db` se trouve encore dans le dépôt de développement.
+
+L'étape suivante consiste à stabiliser les commandes du CLI avant d'ajouter
+l'interface Tauri. Dans l'application installable, SQLite deviendra la source de
+vérité et la base sera placée dans le répertoire `AppData` propre au bundle
+`io.github.r0m1-b.reader`.
+
+La feuille de route détaillée est disponible dans [TODO.md](TODO.md).
+
+## Dépannage rapide
+
+### `feeds.toml` est introuvable
+
+Créer le fichier à la racine du projet. Le chemin ne dépend pas du répertoire
+depuis lequel le binaire est lancé.
+
+### La configuration TOML est refusée
+
+Vérifier les guillemets, les blocs `[[feeds]]`, les identifiants uniques et les
+valeurs autorisées de `platform`.
+
+### Un flux échoue
+
+Vérifier que son URL retourne directement du RSS ou de l'Atom. Les articles déjà
+stockés restent affichés même lorsque le serveur est indisponible.
+
+### La base est verrouillée
+
+Fermer les autres processus `reader` et les sessions `sqlite3` ouvertes sur
+`reader.db`, puis réessayer. Ne supprimer les fichiers de la base qu'après avoir
+arrêté ces processus.
+
+### Une migration échoue
+
+Conserver le message d'erreur, sauvegarder la base et vérifier l'ordre ainsi que
+le contenu des fichiers dans `migrations/`. En développement seulement, une
+réinitialisation complète permet de repartir d'un schéma vierge.
