@@ -67,7 +67,8 @@ impl Feed {
                         .summary
                         .as_ref()
                         .map(|summary| summary.content.clone())
-                }),
+                })
+                .map(|content| ammonia::clean(&content)),
             source: self.source,
         }
     }
@@ -348,6 +349,44 @@ mod tests {
         let article = feed.article_from_entry(&entry);
 
         assert_eq!(article.content, Some(expected_summary));
+    }
+
+    /// Verifies that unsafe HTML is removed from a full article body.
+    #[test]
+    fn article_sanitizes_full_html_content() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        entry.content.as_mut().unwrap().body = Some(
+            r#"<p onclick="alert('event')">Safe <strong>text</strong><script>alert('script')</script><a href="javascript:alert('url')">bad link</a><a href="https://example.com/read">read</a></p>"#
+                .to_string(),
+        );
+
+        let article = feed.article_from_entry(&entry);
+        let content = article.content.unwrap();
+
+        assert!(!content.contains("<script"));
+        assert!(!content.contains("onclick"));
+        assert!(!content.contains("javascript:"));
+        assert!(content.contains("<strong>text</strong>"));
+        assert!(content.contains("href=\"https://example.com/read\""));
+    }
+
+    /// Verifies that fallback summaries receive the same HTML sanitization.
+    #[test]
+    fn article_sanitizes_summary_fallback() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        entry.content = None;
+        entry.summary.as_mut().unwrap().content =
+            r#"<p>Safe summary<img src="invalid" onerror="alert('image')"><style>body { display: none; }</style></p>"#
+                .to_string();
+
+        let article = feed.article_from_entry(&entry);
+        let content = article.content.unwrap();
+
+        assert!(!content.contains("onerror"));
+        assert!(!content.contains("<style"));
+        assert!(content.contains("Safe summary"));
     }
 
     /// Verifies that absent display fields remain explicit in the article model.
