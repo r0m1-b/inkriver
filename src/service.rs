@@ -106,21 +106,18 @@ fn build_feed_from_data(
     ))
 }
 
-/// Downloads and parses one configured feed.
+/// Loads and parses one configured feed with an injected content loader.
 ///
-/// # Errors
-///
-/// Returns an error when the request, response reading, RSS parsing, or feed
-/// model conversion fails.
-fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, FeedLoadError> {
-    let response = http::check_feed_url(&feed_config.url).map_err(|message| FeedLoadError {
-        stage: FeedLoadStage::HttpRequest,
-        message,
-    })?;
-    let content = response.text().map_err(|error| FeedLoadError {
-        stage: FeedLoadStage::ResponseBody,
-        message: error.to_string(),
-    })?;
+/// Injecting at the response-content boundary exercises parsing and metadata
+/// validation in tests without performing network requests.
+fn load_feed_with_content_loader<F>(
+    feed_config: &FeedConfig,
+    load_content: F,
+) -> Result<Feed, FeedLoadError>
+where
+    F: FnOnce(&FeedConfig) -> Result<String, FeedLoadError>,
+{
+    let content = load_content(feed_config)?;
     let raw_feed = parser::parse(content.as_bytes()).map_err(|error| FeedLoadError {
         stage: FeedLoadStage::FeedParsing,
         message: error.to_string(),
@@ -131,6 +128,26 @@ fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, FeedLoadError> 
             stage: FeedLoadStage::FeedMetadata,
             message,
         }
+    })
+}
+
+/// Downloads and parses one configured feed.
+///
+/// # Errors
+///
+/// Returns an error when the request, response reading, RSS parsing, or feed
+/// model conversion fails.
+fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, FeedLoadError> {
+    load_feed_with_content_loader(feed_config, |feed_config| {
+        let response = http::check_feed_url(&feed_config.url).map_err(|message| FeedLoadError {
+            stage: FeedLoadStage::HttpRequest,
+            message,
+        })?;
+
+        response.text().map_err(|error| FeedLoadError {
+            stage: FeedLoadStage::ResponseBody,
+            message: error.to_string(),
+        })
     })
 }
 
@@ -205,6 +222,22 @@ mod tests {
           </channel>
         </rss>"#;
 
+    const RSS_WITHOUT_TITLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <link>https://astronomy.example</link>
+            <description>A feed without a title.</description>
+          </channel>
+        </rss>"#;
+
+    const RSS_WITHOUT_LINK: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Test astronomy feed</title>
+            <description>A feed without a link.</description>
+          </channel>
+        </rss>"#;
+
     fn test_config() -> Config {
         Config {
             feeds: vec![
@@ -235,6 +268,68 @@ mod tests {
         assert_eq!(feed.description, "A test feed about the night sky.");
         assert_eq!(feed.source, Source::Substack);
         assert_eq!(feed.entries.len(), 1);
+    }
+
+    /// Verifies the complete loading pipeline from injected RSS content.
+    #[test]
+    fn load_feed_from_valid_injected_content() {
+        let feed_config = &test_config().feeds[0];
+
+        let feed =
+            load_feed_with_content_loader(feed_config, |_feed_config| Ok(SIMPLE_RSS.to_string()))
+                .unwrap();
+
+        assert_eq!(feed.id, "astronomy");
+        assert_eq!(feed.title, "Test astronomy feed");
+        assert_eq!(feed.source, Source::Substack);
+        assert_eq!(feed.entries.len(), 1);
+    }
+
+    /// Verifies that malformed injected XML is reported as a parsing failure.
+    #[test]
+    fn load_feed_rejects_invalid_injected_xml() {
+        let feed_config = &test_config().feeds[0];
+
+        let error = match load_feed_with_content_loader(feed_config, |_feed_config| {
+            Ok("<rss><channel>".to_string())
+        }) {
+            Ok(_) => panic!("invalid XML should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage, FeedLoadStage::FeedParsing);
+    }
+
+    /// Verifies that a missing feed title is reported as invalid metadata.
+    #[test]
+    fn load_feed_rejects_injected_content_without_title() {
+        let feed_config = &test_config().feeds[0];
+
+        let error = match load_feed_with_content_loader(feed_config, |_feed_config| {
+            Ok(RSS_WITHOUT_TITLE.to_string())
+        }) {
+            Ok(_) => panic!("a feed without a title should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage, FeedLoadStage::FeedMetadata);
+        assert_eq!(error.message, "This RSS feed has no title");
+    }
+
+    /// Verifies that a missing primary link is reported as invalid metadata.
+    #[test]
+    fn load_feed_rejects_injected_content_without_link() {
+        let feed_config = &test_config().feeds[0];
+
+        let error = match load_feed_with_content_loader(feed_config, |_feed_config| {
+            Ok(RSS_WITHOUT_LINK.to_string())
+        }) {
+            Ok(_) => panic!("a feed without a link should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage, FeedLoadStage::FeedMetadata);
+        assert_eq!(error.message, "This RSS feed has no link");
     }
 
     /// Verifies that the HTTP loader rejects an invalid URL without network IO.
