@@ -373,6 +373,27 @@ mod tests {
         );
     }
 
+    /// Verifies that missing publication dates are always placed after dated articles.
+    #[test]
+    fn sort_articles_places_missing_dates_last() {
+        let mut articles = mock_feeds()[0].get_articles();
+        articles[0].published_at = None;
+        articles[3].published_at = None;
+
+        sort_articles_newest_first(&mut articles);
+
+        assert!(
+            articles[..3]
+                .iter()
+                .all(|article| article.published_at.is_some())
+        );
+        assert!(
+            articles[3..]
+                .iter()
+                .all(|article| article.published_at.is_none())
+        );
+    }
+
     /// Verifies aggregation of two injected feeds without accessing the network.
     #[test]
     fn collect_articles_from_two_loaded_feeds() {
