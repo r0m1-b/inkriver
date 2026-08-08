@@ -10,7 +10,7 @@ pub struct Config {
     pub feeds: Vec<FeedConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FeedConfig {
     pub id: String,
     pub platform: Platform,

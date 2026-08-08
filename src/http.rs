@@ -12,14 +12,14 @@ fn validate_status(status: reqwest::StatusCode) -> Result<(), String> {
     }
 }
 
-/// Downloads a feed URL and returns its response when the HTTP status is successful.
+/// Asynchronously downloads a feed URL and returns its successful response.
 ///
 /// # Errors
 ///
 /// Returns an error when the request cannot be completed or when the server
 /// responds with a non-successful HTTP status.
-pub fn check_feed_url(url: &str) -> Result<reqwest::blocking::Response, String> {
-    let response = reqwest::blocking::get(url).map_err(|error| error.to_string())?;
+pub async fn check_feed_url(url: &str) -> Result<reqwest::Response, String> {
+    let response = reqwest::get(url).await.map_err(|error| error.to_string())?;
 
     validate_status(response.status())?;
 

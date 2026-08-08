@@ -14,9 +14,10 @@ fn default_config_path() -> PathBuf {
 ///
 /// Returns an error when the configuration or any configured feed cannot be
 /// loaded.
-fn main() -> Result<(), String> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), String> {
     let config = config::load_config(&default_config_path()).map_err(|error| error.to_string())?;
-    let report = service::collect_articles(&config);
+    let report = service::collect_articles(&config).await;
 
     for error in &report.errors {
         eprintln!("{error}");

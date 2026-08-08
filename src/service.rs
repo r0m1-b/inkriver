@@ -5,6 +5,7 @@ use crate::http;
 use feed_rs::parser;
 use std::collections::HashSet;
 use std::fmt;
+use std::future::Future;
 
 /// Identifies the operation that failed while loading a feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,24 +134,25 @@ where
     })
 }
 
-/// Downloads and parses one configured feed.
+/// Asynchronously downloads and parses one configured feed.
 ///
 /// # Errors
 ///
 /// Returns an error when the request, response reading, RSS parsing, or feed
 /// model conversion fails.
-fn load_feed_from_http(feed_config: &FeedConfig) -> Result<Feed, FeedLoadError> {
-    load_feed_with_content_loader(feed_config, |feed_config| {
-        let response = http::check_feed_url(&feed_config.url).map_err(|message| FeedLoadError {
+async fn load_feed_from_http(feed_config: FeedConfig) -> Result<Feed, FeedLoadError> {
+    let response = http::check_feed_url(&feed_config.url)
+        .await
+        .map_err(|message| FeedLoadError {
             stage: FeedLoadStage::HttpRequest,
             message,
         })?;
+    let content = response.text().await.map_err(|error| FeedLoadError {
+        stage: FeedLoadStage::ResponseBody,
+        message: error.to_string(),
+    })?;
 
-        response.text().map_err(|error| FeedLoadError {
-            stage: FeedLoadStage::ResponseBody,
-            message: error.to_string(),
-        })
-    })
+    load_feed_with_content_loader(&feed_config, |_feed_config| Ok(content))
 }
 
 /// Sorts articles from newest to oldest, placing undated articles last.
@@ -163,16 +165,17 @@ fn sort_articles_newest_first(articles: &mut [Article]) {
 /// The loader parameter keeps aggregation independent from HTTP and makes the
 /// complete workflow deterministic in unit tests.
 ///
-fn collect_articles_with_loader<F>(config: &Config, mut load_feed: F) -> CollectionReport
+async fn collect_articles_with_loader<F, Fut>(config: &Config, mut load_feed: F) -> CollectionReport
 where
-    F: FnMut(&FeedConfig) -> Result<Feed, FeedLoadError>,
+    F: FnMut(FeedConfig) -> Fut,
+    Fut: Future<Output = Result<Feed, FeedLoadError>>,
 {
     let mut articles = Vec::new();
     let mut errors = Vec::new();
     let mut article_ids = HashSet::new();
 
     for feed_config in &config.feeds {
-        match load_feed(feed_config) {
+        match load_feed(feed_config.clone()).await {
             Ok(feed) => {
                 for article in feed.get_articles() {
                     if article_ids.insert(article.id.clone()) {
@@ -192,9 +195,9 @@ where
     CollectionReport { articles, errors }
 }
 
-/// Downloads all configured feeds and reports successes and failures separately.
-pub fn collect_articles(config: &Config) -> CollectionReport {
-    collect_articles_with_loader(config, load_feed_from_http)
+/// Asynchronously downloads all feeds and reports successes and failures separately.
+pub async fn collect_articles(config: &Config) -> CollectionReport {
+    collect_articles_with_loader(config, load_feed_from_http).await
 }
 
 /// Formats the compact article representation used by the current CLI.
@@ -377,15 +380,15 @@ mod tests {
     }
 
     /// Verifies that the HTTP loader rejects an invalid URL without network IO.
-    #[test]
-    fn load_feed_from_http_rejects_invalid_url() {
+    #[tokio::test]
+    async fn load_feed_from_http_rejects_invalid_url() {
         let feed_config = FeedConfig {
             id: "invalid".to_string(),
             platform: Platform::Other,
             url: "not a valid URL".to_string(),
         };
 
-        let result = load_feed_from_http(&feed_config);
+        let result = load_feed_from_http(feed_config).await;
 
         let error = match result {
             Ok(_) => panic!("an invalid URL should be rejected"),
@@ -439,17 +442,18 @@ mod tests {
     }
 
     /// Verifies aggregation of two injected feeds without accessing the network.
-    #[test]
-    fn collect_articles_from_two_loaded_feeds() {
+    #[tokio::test]
+    async fn collect_articles_from_two_loaded_feeds() {
         let config = test_config();
         let mut feeds = mock_feeds().into_iter();
 
         let report = collect_articles_with_loader(&config, |_feed_config| {
-            feeds.next().ok_or_else(|| FeedLoadError {
+            std::future::ready(feeds.next().ok_or_else(|| FeedLoadError {
                 stage: FeedLoadStage::FeedMetadata,
                 message: "Missing mock feed".to_string(),
-            })
-        });
+            }))
+        })
+        .await;
 
         assert!(report.errors.is_empty());
         assert_eq!(report.articles.len(), 10);
@@ -476,8 +480,8 @@ mod tests {
     }
 
     /// Verifies that one failed feed does not discard articles from later feeds.
-    #[test]
-    fn collect_articles_continues_after_feed_failure() {
+    #[tokio::test]
+    async fn collect_articles_continues_after_feed_failure() {
         let config = test_config();
         let mut successful_feed = mock_feeds().pop();
         let mut loader_calls = 0;
@@ -485,7 +489,7 @@ mod tests {
         let report = collect_articles_with_loader(&config, |feed_config| {
             loader_calls += 1;
 
-            if feed_config.id == "astronomy" {
+            let result = if feed_config.id == "astronomy" {
                 Err(FeedLoadError {
                     stage: FeedLoadStage::HttpRequest,
                     message: "Astronomy feed unavailable".to_string(),
@@ -495,8 +499,11 @@ mod tests {
                     stage: FeedLoadStage::FeedMetadata,
                     message: "Missing successful mock feed".to_string(),
                 })
-            }
-        });
+            };
+
+            std::future::ready(result)
+        })
+        .await;
 
         assert_eq!(loader_calls, 2);
         assert_eq!(report.articles.len(), 5);
@@ -520,8 +527,8 @@ mod tests {
     }
 
     /// Verifies that duplicate entries from one feed produce one aggregated article.
-    #[test]
-    fn collect_articles_deduplicates_same_article_identity() {
+    #[tokio::test]
+    async fn collect_articles_deduplicates_same_article_identity() {
         let config = Config {
             feeds: vec![FeedConfig {
                 id: "astronomy".to_string(),
@@ -541,11 +548,12 @@ mod tests {
         ));
 
         let report = collect_articles_with_loader(&config, |_feed_config| {
-            feed.take().ok_or_else(|| FeedLoadError {
+            std::future::ready(feed.take().ok_or_else(|| FeedLoadError {
                 stage: FeedLoadStage::FeedMetadata,
                 message: "Mock feed already loaded".to_string(),
-            })
-        });
+            }))
+        })
+        .await;
 
         assert!(report.errors.is_empty());
         assert_eq!(report.articles.len(), 1);
@@ -553,14 +561,24 @@ mod tests {
     }
 
     /// Verifies that the public collector handles an empty configuration.
-    #[test]
-    fn collect_articles_from_empty_config() {
+    #[tokio::test]
+    async fn collect_articles_from_empty_config() {
         let config = Config { feeds: Vec::new() };
 
-        let report = collect_articles(&config);
+        let report = collect_articles(&config).await;
 
         assert!(report.articles.is_empty());
         assert!(report.errors.is_empty());
+    }
+
+    /// Verifies that the public collection API can be awaited by an interface runtime.
+    #[test]
+    fn public_collection_api_is_async() {
+        fn assert_future<T: std::future::Future>(_future: T) {}
+
+        let config = Config { feeds: Vec::new() };
+
+        assert_future(collect_articles(&config));
     }
 
     /// Verifies that a feed collection error includes actionable context.
