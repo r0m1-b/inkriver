@@ -10,6 +10,9 @@ chrono = "0.4.45"
 feed-rs = "2.4.0"
 reqwest = "0.13.4"
 serde = { version = "1.0.229", features = ["derive"] }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "macros"] }
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 toml = "1.1.4"
+
+[dev-dependencies]
+tempfile = "3.23.0"
