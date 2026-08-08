@@ -1,3 +1,4 @@
+use crate::article::{Article, Source};
 use crate::config::{FeedConfig, Platform};
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
@@ -19,6 +20,14 @@ pub struct StoredFeed {
     pub platform: Platform,
     pub url: String,
     pub is_active: bool,
+}
+
+/// Combines remote article data with reader-specific local state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArticle {
+    pub article: Article,
+    pub is_read: bool,
+    pub is_favorite: bool,
 }
 
 impl Storage {
@@ -123,6 +132,122 @@ impl Storage {
             .collect()
     }
 
+    /// Inserts new articles and refreshes existing remote metadata.
+    ///
+    /// Missing incoming values do not erase data previously stored, and local
+    /// read/favorite flags are intentionally absent from the conflict update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the complete article transaction cannot be applied.
+    pub async fn upsert_articles(&self, articles: &[Article]) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de commencer l'enregistrement des articles")?;
+
+        for article in articles {
+            sqlx::query(
+                r#"
+                    INSERT INTO articles (
+                        id, feed_id, title, author, published_at, url, content, source
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        feed_id = excluded.feed_id,
+                        title = COALESCE(excluded.title, articles.title),
+                        author = COALESCE(excluded.author, articles.author),
+                        published_at = COALESCE(excluded.published_at, articles.published_at),
+                        url = COALESCE(excluded.url, articles.url),
+                        content = COALESCE(excluded.content, articles.content),
+                        source = excluded.source
+                "#,
+            )
+            .bind(&article.id)
+            .bind(&article.feed_id)
+            .bind(&article.title)
+            .bind(&article.author)
+            .bind(article.published_at)
+            .bind(&article.url)
+            .bind(&article.content)
+            .bind(article.source.as_str())
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Impossible d'enregistrer l'article {:?}", article.id))?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider l'enregistrement des articles")
+    }
+
+    /// Lists all retained articles from newest to oldest, with undated entries last.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when rows cannot be loaded or contain an unknown source.
+    pub async fn list_articles(&self) -> Result<Vec<StoredArticle>> {
+        type ArticleRow = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+            Option<String>,
+            String,
+            bool,
+            bool,
+        );
+
+        let rows: Vec<ArticleRow> = sqlx::query_as(
+            r#"
+                SELECT id, feed_id, title, author, published_at, url, content,
+                       source, is_read, is_favorite
+                FROM articles
+                ORDER BY published_at IS NULL ASC, published_at DESC, id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les articles")?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    feed_id,
+                    title,
+                    author,
+                    published_at,
+                    url,
+                    content,
+                    source,
+                    is_read,
+                    is_favorite,
+                )| {
+                    let source = Source::try_from(source.as_str()).map_err(anyhow::Error::msg)?;
+                    Ok(StoredArticle {
+                        article: Article {
+                            id,
+                            feed_id,
+                            title,
+                            author,
+                            published_at,
+                            url,
+                            content,
+                            source,
+                        },
+                        is_read,
+                        is_favorite,
+                    })
+                },
+            )
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) async fn open_in_memory() -> Result<Self> {
         let options = SqliteConnectOptions::new()
@@ -141,6 +266,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
 
     fn feed(id: &str, platform: Platform, url: &str) -> FeedConfig {
         FeedConfig {
@@ -148,6 +274,32 @@ mod tests {
             platform,
             url: url.to_string(),
         }
+    }
+
+    fn article(id: &str, feed_id: &str, published_at: Option<chrono::DateTime<Utc>>) -> Article {
+        Article {
+            id: id.to_string(),
+            feed_id: feed_id.to_string(),
+            title: Some(format!("Title for {id}")),
+            author: Some("Test Author".to_string()),
+            published_at,
+            url: Some(format!("https://articles.example/{id}")),
+            content: Some(format!("Readable content for {id}")),
+            source: Source::Substack,
+        }
+    }
+
+    async fn storage_with_feed() -> Storage {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[feed(
+                "astronomy",
+                Platform::Substack,
+                "https://astronomy.example/feed",
+            )])
+            .await
+            .unwrap();
+        storage
     }
 
     /// Verifies a file database is created with migrations and foreign keys enabled.
@@ -299,5 +451,105 @@ mod tests {
                 is_active: true,
             }]
         );
+    }
+
+    /// Verifies every remote and local article field can be read after insertion.
+    #[tokio::test]
+    async fn upsert_articles_inserts_and_round_trips_article() {
+        let storage = storage_with_feed().await;
+        let expected = article(
+            "astronomy::jupiter",
+            "astronomy",
+            Some(Utc.with_ymd_and_hms(2026, 8, 8, 10, 30, 0).unwrap()),
+        );
+
+        storage
+            .upsert_articles(std::slice::from_ref(&expected))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.list_articles().await.unwrap(),
+            vec![StoredArticle {
+                article: expected,
+                is_read: false,
+                is_favorite: false,
+            }]
+        );
+    }
+
+    /// Verifies repeated collection updates one row without erasing richer old values.
+    #[tokio::test]
+    async fn upsert_articles_updates_without_duplicates_or_data_loss() {
+        let storage = storage_with_feed().await;
+        let original = article("astronomy::jupiter", "astronomy", None);
+        storage
+            .upsert_articles(std::slice::from_ref(&original))
+            .await
+            .unwrap();
+
+        let update = Article {
+            title: Some("Jupiter after opposition".to_string()),
+            author: None,
+            url: None,
+            content: None,
+            ..original.clone()
+        };
+        storage.upsert_articles(&[update]).await.unwrap();
+
+        let stored = storage.list_articles().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].article.title.as_deref(),
+            Some("Jupiter after opposition")
+        );
+        assert_eq!(stored[0].article.author, original.author);
+        assert_eq!(stored[0].article.url, original.url);
+        assert_eq!(stored[0].article.content, original.content);
+    }
+
+    /// Verifies dated articles are newest-first and undated articles are last.
+    #[tokio::test]
+    async fn list_articles_orders_newest_first_with_undated_last() {
+        let storage = storage_with_feed().await;
+        let older = article(
+            "astronomy::older",
+            "astronomy",
+            Some(Utc.with_ymd_and_hms(2026, 8, 6, 12, 0, 0).unwrap()),
+        );
+        let newer = article(
+            "astronomy::newer",
+            "astronomy",
+            Some(Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap()),
+        );
+        let undated = article("astronomy::undated", "astronomy", None);
+
+        storage
+            .upsert_articles(&[older, undated, newer])
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = storage
+            .list_articles()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|stored| stored.article.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["astronomy::newer", "astronomy::older", "astronomy::undated"]
+        );
+    }
+
+    /// Verifies article batches are atomic when one row references an unknown feed.
+    #[tokio::test]
+    async fn upsert_articles_is_atomic() {
+        let storage = storage_with_feed().await;
+        let valid = article("astronomy::valid", "astronomy", None);
+        let invalid = article("missing::invalid", "missing", None);
+
+        assert!(storage.upsert_articles(&[valid, invalid]).await.is_err());
+        assert!(storage.list_articles().await.unwrap().is_empty());
     }
 }
