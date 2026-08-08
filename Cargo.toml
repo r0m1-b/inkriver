@@ -7,9 +7,12 @@ edition = "2024"
 ammonia = "4.1.3"
 anyhow = "1.0.104"
 chrono = "0.4.45"
+clap = { version = "4.6.4", features = ["derive"] }
 feed-rs = "2.4.0"
+html2text = "0.17.1"
 reqwest = "0.13.4"
 serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "macros"] }
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 toml = "1.1.4"

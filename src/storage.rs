@@ -30,6 +30,61 @@ pub struct StoredArticle {
     pub is_favorite: bool,
 }
 
+/// Contains the lightweight fields required to render an article list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleSummary {
+    pub id: String,
+    pub feed_id: String,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub url: Option<String>,
+    pub source: Source,
+    pub is_read: bool,
+    pub is_favorite: bool,
+}
+
+/// Counts rows inserted and rows refreshed by one article batch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UpsertStats {
+    pub inserted: usize,
+    pub updated: usize,
+}
+
+type StoredArticleRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<String>,
+    Option<String>,
+    String,
+    bool,
+    bool,
+);
+
+fn stored_article_from_row(row: StoredArticleRow) -> Result<StoredArticle> {
+    let (id, feed_id, title, author, published_at, url, content, source, is_read, is_favorite) =
+        row;
+    let source = Source::try_from(source.as_str()).map_err(anyhow::Error::msg)?;
+
+    Ok(StoredArticle {
+        article: Article {
+            id,
+            feed_id,
+            title,
+            author,
+            published_at,
+            url,
+            content,
+            source,
+        },
+        is_read,
+        is_favorite,
+    })
+}
+
 impl Storage {
     /// Opens or creates a SQLite database and applies all embedded migrations.
     ///
@@ -140,14 +195,24 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when the complete article transaction cannot be applied.
-    pub async fn upsert_articles(&self, articles: &[Article]) -> Result<()> {
+    pub async fn upsert_articles(&self, articles: &[Article]) -> Result<UpsertStats> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("Impossible de commencer l'enregistrement des articles")?;
+        let mut stats = UpsertStats::default();
 
         for article in articles {
+            let already_exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM articles WHERE id = ?)")
+                    .bind(&article.id)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .with_context(|| {
+                        format!("Impossible de rechercher l'article {:?}", article.id)
+                    })?;
+
             sqlx::query(
                 r#"
                     INSERT INTO articles (
@@ -175,12 +240,20 @@ impl Storage {
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("Impossible d'enregistrer l'article {:?}", article.id))?;
+
+            if already_exists {
+                stats.updated += 1;
+            } else {
+                stats.inserted += 1;
+            }
         }
 
         transaction
             .commit()
             .await
-            .context("Impossible de valider l'enregistrement des articles")
+            .context("Impossible de valider l'enregistrement des articles")?;
+
+        Ok(stats)
     }
 
     /// Lists all retained articles from newest to oldest, with undated entries last.
@@ -189,20 +262,7 @@ impl Storage {
     ///
     /// Returns an error when rows cannot be loaded or contain an unknown source.
     pub async fn list_articles(&self) -> Result<Vec<StoredArticle>> {
-        type ArticleRow = (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<chrono::DateTime<chrono::Utc>>,
-            Option<String>,
-            Option<String>,
-            String,
-            bool,
-            bool,
-        );
-
-        let rows: Vec<ArticleRow> = sqlx::query_as(
+        let rows: Vec<StoredArticleRow> = sqlx::query_as(
             r#"
                 SELECT id, feed_id, title, author, published_at, url, content,
                        source, is_read, is_favorite
@@ -214,38 +274,79 @@ impl Storage {
         .await
         .context("Impossible de charger les articles")?;
 
+        rows.into_iter().map(stored_article_from_row).collect()
+    }
+
+    /// Lists lightweight article summaries without loading their HTML bodies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when rows cannot be loaded or contain an unknown source.
+    pub async fn list_article_summaries(&self) -> Result<Vec<ArticleSummary>> {
+        type SummaryRow = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+            String,
+            bool,
+            bool,
+        );
+
+        let rows: Vec<SummaryRow> = sqlx::query_as(
+            r#"
+                SELECT id, feed_id, title, author, published_at, url, source,
+                       is_read, is_favorite
+                FROM articles
+                ORDER BY published_at IS NULL ASC, published_at DESC, id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les résumés d'articles")?;
+
         rows.into_iter()
             .map(
-                |(
-                    id,
-                    feed_id,
-                    title,
-                    author,
-                    published_at,
-                    url,
-                    content,
-                    source,
-                    is_read,
-                    is_favorite,
-                )| {
+                |(id, feed_id, title, author, published_at, url, source, is_read, is_favorite)| {
                     let source = Source::try_from(source.as_str()).map_err(anyhow::Error::msg)?;
-                    Ok(StoredArticle {
-                        article: Article {
-                            id,
-                            feed_id,
-                            title,
-                            author,
-                            published_at,
-                            url,
-                            content,
-                            source,
-                        },
+                    Ok(ArticleSummary {
+                        id,
+                        feed_id,
+                        title,
+                        author,
+                        published_at,
+                        url,
+                        source,
                         is_read,
                         is_favorite,
                     })
                 },
             )
             .collect()
+    }
+
+    /// Loads one complete article and its local state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row cannot be loaded or contains an unknown source.
+    pub async fn get_article(&self, article_id: &str) -> Result<Option<StoredArticle>> {
+        let row: Option<StoredArticleRow> = sqlx::query_as(
+            r#"
+                SELECT id, feed_id, title, author, published_at, url, content,
+                       source, is_read, is_favorite
+                FROM articles
+                WHERE id = ?
+            "#,
+        )
+        .bind(article_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("Impossible de charger l'article {article_id:?}"))?;
+
+        row.map(stored_article_from_row).transpose()
     }
 
     /// Changes the read state of an article.
@@ -533,9 +634,16 @@ mod tests {
             content: None,
             ..original.clone()
         };
-        storage.upsert_articles(&[update]).await.unwrap();
+        let stats = storage.upsert_articles(&[update]).await.unwrap();
 
         let stored = storage.list_articles().await.unwrap();
+        assert_eq!(
+            stats,
+            UpsertStats {
+                inserted: 0,
+                updated: 1,
+            }
+        );
         assert_eq!(stored.len(), 1);
         assert_eq!(
             stored[0].article.title.as_deref(),
@@ -544,6 +652,28 @@ mod tests {
         assert_eq!(stored[0].article.author, original.author);
         assert_eq!(stored[0].article.url, original.url);
         assert_eq!(stored[0].article.content, original.content);
+    }
+
+    /// Verifies an article batch reports inserted and updated rows independently.
+    #[tokio::test]
+    async fn upsert_articles_reports_insert_and_update_counts() {
+        let storage = storage_with_feed().await;
+        let existing = article("astronomy::existing", "astronomy", None);
+        storage
+            .upsert_articles(std::slice::from_ref(&existing))
+            .await
+            .unwrap();
+        let new = article("astronomy::new", "astronomy", None);
+
+        let stats = storage.upsert_articles(&[existing, new]).await.unwrap();
+
+        assert_eq!(
+            stats,
+            UpsertStats {
+                inserted: 1,
+                updated: 1,
+            }
+        );
     }
 
     /// Verifies dated articles are newest-first and undated articles are last.
@@ -578,6 +708,59 @@ mod tests {
             ids,
             ["astronomy::newer", "astronomy::older", "astronomy::undated"]
         );
+    }
+
+    /// Verifies the lightweight timeline preserves metadata, state, and ordering.
+    #[tokio::test]
+    async fn list_article_summaries_returns_metadata_without_article_bodies() {
+        let storage = storage_with_feed().await;
+        let older = article(
+            "astronomy::older",
+            "astronomy",
+            Some(Utc.with_ymd_and_hms(2026, 8, 6, 12, 0, 0).unwrap()),
+        );
+        let newer = article(
+            "astronomy::newer",
+            "astronomy",
+            Some(Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap()),
+        );
+        storage
+            .upsert_articles(&[older, newer.clone()])
+            .await
+            .unwrap();
+        storage.set_read(&newer.id, true).await.unwrap();
+        storage.set_favorite(&newer.id, true).await.unwrap();
+
+        let summaries = storage.list_article_summaries().await.unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].id, newer.id);
+        assert_eq!(summaries[0].title, newer.title);
+        assert_eq!(summaries[0].author, newer.author);
+        assert_eq!(summaries[0].published_at, newer.published_at);
+        assert_eq!(summaries[0].url, newer.url);
+        assert!(summaries[0].is_read);
+        assert!(summaries[0].is_favorite);
+        assert_eq!(summaries[1].id, "astronomy::older");
+    }
+
+    /// Verifies full article detail is loaded by ID and missing IDs return `None`.
+    #[tokio::test]
+    async fn get_article_returns_full_detail_or_none() {
+        let storage = storage_with_feed().await;
+        let expected = article("astronomy::jupiter", "astronomy", None);
+        storage
+            .upsert_articles(std::slice::from_ref(&expected))
+            .await
+            .unwrap();
+        storage.set_favorite(&expected.id, true).await.unwrap();
+
+        let stored = storage.get_article(&expected.id).await.unwrap().unwrap();
+
+        assert_eq!(stored.article, expected);
+        assert!(!stored.is_read);
+        assert!(stored.is_favorite);
+        assert!(storage.get_article("missing").await.unwrap().is_none());
     }
 
     /// Verifies article batches are atomic when one row references an unknown feed.

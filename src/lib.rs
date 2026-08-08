@@ -1,4 +1,5 @@
 pub mod article;
+pub mod cli;
 pub mod config;
 pub mod feed;
 pub mod http;

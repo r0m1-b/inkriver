@@ -1,8 +1,18 @@
 use crate::config::Config;
-use crate::service::{self, CollectionReport};
-use crate::storage::Storage;
+use crate::service::{self, CollectionReport, FeedCollectionError};
+use crate::storage::{Storage, UpsertStats};
 use anyhow::Result;
 use std::future::Future;
+
+/// Summarizes one feed refresh and its persistence effects.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RefreshReport {
+    pub active_feeds: usize,
+    pub collected_articles: usize,
+    pub inserted_articles: usize,
+    pub updated_articles: usize,
+    pub errors: Vec<FeedCollectionError>,
+}
 
 /// Imports configured feeds, collects them, and persists every successful article.
 ///
@@ -12,7 +22,7 @@ use std::future::Future;
 /// # Errors
 ///
 /// Returns an error when subscriptions or collected articles cannot be persisted.
-pub async fn refresh(storage: &Storage, config: &Config) -> Result<CollectionReport> {
+pub async fn refresh(storage: &Storage, config: &Config) -> Result<RefreshReport> {
     refresh_with_collector(storage, config, || service::collect_articles(config)).await
 }
 
@@ -20,15 +30,23 @@ async fn refresh_with_collector<F, Fut>(
     storage: &Storage,
     config: &Config,
     collect: F,
-) -> Result<CollectionReport>
+) -> Result<RefreshReport>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = CollectionReport>,
 {
     storage.import_feeds(&config.feeds).await?;
-    let report = collect().await;
-    storage.upsert_articles(&report.articles).await?;
-    Ok(report)
+    let CollectionReport { articles, errors } = collect().await;
+    let collected_articles = articles.len();
+    let UpsertStats { inserted, updated } = storage.upsert_articles(&articles).await?;
+
+    Ok(RefreshReport {
+        active_feeds: config.feeds.len(),
+        collected_articles,
+        inserted_articles: inserted,
+        updated_articles: updated,
+        errors,
+    })
 }
 
 #[cfg(test)]
@@ -104,6 +122,10 @@ mod tests {
 
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].feed_id, "bread");
+        assert_eq!(result.active_feeds, 2);
+        assert_eq!(result.collected_articles, 1);
+        assert_eq!(result.inserted_articles, 1);
+        assert_eq!(result.updated_articles, 0);
         assert_eq!(storage.list_articles().await.unwrap().len(), 1);
         assert!(
             storage
@@ -139,6 +161,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.collected_articles, 0);
+        assert_eq!(result.inserted_articles, 0);
+        assert_eq!(result.updated_articles, 0);
         assert_eq!(storage.list_articles().await.unwrap().len(), 1);
     }
 
@@ -172,9 +197,12 @@ mod tests {
             articles: vec![astronomy, bread.clone()],
             errors: Vec::new(),
         };
-        refresh_with_collector(&storage, &complete_config, || async { second_collection })
-            .await
-            .unwrap();
+        let second_result =
+            refresh_with_collector(&storage, &complete_config, || async { second_collection })
+                .await
+                .unwrap();
+        assert_eq!(second_result.inserted_articles, 0);
+        assert_eq!(second_result.updated_articles, 2);
         assert_eq!(storage.list_articles().await.unwrap().len(), 2);
         storage.close().await;
 

@@ -1,4 +1,73 @@
 use crate::article::Source;
+use sha2::{Digest, Sha256};
+
+/// Marks an identifier synthesized by the parser for an entry without GUID.
+pub(crate) const MISSING_ENTRY_ID: &str = "__reader_missing_entry_id__";
+
+fn canonicalize_entry_url(raw_url: &str) -> String {
+    let trimmed_url = raw_url.trim();
+    match reqwest::Url::parse(trimmed_url) {
+        Ok(mut url) => {
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => trimmed_url.to_string(),
+    }
+}
+
+fn fingerprint_entry(entry: &feed_rs::model::Entry) -> String {
+    let mut hasher = Sha256::new();
+    let mut has_stable_field = false;
+
+    if let Some(published_at) = entry.published.or(entry.updated) {
+        hasher.update(b"date\0");
+        hasher.update(published_at.to_rfc3339().as_bytes());
+        has_stable_field = true;
+    }
+
+    for author in &entry.authors {
+        hasher.update(b"author\0");
+        hasher.update(author.name.as_bytes());
+        has_stable_field = true;
+    }
+
+    let body = entry
+        .content
+        .as_ref()
+        .and_then(|content| content.body.as_deref())
+        .or_else(|| {
+            entry
+                .summary
+                .as_ref()
+                .map(|summary| summary.content.as_str())
+        });
+    if let Some(body) = body {
+        hasher.update(b"body\0");
+        hasher.update(body.as_bytes());
+        has_stable_field = true;
+    }
+
+    if !has_stable_field {
+        hasher.update(b"title\0");
+        if let Some(title) = &entry.title {
+            hasher.update(title.content.as_bytes());
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+fn article_identity(entry: &feed_rs::model::Entry) -> String {
+    if !entry.id.trim().is_empty() && entry.id != MISSING_ENTRY_ID {
+        return entry.id.clone();
+    }
+
+    entry
+        .links
+        .first()
+        .map(|link| format!("url::{}", canonicalize_entry_url(&link.href)))
+        .unwrap_or_else(|| format!("fingerprint::{}", fingerprint_entry(entry)))
+}
 
 pub struct Feed {
     pub id: String,
@@ -38,19 +107,12 @@ impl Feed {
 
     /// Converts a parsed feed entry into the application's common article model.
     ///
-    /// The feed entry ID is namespaced by the configured feed ID, with the
-    /// entry URL as a fallback. Missing optional display fields remain `None`;
-    /// a summary is used only when the full content body is unavailable.
+    /// The feed entry ID is namespaced by the configured feed ID. A publisher
+    /// GUID is preferred, followed by the canonical entry URL and a stable
+    /// content fingerprint. Missing optional display fields remain `None`; a
+    /// summary is used only when the full content body is unavailable.
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
-        let entry_identity = if entry.id.trim().is_empty() {
-            entry
-                .links
-                .first()
-                .map(|link| format!("url::{}", link.href))
-                .unwrap_or_else(|| "unidentified".to_string())
-        } else {
-            entry.id.clone()
-        };
+        let entry_identity = article_identity(entry);
 
         crate::article::Article {
             id: format!("{}::{entry_identity}", self.id),
@@ -325,6 +387,59 @@ mod tests {
         assert_eq!(
             article.id,
             "carnet-du-ciel::url::https://carnet-du-ciel.example/p/reperer-jupiter"
+        );
+    }
+
+    /// Verifies a real publisher GUID takes precedence over the entry URL.
+    #[test]
+    fn article_id_prefers_publisher_guid() {
+        let feed = &mock_feeds()[0];
+        let entry = &feed.entries[0];
+
+        let article = feed.article_from_entry(entry);
+
+        assert_eq!(article.id, "carnet-du-ciel::substack-astronomie-1");
+    }
+
+    /// Verifies URL fallback ignores fragments and remains stable across title changes.
+    #[test]
+    fn article_url_identity_is_canonical_and_title_independent() {
+        let feed = &mock_feeds()[0];
+        let mut first_entry = feed.entries[0].clone();
+        first_entry.id = MISSING_ENTRY_ID.to_string();
+        first_entry.links[0].href =
+            "https://carnet-du-ciel.example/p/reperer-jupiter#comments".to_string();
+        let mut renamed_entry = first_entry.clone();
+        renamed_entry.title.as_mut().unwrap().content = "Un nouveau titre".to_string();
+
+        let first_article = feed.article_from_entry(&first_entry);
+        let renamed_article = feed.article_from_entry(&renamed_entry);
+
+        assert_eq!(first_article.id, renamed_article.id);
+        assert_eq!(
+            first_article.id,
+            "carnet-du-ciel::url::https://carnet-du-ciel.example/p/reperer-jupiter"
+        );
+    }
+
+    /// Verifies the last-resort fingerprint does not depend on the article title.
+    #[test]
+    fn article_fingerprint_identity_is_title_independent() {
+        let feed = &mock_feeds()[0];
+        let mut first_entry = feed.entries[0].clone();
+        first_entry.id = MISSING_ENTRY_ID.to_string();
+        first_entry.links.clear();
+        let mut renamed_entry = first_entry.clone();
+        renamed_entry.title.as_mut().unwrap().content = "Un nouveau titre".to_string();
+
+        let first_article = feed.article_from_entry(&first_entry);
+        let renamed_article = feed.article_from_entry(&renamed_entry);
+
+        assert_eq!(first_article.id, renamed_article.id);
+        assert!(
+            first_article
+                .id
+                .starts_with("carnet-du-ciel::fingerprint::")
         );
     }
 

@@ -55,12 +55,32 @@ Les dépendances actuellement utilisées sont :
 - `chrono` pour les dates ;
 - `serde` et `toml` pour la configuration ;
 - `anyhow` pour enrichir les erreurs ;
+- `sha2` pour les empreintes d'identité de dernier recours ;
+- `clap` pour les sous-commandes et options du CLI ;
+- `html2text` pour rendre le contenu lisible dans le terminal ;
 - `sqlx` avec Tokio, SQLite, Chrono et les migrations embarquées pour le
   stockage local.
 
 Avec `reqwest` 0.13, la feature TLS explicite s'appelle `rustls`, et non plus
 `rustls-tls`. La configuration actuelle active les fonctionnalités par défaut de
 `reqwest`, qui utilisent déjà Rustls.
+
+## Correctifs prioritaires issus de l'audit
+
+- [x] **P2 — Stabiliser l'identité des articles sans GUID.** Définir et tester
+      explicitement la stratégie GUID → URL canonique → empreinte stable, sans
+      dépendre de l'identifiant synthétique de `feed-rs` qui peut changer avec
+      le titre et créer des doublons persistants.
+- [x] **P2 — Séparer la liste des résumés du chargement du contenu.** Ajouter
+      une lecture SQLite légère pour la chronologie et une lecture du détail par
+      identifiant, afin de ne pas charger le corps HTML de toute l'archive pour
+      le seul affichage des résumés.
+- [ ] **P3 — Compléter la validation de `feeds.toml`.** Rejeter dès le chargement
+      les URL vides ou invalides, les schémas autres que HTTP(S) et les URL
+      dupliquées, avec des erreurs de configuration explicites.
+- [ ] **P3 — Améliorer la collecte HTTP de plusieurs flux.** Partager un client
+      `reqwest` et télécharger les flux avec une concurrence bornée pour éviter
+      que les latences des abonnements lents ou indisponibles s'additionnent.
 
 ## Prochaines étapes
 
@@ -122,12 +142,17 @@ après un premier rafraîchissement.
 
 ### 7. Stabiliser le programme en ligne de commande
 
-- [ ] Ajouter une commande de rafraîchissement des flux.
+- [x] Ajouter une commande de rafraîchissement des flux.
 - [x] Afficher les articles stockés, du plus récent au plus ancien.
-- [ ] Permettre de sélectionner un article et d'afficher son contenu ou son URL.
-- [ ] Présenter clairement les erreurs de configuration, de réseau et d'analyse.
+- [x] Permettre de sélectionner un article et d'afficher son contenu ou son URL.
+- [x] Présenter clairement les erreurs de configuration, de réseau et d'analyse.
 
-Cette étape validera l'API du cœur Rust avant son branchement à Tauri.
+Le CLI propose désormais `refresh`, `list`, `show`, `mark-read`, `mark-unread`,
+`favorite` et `unfavorite`. Les commandes hors ligne acceptent un numéro de la
+chronologie ou un identifiant stable. Un rafraîchissement partiel conserve les
+succès, affiche les erreurs par flux et retourne le code de sortie `2`.
+
+Cette étape valide l'API du cœur Rust avant son branchement à Tauri.
 
 ### 8. Créer l'interface Linux avec Tauri
 

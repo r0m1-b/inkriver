@@ -1,6 +1,7 @@
 use crate::article::{Article, Source};
 use crate::config::{Config, FeedConfig, Platform};
 use crate::feed::Feed;
+use crate::feed::MISSING_ENTRY_ID;
 use crate::http;
 use feed_rs::parser;
 use std::collections::HashSet;
@@ -118,6 +119,7 @@ where
     let content = load_content(feed_config)?;
     let feed_parser = parser::Builder::new()
         .base_uri(Some(&feed_config.url))
+        .id_generator(|_links, _title, _uri| MISSING_ENTRY_ID.to_string())
         .build();
     let raw_feed = feed_parser
         .parse(content.as_bytes())
@@ -399,6 +401,33 @@ mod tests {
         assert_eq!(
             first_feed.get_articles()[0].id,
             second_feed.get_articles()[0].id
+        );
+        assert!(
+            first_feed.get_articles()[0]
+                .id
+                .starts_with("astronomy::fingerprint::")
+        );
+    }
+
+    /// Verifies the parser marks a missing GUID so URL identity ignores title changes.
+    #[test]
+    fn load_feed_uses_url_identity_when_guid_is_missing() {
+        let feed_config = &test_config().feeds[0];
+        let without_guid = SIMPLE_RSS.replace("<guid>astronomy-1</guid>", "");
+        let renamed = without_guid.replace("Finding Mars", "Mars after opposition");
+
+        let first_feed =
+            load_feed_with_content_loader(feed_config, |_feed_config| Ok(without_guid)).unwrap();
+        let renamed_feed =
+            load_feed_with_content_loader(feed_config, |_feed_config| Ok(renamed)).unwrap();
+
+        assert_eq!(
+            first_feed.get_articles()[0].id,
+            "astronomy::url::https://astronomy.example/finding-mars"
+        );
+        assert_eq!(
+            first_feed.get_articles()[0].id,
+            renamed_feed.get_articles()[0].id
         );
     }
 

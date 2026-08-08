@@ -19,7 +19,9 @@ Tauri sous Linux et Android.
 - conservation des articles lorsqu'un abonnement est retiré ;
 - états locaux « lu » et « favori » dans le cœur Rust ;
 - affichage des articles du plus récent au plus ancien ;
-- lecture du cache même lorsque certains flux sont indisponibles.
+- lecture du cache même lorsque certains flux sont indisponibles ;
+- commandes distinctes pour rafraîchir, lister, lire et modifier les états
+  locaux des articles.
 
 ## Prérequis sous Ubuntu
 
@@ -97,13 +99,21 @@ Règles de configuration :
 `feeds.toml` est volontairement ignoré par Git : il représente la configuration
 personnelle du développeur.
 
-## Lancer Reader
+## Utiliser Reader
+
+Afficher l'aide et les commandes disponibles :
 
 ```bash
-cargo run
+cargo run -- --help
 ```
 
-À chaque lancement, le CLI :
+Rafraîchir les abonnements :
+
+```bash
+cargo run -- refresh
+```
+
+La commande `refresh` :
 
 1. lit `feeds.toml` ;
 2. ouvre ou crée `reader.db` ;
@@ -111,10 +121,54 @@ cargo run
 4. importe la liste courante des abonnements ;
 5. télécharge les flux ;
 6. insère ou met à jour les articles ;
-7. affiche tous les articles stockés, du plus récent au plus ancien.
+7. affiche le nombre d'articles reçus, ajoutés et mis à jour.
 
 Une erreur sur un flux est écrite sur la sortie d'erreur, mais elle n'efface pas
 les articles déjà enregistrés. Les autres flux continuent d'être traités.
+
+Lister les articles stockés, sans charger `feeds.toml` et sans réseau :
+
+```bash
+cargo run -- list
+```
+
+La liste affiche un numéro à partir de 1 et l'identifiant stable de chaque
+article. Les commandes suivantes acceptent indifféremment l'un ou l'autre :
+
+```bash
+cargo run -- show 1
+cargo run -- show "mon-substack::identifiant-editeur"
+
+cargo run -- mark-read 1
+cargo run -- mark-unread 1
+cargo run -- favorite 1
+cargo run -- unfavorite 1
+```
+
+`show` charge uniquement l'article sélectionné, convertit son HTML en texte
+lisible dans le terminal, affiche son URL originale et le marque automatiquement
+comme lu.
+
+Un numéro correspond à la position actuelle dans la chronologie et peut changer
+après un rafraîchissement. Pour les scripts, préférer l'identifiant stable.
+
+Les chemins peuvent être remplacés pour une commande :
+
+```bash
+cargo run -- \
+  --config /chemin/vers/feeds.toml \
+  --database /chemin/vers/reader.db \
+  refresh
+```
+
+`--config` n'est consulté que par `refresh`. `list`, `show` et les commandes
+d'état sont entièrement hors ligne.
+
+Codes de sortie :
+
+- `0` : commande réussie ;
+- `1` : erreur fatale de configuration, SQLite, sélection ou rendu ;
+- `2` : rafraîchissement partiellement réussi, avec au moins un flux en erreur.
 
 Le CLI actuel utilise des chemins déterminés à la compilation et ancrés à la
 racine du projet. Il s'agit d'un comportement de développement, pas encore d'une
@@ -125,7 +179,8 @@ installation système portable.
 ### Installation et création
 
 Il n'existe aucune étape d'installation séparée pour la base. Au premier
-`cargo run`, SQLx crée automatiquement à la racine du projet :
+`cargo run -- refresh` ou `cargo run -- list`, SQLx crée automatiquement à la
+racine du projet :
 
 ```text
 reader.db
@@ -190,7 +245,7 @@ depuis la racine du projet :
 
 ```bash
 rm -f reader.db reader.db-shm reader.db-wal
-cargo run
+cargo run -- refresh
 ```
 
 Le lancement suivant recrée une base vide, réapplique toutes les migrations,
@@ -200,11 +255,12 @@ récupérés sans sauvegarde.
 
 ### Retirer ou réactiver un abonnement
 
-Retirer une entrée de `feeds.toml`, puis relancer Reader, marque l'abonnement
-comme inactif. Ses articles, favoris et états de lecture restent dans SQLite.
+Retirer une entrée de `feeds.toml`, puis exécuter `cargo run -- refresh`, marque
+l'abonnement comme inactif. Ses articles, favoris et états de lecture restent
+dans SQLite.
 
-Remettre ultérieurement le même `id` dans `feeds.toml` réactive l'abonnement et
-met à jour son URL et sa plateforme si nécessaire.
+Remettre ultérieurement le même `id` dans `feeds.toml`, puis rafraîchir, réactive
+l'abonnement et met à jour son URL et sa plateforme si nécessaire.
 
 ### Faire évoluer le schéma
 
@@ -237,6 +293,7 @@ Organisation principale :
 
 ```text
 src/config.rs   lecture et validation de feeds.toml
+src/cli.rs      arguments, commandes, rendu et codes de sortie
 src/http.rs     téléchargement HTTP asynchrone
 src/feed.rs     conversion RSS/Atom vers le modèle commun
 src/service.rs  collecte, déduplication et tri
@@ -248,18 +305,17 @@ migrations/     évolution versionnée du schéma SQLite
 
 ## Limites actuelles
 
-- le programme rafraîchit automatiquement les flux à chaque lancement ;
-- le CLI ne permet pas encore de sélectionner et lire un article complet ;
-- les méthodes Rust pour marquer un article comme lu ou favori existent, mais
-  ne sont pas encore exposées par une commande CLI ;
+- le lecteur ne possède pas encore d'interface graphique ou de navigation
+  interactive ;
+- les numéros affichés par `list` ne sont pas persistants entre deux
+  chronologies, contrairement aux identifiants ;
 - les contenus nécessitant une connexion ou un abonnement payant ne sont pas
   pris en charge ;
 - `reader.db` se trouve encore dans le dépôt de développement.
 
-L'étape suivante consiste à stabiliser les commandes du CLI avant d'ajouter
-l'interface Tauri. Dans l'application installable, SQLite deviendra la source de
-vérité et la base sera placée dans le répertoire `AppData` propre au bundle
-`io.github.r0m1-b.reader`.
+L'étape suivante consiste à ajouter l'interface Tauri. Dans l'application
+installable, SQLite deviendra la source de vérité et la base sera placée dans le
+répertoire `AppData` propre au bundle `io.github.r0m1-b.reader`.
 
 La feuille de route détaillée est disponible dans [TODO.md](TODO.md).
 
@@ -268,7 +324,8 @@ La feuille de route détaillée est disponible dans [TODO.md](TODO.md).
 ### `feeds.toml` est introuvable
 
 Créer le fichier à la racine du projet. Le chemin ne dépend pas du répertoire
-depuis lequel le binaire est lancé.
+depuis lequel le binaire est lancé. Ce fichier n'est nécessaire que pour
+`refresh`.
 
 ### La configuration TOML est refusée
 
