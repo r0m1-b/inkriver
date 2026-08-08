@@ -252,6 +252,14 @@ mod tests {
           </channel>
         </rss>"#;
 
+    const RSS_WITHOUT_DESCRIPTION: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Test astronomy feed</title>
+            <link>https://astronomy.example</link>
+          </channel>
+        </rss>"#;
+
     const RSS_WITHOUT_ENTRY_ID_OR_LINK: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <rss version="2.0">
           <channel>
@@ -310,6 +318,21 @@ mod tests {
         assert_eq!(feed.title, "Test astronomy feed");
         assert_eq!(feed.source, Source::Substack);
         assert_eq!(feed.entries.len(), 1);
+    }
+
+    /// Verifies that an optional missing description becomes an empty string.
+    #[test]
+    fn load_feed_accepts_injected_content_without_description() {
+        let feed_config = &test_config().feeds[0];
+
+        let feed = load_feed_with_content_loader(feed_config, |_feed_config| {
+            Ok(RSS_WITHOUT_DESCRIPTION.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(feed.title, "Test astronomy feed");
+        assert_eq!(feed.link, "https://astronomy.example/");
+        assert_eq!(feed.description, "");
     }
 
     /// Verifies that malformed injected XML is reported as a parsing failure.
