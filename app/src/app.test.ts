@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { ReaderApp, canOpenOriginal, detectPlatform, errorMessage } from "./app";
-import type { ReaderApi } from "./api";
+import { InkRiverApp, canOpenOriginal, detectPlatform, errorMessage } from "./app";
+import type { InkRiverApi } from "./api";
 import type { ArticleDetail, ArticleSummary, Feed, RefreshReport } from "./types";
 
 const summary: ArticleSummary = {
@@ -28,7 +28,7 @@ const feed: Feed = {
   isActive: true,
 };
 
-function fakeApi(overrides: Partial<ReaderApi> = {}): ReaderApi {
+function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
   return {
     listArticles: vi.fn(async () => [structuredClone(summary)]),
     getArticle: vi.fn(async () => structuredClone(detail)),
@@ -60,14 +60,14 @@ async function mounted(
 ) {
   document.body.innerHTML = '<div id="app"></div>';
   const root = document.querySelector<HTMLElement>("#app")!;
-  const app = new ReaderApp(root, api, opener, confirmer);
+  const app = new InkRiverApp(root, api, opener, confirmer);
   const initialization = app.init();
   expect(root.querySelector('[data-testid="loading"]')).not.toBeNull();
   await initialization;
   return { root, api, opener, confirmer };
 }
 
-describe("ReaderApp", () => {
+describe("InkRiverApp", () => {
   it("renders the cached timeline without refreshing on startup", async () => {
     const { root, api } = await mounted();
     expect(root.textContent).toContain("Observer Mars au crépuscule");
@@ -161,11 +161,11 @@ describe("ReaderApp", () => {
 
   it("deletes a feed, reloads cached lists and closes its selected article", async () => {
     const listArticles = vi
-      .fn<ReaderApi["listArticles"]>()
+      .fn<InkRiverApi["listArticles"]>()
       .mockResolvedValueOnce([structuredClone(summary)])
       .mockResolvedValueOnce([]);
     const listFeeds = vi
-      .fn<ReaderApi["listFeeds"]>()
+      .fn<InkRiverApi["listFeeds"]>()
       .mockResolvedValueOnce([structuredClone(feed)])
       .mockResolvedValueOnce([]);
     const api = fakeApi({ listArticles, listFeeds });
@@ -213,7 +213,7 @@ describe("ReaderApp", () => {
 
 describe("view helpers", () => {
   it("detects known platforms without accepting lookalike domains", () => {
-    expect(detectPlatform("https://medium.com/feed/@reader")).toBe("medium");
+    expect(detectPlatform("https://medium.com/feed/@inkriver")).toBe("medium");
     expect(detectPlatform("https://letters.substack.com/feed")).toBe("substack");
     expect(detectPlatform("https://substack.com.example/feed")).toBe("other");
   });

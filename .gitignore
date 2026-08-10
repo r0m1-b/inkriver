@@ -2,6 +2,9 @@
 /reader.db
 /reader.db-shm
 /reader.db-wal
+/inkriver.db
+/inkriver.db-shm
+/inkriver.db-wal
 target/
 /app/node_modules/
 /app/dist/

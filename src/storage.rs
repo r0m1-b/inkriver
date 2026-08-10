@@ -9,7 +9,7 @@ use std::{error::Error, fmt};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
-/// Owns the SQLite connection pool used by the reader core.
+/// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
     pool: SqlitePool,
 }
@@ -52,7 +52,7 @@ impl fmt::Display for SubscriptionError {
 
 impl Error for SubscriptionError {}
 
-/// Combines remote article data with reader-specific local state.
+/// Combines remote article data with InkRiver-specific local state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredArticle {
     pub article: Article,
@@ -668,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn open_creates_database_and_applies_migrations() {
         let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("reader.db");
+        let database_path = directory.path().join("inkriver.db");
 
         let storage = Storage::open(&database_path).await.unwrap();
 
@@ -852,18 +852,18 @@ mod tests {
     async fn add_feed_uses_platform_override_and_rejects_active_duplicate() {
         let storage = Storage::open_in_memory().await.unwrap();
         let stored = storage
-            .add_feed("https://medium.com/feed/@reader", Some(Platform::Other))
+            .add_feed("https://medium.com/feed/@inkriver", Some(Platform::Other))
             .await
             .unwrap();
         assert_eq!(stored.platform, Platform::Other);
 
         let error = storage
-            .add_feed("https://medium.com/feed/@reader#fragment", None)
+            .add_feed("https://medium.com/feed/@inkriver#fragment", None)
             .await
             .unwrap_err();
         assert_eq!(
             error,
-            SubscriptionError::DuplicateActiveUrl("https://medium.com/feed/@reader".to_string())
+            SubscriptionError::DuplicateActiveUrl("https://medium.com/feed/@inkriver".to_string())
         );
     }
 

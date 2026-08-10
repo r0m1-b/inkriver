@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn detect_platform_recognizes_known_hosts_without_matching_impostors() {
         assert_eq!(
-            detect_platform("https://medium.com/feed/@reader"),
+            detect_platform("https://medium.com/feed/@inkriver"),
             Platform::Medium
         );
         assert_eq!(

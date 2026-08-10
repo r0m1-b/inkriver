@@ -1,5 +1,5 @@
 use clap::Parser;
-use reader::cli::{self, Cli};
+use inkriver::cli::{self, Cli};
 use std::process::ExitCode;
 
 #[tokio::main(flavor = "current_thread")]

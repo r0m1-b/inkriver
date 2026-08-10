@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Reader",
+  "productName": "InkRiver",
   "version": "0.1.0",
-  "identifier": "io.github.r0m1-b.reader",
+  "identifier": "io.github.r0m1-b.inkriver",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -15,7 +15,7 @@
     },
     "windows": [
       {
-        "title": "Reader",
+        "title": "InkRiver",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -28,6 +28,6 @@
     "targets": ["deb", "appimage"],
     "icon": ["icons/icon.png"],
     "category": "News",
-    "shortDescription": "Lecteur unifié Medium et Substack"
+    "shortDescription": "InkRiver, lecteur unifié Medium et Substack"
   }
 }

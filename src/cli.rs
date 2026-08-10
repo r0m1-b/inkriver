@@ -7,7 +7,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 const CONFIG_FILE_NAME: &str = "feeds.toml";
-const DATABASE_FILE_NAME: &str = "reader.db";
+const DATABASE_FILE_NAME: &str = "inkriver.db";
 const CONTENT_WIDTH: usize = 88;
 
 /// Lecteur unifié de flux RSS et Atom.
@@ -301,7 +301,7 @@ mod tests {
 
     async fn populated_database() -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("reader.db");
+        let database_path = directory.path().join("inkriver.db");
         let storage = Storage::open(&database_path).await.unwrap();
         storage
             .import_feeds(&[FeedConfig {
@@ -374,7 +374,7 @@ mod tests {
 
         for (name, expected) in cases {
             let mut arguments = vec![
-                "reader",
+                "inkriver",
                 "--database",
                 "custom.db",
                 "--config",
@@ -394,7 +394,7 @@ mod tests {
     /// Verifies an invocation without a subcommand produces the help text.
     #[test]
     fn no_command_displays_help() {
-        let error = Cli::try_parse_from(["reader"]).unwrap_err();
+        let error = Cli::try_parse_from(["inkriver"]).unwrap_err();
         assert!(error.to_string().contains("Usage:"));
         assert!(error.to_string().contains("Commands:"));
     }
@@ -404,7 +404,7 @@ mod tests {
     fn default_paths_are_anchored_to_manifest_directory() {
         for (path, file_name) in [
             (default_config_path(), "feeds.toml"),
-            (default_database_path(), "reader.db"),
+            (default_database_path(), "inkriver.db"),
         ] {
             assert!(path.is_absolute());
             assert_eq!(path.file_name().unwrap(), file_name);
@@ -623,7 +623,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let cli = Cli {
             config: Some(directory.path().join("missing.toml")),
-            database: Some(directory.path().join("reader.db")),
+            database: Some(directory.path().join("inkriver.db")),
             command: Command::Refresh,
         };
 

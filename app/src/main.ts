@@ -1,9 +1,9 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ReaderApp } from "./app";
+import { InkRiverApp } from "./app";
 import { tauriApi } from "./api";
 import "./styles.css";
 
 const root = document.querySelector<HTMLElement>("#app");
-if (!root) throw new Error("Reader root element is missing");
+if (!root) throw new Error("InkRiver root element is missing");
 
-void new ReaderApp(root, tauriApi, openUrl, (message) => window.confirm(message)).init();
+void new InkRiverApp(root, tauriApi, openUrl, (message) => window.confirm(message)).init();

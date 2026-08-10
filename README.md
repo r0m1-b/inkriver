@@ -1,8 +1,8 @@
-# Reader
+# InkRiver
 
 **English** | [Français](README.fr.md)
 
-Reader is an RSS/Atom feed reader written in Rust. It brings Medium, Substack,
+InkRiver is an RSS/Atom feed reader written in Rust. It brings Medium, Substack,
 and other compatible subscriptions together in a single timeline and makes
 articles available offline.
 
@@ -75,7 +75,7 @@ cargo build
 ```
 
 Cargo downloads the crates declared in `Cargo.toml` and creates the development
-binary at `target/debug/reader`.
+binary at `target/debug/inkriver`.
 
 For an optimized build:
 
@@ -83,7 +83,7 @@ For an optimized build:
 cargo build --release
 ```
 
-The resulting binary is located at `target/release/reader`.
+The resulting binary is located at `target/release/inkriver`.
 
 Then install the frontend dependencies:
 
@@ -102,10 +102,10 @@ From `app/`, start the development application with:
 npm run tauri dev
 ```
 
-On first launch, Reader automatically creates `reader.db` in the data directory
-for the `io.github.r0m1-b.reader` bundle—usually
-`~/.local/share/io.github.r0m1-b.reader/` on Ubuntu. This database is separate
-from the CLI's `reader.db`.
+On first launch, InkRiver automatically creates `inkriver.db` in the data
+directory for the `io.github.r0m1-b.inkriver` bundle—usually
+`~/.local/share/io.github.r0m1-b.inkriver/` on Ubuntu. This database is separate
+from the CLI's `inkriver.db`.
 
 The application displays its cache immediately and never accesses the network
 on startup. Use “Subscriptions” to add an RSS/Atom URL, correct the detected
@@ -179,7 +179,7 @@ cargo run -- refresh
 The `refresh` command:
 
 1. reads `feeds.toml`;
-2. opens or creates `reader.db`;
+2. opens or creates `inkriver.db`;
 3. applies missing SQLite migrations;
 4. imports the current subscription list;
 5. downloads the feeds;
@@ -219,7 +219,7 @@ Paths can be overridden for a command:
 ```bash
 cargo run -- \
   --config /path/to/feeds.toml \
-  --database /path/to/reader.db \
+  --database /path/to/inkriver.db \
   refresh
 ```
 
@@ -245,7 +245,7 @@ The database does not require a separate installation step. On the first
 file at the project root:
 
 ```text
-reader.db
+inkriver.db
 ```
 
 Migrations from `migrations/` are embedded in the binary and applied when the
@@ -256,7 +256,7 @@ database is opened. The database currently contains:
   and favorite states;
 - `_sqlx_migrations`: migrations already applied by SQLx.
 
-SQLite may also create temporary `reader.db-wal` and `reader.db-shm` files.
+SQLite may also create temporary `inkriver.db-wal` and `inkriver.db-shm` files.
 These files and the main database are ignored by Git.
 
 ### Inspect the database
@@ -264,18 +264,18 @@ These files and the main database are ignored by Git.
 With the optional `sqlite3` client:
 
 ```bash
-sqlite3 reader.db ".tables"
-sqlite3 reader.db ".schema feeds"
-sqlite3 reader.db ".schema articles"
+sqlite3 inkriver.db ".tables"
+sqlite3 inkriver.db ".schema feeds"
+sqlite3 inkriver.db ".schema articles"
 ```
 
 Some read-only diagnostic queries:
 
 ```bash
-sqlite3 -header -column reader.db \
+sqlite3 -header -column inkriver.db \
   "SELECT id, platform, is_active, url FROM feeds ORDER BY id;"
 
-sqlite3 -header -column reader.db \
+sqlite3 -header -column inkriver.db \
   "SELECT id, title, published_at, is_read, is_favorite FROM articles ORDER BY published_at DESC LIMIT 20;"
 ```
 
@@ -284,16 +284,16 @@ and preserves local states during refreshes.
 
 ### Back up the database
 
-After stopping Reader, use SQLite's backup command:
+After stopping InkRiver, use SQLite's backup command:
 
 ```bash
-sqlite3 reader.db ".backup 'reader-backup.db'"
+sqlite3 inkriver.db ".backup 'inkriver-backup.db'"
 ```
 
-A regular copy is also safe while Reader and every SQLite client are stopped:
+A regular copy is also safe while InkRiver and every SQLite client are stopped:
 
 ```bash
-cp reader.db reader-backup.db
+cp inkriver.db inkriver-backup.db
 ```
 
 The database contains articles, imported subscriptions, and read and favorite
@@ -302,11 +302,11 @@ states. Back up `feeds.toml` separately.
 ### Reset the database completely
 
 Warning: this operation deletes article history, favorites, and read states.
-Stop Reader, make an optional backup, and run the following commands from the
+Stop InkRiver, make an optional backup, and run the following commands from the
 project root:
 
 ```bash
-rm -f reader.db reader.db-shm reader.db-wal
+rm -f inkriver.db inkriver.db-shm inkriver.db-wal
 cargo run -- refresh
 ```
 
@@ -314,13 +314,13 @@ The next run creates an empty database, reapplies every migration, imports
 `feeds.toml`, and downloads articles still available in the feeds. Older
 articles no longer present in the feeds cannot be recovered without a backup.
 
-To reset the Tauri application's database, close Reader, create a backup if
+To reset the Tauri application's database, close InkRiver, create a backup if
 needed, and remove all three SQLite files from its AppData directory:
 
 ```bash
-rm -f ~/.local/share/io.github.r0m1-b.reader/reader.db \
-  ~/.local/share/io.github.r0m1-b.reader/reader.db-shm \
-  ~/.local/share/io.github.r0m1-b.reader/reader.db-wal
+rm -f ~/.local/share/io.github.r0m1-b.inkriver/inkriver.db \
+  ~/.local/share/io.github.r0m1-b.inkriver/inkriver.db-shm \
+  ~/.local/share/io.github.r0m1-b.inkriver/inkriver.db-wal
 ```
 
 The next launch creates an empty database. Unlike the CLI, the application does
@@ -347,7 +347,7 @@ Never edit an applied migration. To evolve the database:
 1. add a new versioned SQL file under `migrations/`;
 2. keep every previous migration;
 3. compile and run the tests;
-4. restart Reader to apply the new migration.
+4. restart InkRiver to apply the new migration.
 
 The `build.rs` script tells Cargo to rebuild the binary whenever the migrations
 directory changes.
@@ -369,7 +369,7 @@ npm run build
 ```
 
 Collection tests use injected content and local fixtures. SQLite tests use
-in-memory databases or temporary files and never modify `reader.db`.
+in-memory databases or temporary files and never modify `inkriver.db`.
 
 Main project structure:
 
@@ -393,15 +393,15 @@ app/src-tauri/  Tauri adapter, commands, and configuration
   article identifiers;
 - content requiring authentication or a paid subscription is not supported;
 - the interface is not yet adapted to mobile screens;
-- the CLI's `reader.db` is still stored in the development repository.
+- the CLI's `inkriver.db` is still stored in the development repository.
 
 The next step is to adapt the interface to Android. In the installed
 application, SQLite is already the source of truth and lives in the AppData
-directory for the `io.github.r0m1-b.reader` bundle.
+directory for the `io.github.r0m1-b.inkriver` bundle.
 
 ## License
 
-Reader is distributed under the [MIT License](LICENSE).
+InkRiver is distributed under the [MIT License](LICENSE).
 
 ## Quick troubleshooting
 
@@ -422,7 +422,7 @@ available when a server is unavailable.
 
 ### The database is locked
 
-Close other `reader` processes and open `sqlite3` sessions, then try again. Do
+Close other `inkriver` processes and open `sqlite3` sessions, then try again. Do
 not remove database files while any process is using them.
 
 ### A migration fails
@@ -434,7 +434,7 @@ clean schema.
 ### A GLIBC error mentions `/snap/core20`
 
 An integrated terminal from a snap installation of VS Code may inject its own
-GTK/GIO variables, mixing snap libraries with system libraries. Run Reader from
+GTK/GIO variables, mixing snap libraries with system libraries. Run InkRiver from
 a regular Ubuntu terminal. For a one-off diagnosis in the integrated terminal,
 unset `GTK_PATH`, `GIO_MODULE_DIR`, `GDK_PIXBUF_MODULE_FILE`,
 `GSETTINGS_SCHEMA_DIR`, and `LOCPATH` before running `npm run tauri dev`.

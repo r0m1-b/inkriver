@@ -1,11 +1,11 @@
 use chrono::{TimeZone, Utc};
-use reader::article::{Article, ContentKind, Source};
-use reader::config::{FeedConfig, Platform};
-use reader::storage::Storage;
+use inkriver::article::{Article, ContentKind, Source};
+use inkriver::config::{FeedConfig, Platform};
+use inkriver::storage::Storage;
 use std::process::{Command, Output};
 
-fn reader_command(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_reader"))
+fn inkriver_command(arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_inkriver"))
         .args(arguments)
         .output()
         .unwrap()
@@ -41,7 +41,7 @@ async fn create_cached_database(database_path: &std::path::Path) {
 /// Verifies the executable displays Clap help instead of refreshing implicitly.
 #[test]
 fn no_argument_displays_help() {
-    let output = reader_command(&[]);
+    let output = inkriver_command(&[]);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(!output.status.success());
@@ -53,11 +53,11 @@ fn no_argument_displays_help() {
 #[tokio::test]
 async fn list_reads_cached_articles_without_configuration() {
     let directory = tempfile::tempdir().unwrap();
-    let database_path = directory.path().join("reader.db");
+    let database_path = directory.path().join("inkriver.db");
     let missing_config_path = directory.path().join("missing.toml");
     create_cached_database(&database_path).await;
 
-    let output = reader_command(&[
+    let output = inkriver_command(&[
         "--config",
         missing_config_path.to_str().unwrap(),
         "--database",

@@ -1,13 +1,13 @@
-use reader::config::Platform;
-use reader::refresh::{self, RefreshReport};
-use reader::storage::{
+use inkriver::config::Platform;
+use inkriver::refresh::{self, RefreshReport};
+use inkriver::storage::{
     ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, SubscriptionError,
 };
 use serde::Serialize;
 use std::path::Path;
 use tauri::{Manager, State};
 
-const DATABASE_FILE_NAME: &str = "reader.db";
+const DATABASE_FILE_NAME: &str = "inkriver.db";
 
 pub struct AppState {
     storage: Storage,
@@ -400,18 +400,18 @@ pub fn run() {
             delete_feed,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Reader");
+        .expect("error while running InkRiver");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reader::article::{Article, ContentKind, Source};
-    use reader::config::FeedConfig;
+    use inkriver::article::{Article, ContentKind, Source};
+    use inkriver::config::FeedConfig;
 
     async fn test_storage() -> (tempfile::TempDir, Storage) {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("reader.db"))
+        let storage = Storage::open(&directory.path().join("inkriver.db"))
             .await
             .unwrap();
         (directory, storage)
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn refresh_report_keeps_partial_feed_errors() {
-        use reader::service::{FeedCollectionError, FeedLoadError, FeedLoadStage};
+        use inkriver::service::{FeedCollectionError, FeedLoadError, FeedLoadStage};
         let dto = RefreshReportDto::from(RefreshReport {
             active_feeds: 1,
             collected_articles: 0,
@@ -569,7 +569,7 @@ mod tests {
         let value = serde_json::to_value(FeedDto {
             id: "feed-id".to_string(),
             platform: "medium".to_string(),
-            url: "https://medium.com/feed/@reader".to_string(),
+            url: "https://medium.com/feed/@inkriver".to_string(),
             is_active: true,
         })
         .unwrap();

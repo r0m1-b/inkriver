@@ -8,7 +8,7 @@ import type {
   RefreshReport,
 } from "./types";
 
-export interface ReaderApi {
+export interface InkRiverApi {
   listArticles(): Promise<ArticleSummary[]>;
   getArticle(articleId: string): Promise<ArticleDetail>;
   refreshFeeds(): Promise<RefreshReport>;
@@ -20,7 +20,7 @@ export interface ReaderApi {
   deleteFeed(feedId: string): Promise<DeleteFeedResult>;
 }
 
-export const tauriApi: ReaderApi = {
+export const tauriApi: InkRiverApi = {
   listArticles: () => invoke("list_articles"),
   getArticle: (articleId) => invoke("get_article", { articleId }),
   refreshFeeds: () => invoke("refresh_feeds"),

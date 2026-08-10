@@ -195,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_preserves_history_and_local_state_when_feed_is_removed() {
         let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("reader.db");
+        let database_path = directory.path().join("inkriver.db");
         let storage = Storage::open(&database_path).await.unwrap();
         let complete_config = Config {
             feeds: vec![

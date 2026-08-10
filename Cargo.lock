@@ -2161,6 +2161,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkriver"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "chrono",
+ "clap",
+ "feed-rs",
+ "html2text",
+ "reqwest",
+ "serde",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "uuid",
+]
+
+[[package]]
+name = "inkriver-app"
+version = "0.1.0"
+dependencies = [
+ "inkriver",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3258,40 +3292,6 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
-
-[[package]]
-name = "reader"
-version = "0.1.0"
-dependencies = [
- "ammonia",
- "anyhow",
- "chrono",
- "clap",
- "feed-rs",
- "html2text",
- "reqwest",
- "serde",
- "sha2 0.10.9",
- "sqlx",
- "tempfile",
- "tokio",
- "toml 1.1.4+spec-1.1.0",
- "uuid",
-]
-
-[[package]]
-name = "reader-app"
-version = "0.1.0"
-dependencies = [
- "reader",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tempfile",
- "tokio",
-]
 
 [[package]]
 name = "redox_syscall"

@@ -1,20 +1,20 @@
 [package]
-name = "reader-app"
+name = "inkriver-app"
 version = "0.1.0"
-description = "A unified Medium and Substack reader"
-authors = ["Reader contributors"]
+description = "InkRiver, a unified Medium and Substack reader"
+authors = ["InkRiver contributors"]
 edition = "2024"
 license = "MIT"
 
 [lib]
-name = "reader_app_lib"
+name = "inkriver_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-reader = { path = "../.." }
+inkriver = { path = "../.." }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"

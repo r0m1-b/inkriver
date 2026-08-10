@@ -1,4 +1,4 @@
-import type { ReaderApi } from "./api";
+import type { InkRiverApi } from "./api";
 import type {
   ApiError,
   ArticleDetail,
@@ -51,7 +51,7 @@ export function canOpenOriginal(article: ArticleDetail): boolean {
   return Boolean(article.url && article.contentKind !== "full");
 }
 
-export class ReaderApp {
+export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
   private selected: ArticleDetail | null = null;
@@ -64,7 +64,7 @@ export class ReaderApp {
 
   constructor(
     private readonly root: HTMLElement,
-    private readonly api: ReaderApi,
+    private readonly api: InkRiverApi,
     private readonly openOriginal: OpenOriginal,
     private readonly confirmDeletion: ConfirmDeletion,
   ) {}
@@ -232,7 +232,7 @@ export class ReaderApp {
 
   private renderReader(): string {
     if (!this.selected) {
-      return '<div class="reader-placeholder"><span>R</span><p>Sélectionnez un article dans la chronologie.</p></div>';
+      return '<div class="reader-placeholder"><span>IR</span><p>Sélectionnez un article dans la chronologie.</p></div>';
     }
     const article = this.selected;
     const originalButton = canOpenOriginal(article)
@@ -268,7 +268,7 @@ export class ReaderApp {
 
   render(): void {
     this.root.innerHTML = `<div class="shell">
-      <header class="topbar"><div class="brand"><span>R</span><div><strong>Reader</strong><small>Medium + Substack</small></div></div><div class="top-actions"><button data-action="subscriptions">Abonnements</button><button class="primary" data-action="refresh" ${this.refreshing ? "disabled" : ""}>${this.refreshing ? "Actualisation…" : "Actualiser"}</button></div></header>
+      <header class="topbar"><div class="brand"><span>IR</span><div><strong>InkRiver</strong><small>Medium + Substack</small></div></div><div class="top-actions"><button data-action="subscriptions">Abonnements</button><button class="primary" data-action="refresh" ${this.refreshing ? "disabled" : ""}>${this.refreshing ? "Actualisation…" : "Actualiser"}</button></div></header>
       ${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}
       ${this.notice ? `<div class="banner notice" role="status">${escapeHtml(this.notice)}</div>` : ""}
       <main><aside class="timeline" aria-label="Chronologie">${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section></main>
