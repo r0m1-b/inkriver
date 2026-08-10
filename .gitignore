@@ -6,3 +6,9 @@ target/
 /app/node_modules/
 /app/dist/
 /app/src-tauri/gen/
+
+# Local development and Codex working files
+/AGENTS.md
+/codex_report.md
+/script.sh
+/script.sh~
