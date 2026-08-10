@@ -12,3 +12,9 @@ target/
 /codex_report.md
 /script.sh
 /script.sh~
+/FEATURE_REQUESTS.md
+/TODO.md
+
+# Temporary files
+*.tmp
+*~

@@ -404,8 +404,6 @@ L'étape suivante consiste à adapter l'interface à Android. Dans l'application
 installée, SQLite est déjà la source de vérité et se trouve dans le répertoire
 AppData propre au bundle `io.github.r0m1-b.reader`.
 
-La feuille de route détaillée est disponible dans [TODO.md](TODO.md).
-
 ## Dépannage rapide
 
 ### `feeds.toml` est introuvable
