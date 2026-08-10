@@ -25,6 +25,11 @@ export interface Feed {
   isActive: boolean;
 }
 
+export interface DeleteFeedResult {
+  feedId: string;
+  deletedArticles: number;
+}
+
 export interface FeedRefreshError {
   feedId: string;
   feedUrl: string;

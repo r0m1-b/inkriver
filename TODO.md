@@ -177,6 +177,17 @@ Sur ordinateur, l'interface utilise deux panneaux : liste à gauche et article �
 droite. Le cache est affiché sans réseau au démarrage et l'actualisation reste
 une action manuelle.
 
+### 8.1. Traiter les retours du premier test utilisateur
+
+- [ ] Préciser puis implémenter les demandes enregistrées dans
+      [FEATURE_REQUESTS.md](FEATURE_REQUESTS.md) : suppression d'un abonnement,
+      états lu/non lu, liens externes, détail des erreurs et conversion des URL
+      Medium.
+  - [x] FR-001 — supprimer un abonnement et ses articles dans une transaction ;
+
+Ces améliorations doivent être évaluées avant de commencer l'étape Android afin
+de stabiliser le comportement du lecteur sur ordinateur.
+
 ### 9. Ajouter Android
 
 - [ ] Rendre l'interface responsive : liste puis écran de lecture sur mobile.

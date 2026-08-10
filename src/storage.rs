@@ -23,6 +23,13 @@ pub struct StoredFeed {
     pub is_active: bool,
 }
 
+/// Summarizes a permanent subscription deletion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteFeedResult {
+    pub feed_id: String,
+    pub deleted_articles: usize,
+}
+
 /// Errors produced while changing the installed application's subscriptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubscriptionError {
@@ -328,6 +335,54 @@ impl Storage {
             platform,
             url,
             is_active,
+        })
+    }
+
+    /// Permanently deletes a subscription and all of its cached articles.
+    ///
+    /// The operation is atomic: article state is stored on the article rows, so
+    /// deleting them also removes read and favorite state. Deactivation remains
+    /// available when the user wants to retain that history.
+    pub async fn delete_feed(
+        &self,
+        feed_id: &str,
+    ) -> std::result::Result<DeleteFeedResult, SubscriptionError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM feeds WHERE id = ?)")
+            .bind(feed_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        if !exists {
+            return Err(SubscriptionError::NotFound(feed_id.to_string()));
+        }
+
+        let deleted_articles = sqlx::query("DELETE FROM articles WHERE feed_id = ?")
+            .bind(feed_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+            .rows_affected() as usize;
+
+        sqlx::query("DELETE FROM feeds WHERE id = ?")
+            .bind(feed_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+
+        Ok(DeleteFeedResult {
+            feed_id: feed_id.to_string(),
+            deleted_articles,
         })
     }
 
@@ -846,6 +901,119 @@ mod tests {
             storage.set_feed_active("missing", true).await.unwrap_err(),
             SubscriptionError::NotFound("missing".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn delete_feed_removes_its_articles_and_local_states_only() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[
+                feed(
+                    "astronomy",
+                    Platform::Substack,
+                    "https://astronomy.example/feed",
+                ),
+                feed("bread", Platform::Medium, "https://medium.com/feed/@bread"),
+            ])
+            .await
+            .unwrap();
+        storage
+            .upsert_articles(&[
+                article("astronomy::mars", "astronomy", None),
+                article("astronomy::venus", "astronomy", None),
+                article("bread::starter", "bread", None),
+            ])
+            .await
+            .unwrap();
+        storage.set_read("astronomy::mars", true).await.unwrap();
+        storage
+            .set_favorite("astronomy::venus", true)
+            .await
+            .unwrap();
+
+        let result = storage.delete_feed("astronomy").await.unwrap();
+
+        assert_eq!(
+            result,
+            DeleteFeedResult {
+                feed_id: "astronomy".to_string(),
+                deleted_articles: 2,
+            }
+        );
+        assert_eq!(
+            storage.list_feeds().await.unwrap(),
+            vec![StoredFeed {
+                id: "bread".to_string(),
+                platform: Platform::Medium,
+                url: "https://medium.com/feed/@bread".to_string(),
+                is_active: true,
+            }]
+        );
+        let articles = storage.list_articles().await.unwrap();
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].article.id, "bread::starter");
+    }
+
+    #[tokio::test]
+    async fn delete_feed_accepts_inactive_feeds_and_reports_missing_ids() {
+        let storage = storage_with_feed().await;
+        storage.set_feed_active("astronomy", false).await.unwrap();
+
+        assert_eq!(
+            storage.delete_feed("missing").await.unwrap_err(),
+            SubscriptionError::NotFound("missing".to_string())
+        );
+        assert_eq!(storage.list_feeds().await.unwrap().len(), 1);
+
+        let result = storage.delete_feed("astronomy").await.unwrap();
+        assert_eq!(result.deleted_articles, 0);
+        assert!(storage.list_feeds().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_feed_rolls_back_article_deletion_when_feed_deletion_fails() {
+        let storage = storage_with_feed().await;
+        storage
+            .upsert_articles(&[article("astronomy::mars", "astronomy", None)])
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+                CREATE TRIGGER reject_feed_deletion
+                BEFORE DELETE ON feeds
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated deletion failure');
+                END
+            "#,
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            storage.delete_feed("astronomy").await.unwrap_err(),
+            SubscriptionError::Database(message) if message.contains("simulated deletion failure")
+        ));
+        assert_eq!(storage.list_feeds().await.unwrap().len(), 1);
+        assert_eq!(storage.list_articles().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleted_feed_url_can_be_added_again_with_a_new_uuid() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let original = storage
+            .add_feed("https://letters.substack.com/feed", None)
+            .await
+            .unwrap();
+
+        storage.delete_feed(&original.id).await.unwrap();
+        let replacement = storage
+            .add_feed("https://letters.substack.com/feed", None)
+            .await
+            .unwrap();
+
+        assert_ne!(replacement.id, original.id);
+        assert_eq!(replacement.url, original.url);
     }
 
     /// Verifies a failed import rolls back its preliminary deactivation.

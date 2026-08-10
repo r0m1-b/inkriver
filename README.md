@@ -16,7 +16,8 @@ adaptation Android est prévue dans une étape ultérieure.
 - nettoyage du HTML reçu avant son stockage ;
 - déduplication des articles avec un identifiant propre à chaque flux ;
 - stockage local dans SQLite avec migrations automatiques ;
-- conservation des articles lorsqu'un abonnement est retiré ;
+- désactivation d'un abonnement sans perte d'historique ou suppression
+  définitive avec ses articles ;
 - états locaux « lu » et « favori » dans le cœur Rust ;
 - affichage des articles du plus récent au plus ancien ;
 - lecture du cache même lorsque certains flux sont indisponibles ;
@@ -108,12 +109,17 @@ la base `reader.db` du CLI.
 
 L'application affiche immédiatement son cache et ne contacte jamais le réseau
 au démarrage. Utiliser « Abonnements » pour ajouter une URL RSS/Atom, corriger
-si nécessaire la plateforme détectée, ou désactiver un flux. Utiliser ensuite
-« Actualiser » pour télécharger les articles.
+si nécessaire la plateforme détectée, désactiver un flux ou le supprimer.
+Utiliser ensuite « Actualiser » pour télécharger les articles.
 
 Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
 les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
 lieu de créer un nouvel historique.
+
+Supprimer est une action définitive distincte. Après confirmation, l'application
+efface dans une même transaction l'abonnement, tous ses articles ainsi que leurs
+états lu et favori. Ajouter de nouveau cette URL crée alors un nouvel abonnement
+sans restaurer l'ancien historique.
 
 Créer les paquets Linux optimisés :
 
@@ -325,6 +331,10 @@ ne réimporte pas automatiquement `feeds.toml` : les abonnements doivent être
 ajoutés de nouveau dans l'interface.
 
 ### Retirer ou réactiver un abonnement
+
+Cette section concerne le CLI. Dans l'application graphique, « Désactiver »
+conserve l'historique tandis que « Supprimer » efface définitivement
+l'abonnement et tous ses articles après confirmation.
 
 Retirer une entrée de `feeds.toml`, puis exécuter `cargo run -- refresh`, marque
 l'abonnement comme inactif. Ses articles, favoris et états de lecture restent

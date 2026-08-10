@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ArticleDetail, ArticleSummary, Feed, Platform, RefreshReport } from "./types";
+import type {
+  ArticleDetail,
+  ArticleSummary,
+  DeleteFeedResult,
+  Feed,
+  Platform,
+  RefreshReport,
+} from "./types";
 
 export interface ReaderApi {
   listArticles(): Promise<ArticleSummary[]>;
@@ -10,6 +17,7 @@ export interface ReaderApi {
   listFeeds(): Promise<Feed[]>;
   addFeed(url: string, platform?: Platform): Promise<Feed>;
   setFeedActive(feedId: string, isActive: boolean): Promise<Feed>;
+  deleteFeed(feedId: string): Promise<DeleteFeedResult>;
 }
 
 export const tauriApi: ReaderApi = {
@@ -24,4 +32,5 @@ export const tauriApi: ReaderApi = {
   addFeed: (url, platform) => invoke("add_feed", { url, platform }),
   setFeedActive: (feedId, isActive) =>
     invoke("set_feed_active", { feedId, isActive }),
+  deleteFeed: (feedId) => invoke("delete_feed", { feedId }),
 };

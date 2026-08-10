@@ -1,6 +1,8 @@
 use reader::config::Platform;
 use reader::refresh::{self, RefreshReport};
-use reader::storage::{ArticleSummary, Storage, StoredArticle, StoredFeed, SubscriptionError};
+use reader::storage::{
+    ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, SubscriptionError,
+};
 use serde::Serialize;
 use std::path::Path;
 use tauri::{Manager, State};
@@ -111,6 +113,22 @@ impl From<StoredFeed> for FeedDto {
             platform: feed.platform.as_str().to_string(),
             url: feed.url,
             is_active: feed.is_active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteFeedResultDto {
+    pub feed_id: String,
+    pub deleted_articles: usize,
+}
+
+impl From<DeleteFeedResult> for DeleteFeedResultDto {
+    fn from(result: DeleteFeedResult) -> Self {
+        Self {
+            feed_id: result.feed_id,
+            deleted_articles: result.deleted_articles,
         }
     }
 }
@@ -272,6 +290,17 @@ async fn set_feed_active_in(
         .map_err(subscription_error)
 }
 
+async fn delete_feed_from(
+    storage: &Storage,
+    feed_id: &str,
+) -> Result<DeleteFeedResultDto, ApiError> {
+    storage
+        .delete_feed(feed_id)
+        .await
+        .map(Into::into)
+        .map_err(subscription_error)
+}
+
 #[tauri::command]
 async fn list_articles(state: State<'_, AppState>) -> Result<Vec<ArticleSummaryDto>, ApiError> {
     list_articles_from(&state.storage).await
@@ -334,6 +363,14 @@ async fn set_feed_active(
     set_feed_active_in(&state.storage, &feed_id, is_active).await
 }
 
+#[tauri::command]
+async fn delete_feed(
+    state: State<'_, AppState>,
+    feed_id: String,
+) -> Result<DeleteFeedResultDto, ApiError> {
+    delete_feed_from(&state.storage, &feed_id).await
+}
+
 fn open_storage(database_path: &Path) -> Result<Storage, Box<dyn std::error::Error>> {
     Ok(tauri::async_runtime::block_on(Storage::open(
         database_path,
@@ -360,6 +397,7 @@ pub fn run() {
             list_feeds,
             add_feed,
             set_feed_active,
+            delete_feed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Reader");
@@ -506,6 +544,26 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn delete_feed_adapter_removes_articles_and_maps_missing_feed_error() {
+        let (_directory, storage) = storage_with_article().await;
+
+        let result = delete_feed_from(&storage, "space").await.unwrap();
+        assert_eq!(
+            result,
+            DeleteFeedResultDto {
+                feed_id: "space".to_string(),
+                deleted_articles: 1,
+            }
+        );
+        assert!(list_feeds_from(&storage).await.unwrap().is_empty());
+        assert!(list_articles_from(&storage).await.unwrap().is_empty());
+        assert_eq!(
+            delete_feed_from(&storage, "missing").await.unwrap_err(),
+            ApiError::new("feed_not_found", "Abonnement introuvable : missing")
+        );
+    }
+
     #[test]
     fn serialized_dtos_use_camel_case_fields() {
         let value = serde_json::to_value(FeedDto {
@@ -517,5 +575,14 @@ mod tests {
         .unwrap();
         assert_eq!(value["isActive"], true);
         assert!(value.get("is_active").is_none());
+
+        let deletion = serde_json::to_value(DeleteFeedResultDto {
+            feed_id: "feed-id".to_string(),
+            deleted_articles: 3,
+        })
+        .unwrap();
+        assert_eq!(deletion["feedId"], "feed-id");
+        assert_eq!(deletion["deletedArticles"], 3);
+        assert!(deletion.get("deleted_articles").is_none());
     }
 }

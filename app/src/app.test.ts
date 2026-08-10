@@ -5,7 +5,7 @@ import type { ArticleDetail, ArticleSummary, Feed, RefreshReport } from "./types
 
 const summary: ArticleSummary = {
   id: "space::mars",
-  feedId: "space",
+  feedId: "stable-feed-id",
   title: "Observer Mars au crépuscule",
   author: "Claire du Ciel",
   publishedAt: "2026-08-08T12:00:00Z",
@@ -44,6 +44,7 @@ function fakeApi(overrides: Partial<ReaderApi> = {}): ReaderApi {
     listFeeds: vi.fn(async () => [structuredClone(feed)]),
     addFeed: vi.fn(async () => structuredClone(feed)),
     setFeedActive: vi.fn(async () => structuredClone(feed)),
+    deleteFeed: vi.fn(async () => ({ feedId: feed.id, deletedArticles: 1 })),
     ...overrides,
   };
 }
@@ -52,14 +53,18 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-async function mounted(api = fakeApi(), opener = vi.fn(async () => undefined)) {
+async function mounted(
+  api = fakeApi(),
+  opener = vi.fn(async () => undefined),
+  confirmer = vi.fn(() => true),
+) {
   document.body.innerHTML = '<div id="app"></div>';
   const root = document.querySelector<HTMLElement>("#app")!;
-  const app = new ReaderApp(root, api, opener);
+  const app = new ReaderApp(root, api, opener, confirmer);
   const initialization = app.init();
   expect(root.querySelector('[data-testid="loading"]')).not.toBeNull();
   await initialization;
-  return { root, api, opener };
+  return { root, api, opener, confirmer };
 }
 
 describe("ReaderApp", () => {
@@ -133,9 +138,67 @@ describe("ReaderApp", () => {
     await flush();
     expect(api.addFeed).toHaveBeenCalledWith("https://notes.medium.com/feed", "medium");
     expect(api.refreshFeeds).not.toHaveBeenCalled();
-    root.querySelector<HTMLElement>("[data-feed-id]")!.click();
+    root.querySelector<HTMLElement>('[data-action="toggle-feed"]')!.click();
     await flush();
     expect(api.setFeedActive).toHaveBeenCalledWith("stable-feed-id", false);
+  });
+
+  it("cancels feed deletion without changing cached data", async () => {
+    const api = fakeApi();
+    const confirmer = vi.fn(() => false);
+    const { root } = await mounted(api, vi.fn(async () => undefined), confirmer);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>('[data-action="delete-feed"]')!.click();
+    await flush();
+
+    expect(confirmer).toHaveBeenCalledWith(expect.stringContaining(feed.url));
+    expect(confirmer).toHaveBeenCalledWith(expect.stringContaining("favoris"));
+    expect(api.deleteFeed).not.toHaveBeenCalled();
+    expect(root.textContent).toContain(feed.url);
+    expect(root.textContent).toContain(summary.title);
+  });
+
+  it("deletes a feed, reloads cached lists and closes its selected article", async () => {
+    const listArticles = vi
+      .fn<ReaderApi["listArticles"]>()
+      .mockResolvedValueOnce([structuredClone(summary)])
+      .mockResolvedValueOnce([]);
+    const listFeeds = vi
+      .fn<ReaderApi["listFeeds"]>()
+      .mockResolvedValueOnce([structuredClone(feed)])
+      .mockResolvedValueOnce([]);
+    const api = fakeApi({ listArticles, listFeeds });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>('[data-action="delete-feed"]')!.click();
+    await flush();
+
+    expect(api.deleteFeed).toHaveBeenCalledWith("stable-feed-id");
+    expect(listFeeds).toHaveBeenCalledTimes(2);
+    expect(listArticles).toHaveBeenCalledTimes(2);
+    expect(root.textContent).toContain("Abonnement supprimé avec 1 article supprimé.");
+    expect(root.textContent).toContain("Aucun abonnement");
+    expect(root.textContent).toContain("Sélectionnez un article");
+    expect(root.textContent).not.toContain(summary.title);
+  });
+
+  it("keeps the feed and cached articles visible when deletion fails", async () => {
+    const api = fakeApi({
+      deleteFeed: vi.fn(async () => Promise.reject({ code: "storage", message: "Suppression impossible" })),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>('[data-action="delete-feed"]')!.click();
+    await flush();
+
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("Suppression impossible");
+    expect(root.textContent).toContain(feed.url);
+    expect(root.textContent).toContain(summary.title);
   });
 
   it("opens an excerpt original through the injected opener", async () => {

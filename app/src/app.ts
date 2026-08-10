@@ -9,6 +9,7 @@ import type {
 } from "./types";
 
 type OpenOriginal = (url: string) => Promise<void>;
+type ConfirmDeletion = (message: string) => boolean;
 
 function escapeHtml(value: string): string {
   return value
@@ -57,6 +58,7 @@ export class ReaderApp {
   private loading = true;
   private refreshing = false;
   private subscriptionsOpen = false;
+  private deletingFeedId: string | null = null;
   private error: string | null = null;
   private notice: string | null = null;
 
@@ -64,6 +66,7 @@ export class ReaderApp {
     private readonly root: HTMLElement,
     private readonly api: ReaderApi,
     private readonly openOriginal: OpenOriginal,
+    private readonly confirmDeletion: ConfirmDeletion,
   ) {}
 
   async init(): Promise<void> {
@@ -165,6 +168,37 @@ export class ReaderApp {
     this.render();
   }
 
+  private async deleteFeed(feedId: string): Promise<void> {
+    const feed = this.feeds.find((candidate) => candidate.id === feedId);
+    if (!feed) return;
+    const confirmed = this.confirmDeletion(
+      `Supprimer l’abonnement « ${feed.url} » ? Ses articles, favoris et états de lecture seront définitivement supprimés.`,
+    );
+    if (!confirmed) return;
+
+    this.deletingFeedId = feedId;
+    this.error = null;
+    this.notice = null;
+    this.render();
+    try {
+      const result = await this.api.deleteFeed(feedId);
+      this.feeds = this.feeds.filter((candidate) => candidate.id !== feedId);
+      this.articles = this.articles.filter((article) => article.feedId !== feedId);
+      if (this.selected?.feedId === feedId) this.selected = null;
+      [this.feeds, this.articles] = await Promise.all([
+        this.api.listFeeds(),
+        this.api.listArticles(),
+      ]);
+      const label = result.deletedArticles > 1 ? "articles supprimés" : "article supprimé";
+      this.notice = `Abonnement supprimé avec ${result.deletedArticles} ${label}.`;
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.deletingFeedId = null;
+      this.render();
+    }
+  }
+
   private async openSelectedOriginal(): Promise<void> {
     if (!this.selected?.url) return;
     try {
@@ -221,7 +255,7 @@ export class ReaderApp {
     const feeds = this.feeds.length
       ? this.feeds
           .map(
-            (feed) => `<li><div><strong>${displayPlatform(feed.platform)}</strong><span>${escapeHtml(feed.url)}</span></div><button data-feed-id="${escapeHtml(feed.id)}" data-next-active="${!feed.isActive}">${feed.isActive ? "Désactiver" : "Réactiver"}</button></li>`,
+            (feed) => `<li><div class="feed-details"><strong>${displayPlatform(feed.platform)}</strong><span>${escapeHtml(feed.url)}</span></div><div class="feed-actions"><button data-action="toggle-feed" data-feed-id="${escapeHtml(feed.id)}" data-next-active="${!feed.isActive}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${feed.isActive ? "Désactiver" : "Réactiver"}</button><button class="danger" data-action="delete-feed" data-feed-id="${escapeHtml(feed.id)}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${this.deletingFeedId === feed.id ? "Suppression…" : "Supprimer"}</button></div></li>`,
           )
           .join("")
       : '<li class="state">Aucun abonnement.</li>';
@@ -274,10 +308,13 @@ export class ReaderApp {
     urlInput?.addEventListener("input", () => {
       if (platformSelect) platformSelect.value = detectPlatform(urlInput.value);
     });
-    this.root.querySelectorAll<HTMLElement>("[data-feed-id]").forEach((element) => {
+    this.root.querySelectorAll<HTMLElement>('[data-action="toggle-feed"]').forEach((element) => {
       element.addEventListener("click", () =>
         void this.toggleFeed(element.dataset.feedId!, element.dataset.nextActive === "true"),
       );
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="delete-feed"]').forEach((element) => {
+      element.addEventListener("click", () => void this.deleteFeed(element.dataset.feedId!));
     });
   }
 }

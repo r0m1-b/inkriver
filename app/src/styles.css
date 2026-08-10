@@ -21,6 +21,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 button:disabled { cursor: wait; opacity: .65; }
 button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
 button.primary:hover { background: var(--accent-dark); }
+button.danger { color: #9b2f27; border-color: #d8a29b; background: #fff7f5; }
+button.danger:hover { color: #fff; border-color: #9b2f27; background: #9b2f27; }
 
 .shell { height: 100vh; display: grid; grid-template-rows: 68px auto 1fr; overflow: hidden; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 94%, transparent); }
@@ -73,8 +75,9 @@ main { min-height: 0; display: grid; grid-template-columns: 370px minmax(0, 1fr)
 #feed-form input, #feed-form select { width: 100%; padding: 10px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 7px; }
 .feed-list { display: grid; gap: 1px; margin: 22px 0 0; padding: 0; list-style: none; background: var(--line); }
 .feed-list li { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 4px; background: var(--paper); }
-.feed-list li div { display: grid; min-width: 0; gap: 4px; }
+.feed-list li .feed-details { display: grid; min-width: 0; gap: 4px; }
 .feed-list li span { overflow: hidden; color: var(--muted); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.feed-actions { display: flex; flex: 0 0 auto; gap: 8px; }
 
 @media (prefers-color-scheme: dark) {
   :root { color: #e8e1d8; background: #1e1c19; --paper: #26231f; --ink: #e8e1d8; --muted: #aaa197; --line: #454039; --accent: #d77855; --accent-dark: #b85d3d; --wash: #322e29; }
@@ -85,4 +88,5 @@ main { min-height: 0; display: grid; grid-template-columns: 370px minmax(0, 1fr)
   .source { color: #f2c0ad; background: #593526; }
   .source.medium { color: #b8dbc4; background: #294638; }
   .source.other { color: #d0cce7; background: #3e3a56; }
+  button.danger { color: #f0aaa3; border-color: #754841; background: #352724; }
 }
