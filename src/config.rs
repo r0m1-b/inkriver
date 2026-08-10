@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::{error::Error, fmt};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -56,6 +57,65 @@ impl TryFrom<&str> for Platform {
             "other" => Ok(Self::Other),
             _ => Err(format!("Unknown feed platform: {value}")),
         }
+    }
+}
+
+/// Explains why a subscription URL cannot be stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedUrlError {
+    Blank,
+    Invalid,
+    UnsupportedScheme(String),
+}
+
+impl fmt::Display for FeedUrlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Blank => formatter.write_str("Feed URL must not be blank"),
+            Self::Invalid => formatter.write_str("Feed URL is invalid"),
+            Self::UnsupportedScheme(scheme) => {
+                write!(
+                    formatter,
+                    "Feed URL scheme must be HTTP or HTTPS, not {scheme}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for FeedUrlError {}
+
+/// Validates and canonicalizes an HTTP(S) feed URL for persistence.
+pub fn normalize_feed_url(raw_url: &str) -> Result<String, FeedUrlError> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err(FeedUrlError::Blank);
+    }
+
+    let mut url = reqwest::Url::parse(trimmed).map_err(|_| FeedUrlError::Invalid)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(FeedUrlError::UnsupportedScheme(url.scheme().to_string()));
+    }
+    if url.host_str().is_none() {
+        return Err(FeedUrlError::Invalid);
+    }
+
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+/// Detects a known publishing platform from a normalized feed hostname.
+pub fn detect_platform(url: &str) -> Platform {
+    let hostname = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+
+    match hostname.as_deref() {
+        Some("medium.com") | Some("www.medium.com") => Platform::Medium,
+        Some(host) if host.ends_with(".medium.com") => Platform::Medium,
+        Some("substack.com") | Some("www.substack.com") => Platform::Substack,
+        Some(host) if host.ends_with(".substack.com") => Platform::Substack,
+        _ => Platform::Other,
     }
 }
 
@@ -161,6 +221,40 @@ mod tests {
         assert_eq!(
             Platform::try_from("blog"),
             Err("Unknown feed platform: blog".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_feed_url_trims_and_removes_fragments() {
+        assert_eq!(
+            normalize_feed_url(" https://Example.COM/feed#latest ").unwrap(),
+            "https://example.com/feed"
+        );
+    }
+
+    #[test]
+    fn normalize_feed_url_rejects_blank_invalid_and_non_http_urls() {
+        assert_eq!(normalize_feed_url(" "), Err(FeedUrlError::Blank));
+        assert_eq!(normalize_feed_url("not a url"), Err(FeedUrlError::Invalid));
+        assert_eq!(
+            normalize_feed_url("file:///tmp/feed.xml"),
+            Err(FeedUrlError::UnsupportedScheme("file".to_string()))
+        );
+    }
+
+    #[test]
+    fn detect_platform_recognizes_known_hosts_without_matching_impostors() {
+        assert_eq!(
+            detect_platform("https://medium.com/feed/@reader"),
+            Platform::Medium
+        );
+        assert_eq!(
+            detect_platform("https://notes.substack.com/feed"),
+            Platform::Substack
+        );
+        assert_eq!(
+            detect_platform("https://substack.com.example/feed"),
+            Platform::Other
         );
     }
 

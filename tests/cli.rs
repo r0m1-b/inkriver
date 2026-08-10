@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use reader::article::{Article, Source};
+use reader::article::{Article, ContentKind, Source};
 use reader::config::{FeedConfig, Platform};
 use reader::storage::Storage;
 use std::process::{Command, Output};
@@ -30,6 +30,7 @@ async fn create_cached_database(database_path: &std::path::Path) {
             published_at: Some(Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap()),
             url: Some("https://astronomy.example/jupiter".to_string()),
             content: Some("<p>Jupiter reste visible hors ligne.</p>".to_string()),
+            content_kind: ContentKind::Full,
             source: Source::Substack,
         }])
         .await

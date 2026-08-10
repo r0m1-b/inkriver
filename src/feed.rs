@@ -1,4 +1,4 @@
-use crate::article::Source;
+use crate::article::{ContentKind, Source};
 use sha2::{Digest, Sha256};
 
 /// Marks an identifier synthesized by the parser for an entry without GUID.
@@ -113,6 +113,23 @@ impl Feed {
     /// summary is used only when the full content body is unavailable.
     pub fn article_from_entry(&self, entry: &feed_rs::model::Entry) -> crate::article::Article {
         let entry_identity = article_identity(entry);
+        let (content, content_kind) = match entry
+            .content
+            .as_ref()
+            .and_then(|content| content.body.as_deref())
+            .filter(|body| !body.trim().is_empty())
+        {
+            Some(body) => (Some(ammonia::clean(body)), ContentKind::Full),
+            None => match entry
+                .summary
+                .as_ref()
+                .map(|summary| summary.content.as_str())
+                .filter(|summary| !summary.trim().is_empty())
+            {
+                Some(summary) => (Some(ammonia::clean(summary)), ContentKind::Excerpt),
+                None => (None, ContentKind::Missing),
+            },
+        };
 
         crate::article::Article {
             id: format!("{}::{entry_identity}", self.id),
@@ -121,17 +138,8 @@ impl Feed {
             author: entry.authors.first().map(|a| a.name.clone()),
             published_at: entry.published,
             url: entry.links.first().map(|link| link.href.clone()),
-            content: entry
-                .content
-                .as_ref()
-                .and_then(|content| content.body.clone())
-                .or_else(|| {
-                    entry
-                        .summary
-                        .as_ref()
-                        .map(|summary| summary.content.clone())
-                })
-                .map(|content| ammonia::clean(&content)),
+            content,
+            content_kind,
             source: self.source,
         }
     }
@@ -261,6 +269,7 @@ mod tests {
                         .as_ref()
                         .map(|summary| summary.content.clone())
                 }),
+            content_kind: ContentKind::Full,
             source: crate::article::Source::Substack,
         };
         assert_eq!(article.id, format!("{}::{}", feeds[0].id, jupiter.id));
@@ -279,6 +288,7 @@ mod tests {
             jupiter.links.first().map(|link| link.href.as_str())
         );
         assert_eq!(article.source, crate::article::Source::Substack);
+        assert_eq!(article.content_kind, ContentKind::Full);
     }
 
     /// Verifies that an existing entry can be found by its identifier.
@@ -454,6 +464,7 @@ mod tests {
         let article = feed.article_from_entry(&entry);
 
         assert_eq!(article.content, Some(expected_summary));
+        assert_eq!(article.content_kind, ContentKind::Excerpt);
     }
 
     /// Verifies that the entry summary replaces content with no inline body.
@@ -467,6 +478,7 @@ mod tests {
         let article = feed.article_from_entry(&entry);
 
         assert_eq!(article.content, Some(expected_summary));
+        assert_eq!(article.content_kind, ContentKind::Excerpt);
     }
 
     /// Verifies that unsafe HTML is removed from a full article body.
@@ -522,5 +534,6 @@ mod tests {
         assert_eq!(article.title, None);
         assert_eq!(article.url, None);
         assert_eq!(article.content, None);
+        assert_eq!(article.content_kind, ContentKind::Missing);
     }
 }

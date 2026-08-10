@@ -156,21 +156,26 @@ Cette étape valide l'API du cœur Rust avant son branchement à Tauri.
 
 ### 8. Créer l'interface Linux avec Tauri
 
-- [ ] Créer une application Tauri 2 avec une interface Vanilla TypeScript.
-- [ ] Réutiliser le cœur Rust existant comme dépendance de l'application Tauri.
-- [ ] Exposer des commandes Tauri pour :
+- [x] Créer une application Tauri 2 avec une interface Vanilla TypeScript.
+- [x] Réutiliser le cœur Rust existant comme dépendance de l'application Tauri.
+- [x] Exposer des commandes Tauri pour :
   - lister les articles ;
   - charger le détail d'un article ;
   - rafraîchir les flux ;
   - marquer un article comme lu ou favori.
-- [ ] Afficher une liste d'articles avec titre, source, auteur et date.
-- [ ] Afficher l'article sélectionné dans un panneau de lecture.
-- [ ] Ajouter un bouton ouvrant l'article original lorsque le flux ne contient
+- [x] Afficher une liste d'articles avec titre, source, auteur et date.
+- [x] Afficher l'article sélectionné dans un panneau de lecture.
+- [x] Ajouter un bouton ouvrant l'article original lorsque le flux ne contient
       qu'un extrait.
-- [ ] Gérer les états de chargement, l'absence d'articles et les erreurs.
+- [x] Gérer les états de chargement, l'absence d'articles et les erreurs.
+- [x] Gérer les abonnements SQLite dans l'interface : ajout, détection de la
+      plateforme, activation et désactivation sans perte d'historique.
+- [x] Installer les prérequis WebKitGTK sur la machine de développement, lancer
+      l'application native et valider les paquets `.deb` et AppImage.
 
-Sur ordinateur, l'interface pourra utiliser deux panneaux : liste à gauche et
-article à droite.
+Sur ordinateur, l'interface utilise deux panneaux : liste à gauche et article à
+droite. Le cache est affiché sans réseau au démarrage et l'actualisation reste
+une action manuelle.
 
 ### 9. Ajouter Android
 

@@ -1,10 +1,11 @@
-use crate::article::{Article, Source};
-use crate::config::{FeedConfig, Platform};
+use crate::article::{Article, ContentKind, Source};
+use crate::config::{FeedConfig, FeedUrlError, Platform, detect_platform, normalize_feed_url};
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::Path;
+use std::{error::Error, fmt};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -21,6 +22,28 @@ pub struct StoredFeed {
     pub url: String,
     pub is_active: bool,
 }
+
+/// Errors produced while changing the installed application's subscriptions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionError {
+    InvalidUrl(FeedUrlError),
+    DuplicateActiveUrl(String),
+    NotFound(String),
+    Database(String),
+}
+
+impl fmt::Display for SubscriptionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidUrl(error) => error.fmt(formatter),
+            Self::DuplicateActiveUrl(url) => write!(formatter, "Feed URL is already active: {url}"),
+            Self::NotFound(id) => write!(formatter, "Feed not found: {id}"),
+            Self::Database(message) => write!(formatter, "SQLite subscription error: {message}"),
+        }
+    }
+}
+
+impl Error for SubscriptionError {}
 
 /// Combines remote article data with reader-specific local state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,14 +83,27 @@ type StoredArticleRow = (
     Option<String>,
     Option<String>,
     String,
+    String,
     bool,
     bool,
 );
 
 fn stored_article_from_row(row: StoredArticleRow) -> Result<StoredArticle> {
-    let (id, feed_id, title, author, published_at, url, content, source, is_read, is_favorite) =
-        row;
+    let (
+        id,
+        feed_id,
+        title,
+        author,
+        published_at,
+        url,
+        content,
+        content_kind,
+        source,
+        is_read,
+        is_favorite,
+    ) = row;
     let source = Source::try_from(source.as_str()).map_err(anyhow::Error::msg)?;
+    let content_kind = ContentKind::try_from(content_kind.as_str()).map_err(anyhow::Error::msg)?;
 
     Ok(StoredArticle {
         article: Article {
@@ -78,6 +114,7 @@ fn stored_article_from_row(row: StoredArticleRow) -> Result<StoredArticle> {
             published_at,
             url,
             content,
+            content_kind,
             source,
         },
         is_read,
@@ -187,6 +224,129 @@ impl Storage {
             .collect()
     }
 
+    /// Adds a subscription or reactivates a previously disabled matching URL.
+    ///
+    /// A generated UUID remains stable for the lifetime of a subscription.
+    pub async fn add_feed(
+        &self,
+        raw_url: &str,
+        platform_override: Option<Platform>,
+    ) -> std::result::Result<StoredFeed, SubscriptionError> {
+        let url = normalize_feed_url(raw_url).map_err(SubscriptionError::InvalidUrl)?;
+        let platform = platform_override.unwrap_or_else(|| detect_platform(&url));
+        let existing: Option<(String, bool)> = sqlx::query_as(
+            "SELECT id, is_active FROM feeds WHERE url = ? ORDER BY is_active DESC, id LIMIT 1",
+        )
+        .bind(&url)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+
+        if let Some((id, is_active)) = existing {
+            if is_active {
+                return Err(SubscriptionError::DuplicateActiveUrl(url));
+            }
+            sqlx::query("UPDATE feeds SET platform = ?, is_active = 1 WHERE id = ?")
+                .bind(platform.as_str())
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            return Ok(StoredFeed {
+                id,
+                platform,
+                url,
+                is_active: true,
+            });
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO feeds (id, platform, url, is_active) VALUES (?, ?, ?, 1)")
+            .bind(&id)
+            .bind(platform.as_str())
+            .bind(&url)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                if error.as_database_error().is_some_and(|database_error| {
+                    database_error.message().contains("feeds.url")
+                        || database_error.message().contains("feeds_unique_active_url")
+                }) {
+                    SubscriptionError::DuplicateActiveUrl(url.clone())
+                } else {
+                    SubscriptionError::Database(error.to_string())
+                }
+            })?;
+
+        Ok(StoredFeed {
+            id,
+            platform,
+            url,
+            is_active: true,
+        })
+    }
+
+    /// Activates or deactivates a retained subscription without deleting history.
+    pub async fn set_feed_active(
+        &self,
+        feed_id: &str,
+        is_active: bool,
+    ) -> std::result::Result<StoredFeed, SubscriptionError> {
+        let feed: Option<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, platform, url, is_active FROM feeds WHERE id = ?")
+                .bind(feed_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        let (id, platform, url, _) =
+            feed.ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
+
+        if is_active {
+            let duplicate: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM feeds WHERE url = ? AND is_active = 1 AND id <> ?)",
+            )
+            .bind(&url)
+            .bind(&id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            if duplicate {
+                return Err(SubscriptionError::DuplicateActiveUrl(url));
+            }
+        }
+
+        sqlx::query("UPDATE feeds SET is_active = ? WHERE id = ?")
+            .bind(is_active)
+            .bind(&id)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        let platform =
+            Platform::try_from(platform.as_str()).map_err(SubscriptionError::Database)?;
+        Ok(StoredFeed {
+            id,
+            platform,
+            url,
+            is_active,
+        })
+    }
+
+    /// Returns active subscriptions in the configuration shape used by collection.
+    pub async fn active_feed_config(&self) -> Result<Vec<FeedConfig>> {
+        self.list_feeds()
+            .await?
+            .into_iter()
+            .filter(|feed| feed.is_active)
+            .map(|feed| {
+                Ok(FeedConfig {
+                    id: feed.id,
+                    platform: feed.platform,
+                    url: feed.url,
+                })
+            })
+            .collect()
+    }
+
     /// Inserts new articles and refreshes existing remote metadata.
     ///
     /// Missing incoming values do not erase data previously stored, and local
@@ -216,9 +376,10 @@ impl Storage {
             sqlx::query(
                 r#"
                     INSERT INTO articles (
-                        id, feed_id, title, author, published_at, url, content, source
+                        id, feed_id, title, author, published_at, url, content,
+                        content_kind, source
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         feed_id = excluded.feed_id,
                         title = COALESCE(excluded.title, articles.title),
@@ -226,6 +387,11 @@ impl Storage {
                         published_at = COALESCE(excluded.published_at, articles.published_at),
                         url = COALESCE(excluded.url, articles.url),
                         content = COALESCE(excluded.content, articles.content),
+                        content_kind = CASE
+                            WHEN excluded.content IS NOT NULL THEN excluded.content_kind
+                            WHEN articles.content IS NULL THEN excluded.content_kind
+                            ELSE articles.content_kind
+                        END,
                         source = excluded.source
                 "#,
             )
@@ -236,6 +402,7 @@ impl Storage {
             .bind(article.published_at)
             .bind(&article.url)
             .bind(&article.content)
+            .bind(article.content_kind.as_str())
             .bind(article.source.as_str())
             .execute(&mut *transaction)
             .await
@@ -265,7 +432,7 @@ impl Storage {
         let rows: Vec<StoredArticleRow> = sqlx::query_as(
             r#"
                 SELECT id, feed_id, title, author, published_at, url, content,
-                       source, is_read, is_favorite
+                       content_kind, source, is_read, is_favorite
                 FROM articles
                 ORDER BY published_at IS NULL ASC, published_at DESC, id ASC
             "#,
@@ -336,7 +503,7 @@ impl Storage {
         let row: Option<StoredArticleRow> = sqlx::query_as(
             r#"
                 SELECT id, feed_id, title, author, published_at, url, content,
-                       source, is_read, is_favorite
+                       content_kind, source, is_read, is_favorite
                 FROM articles
                 WHERE id = ?
             "#,
@@ -424,6 +591,7 @@ mod tests {
             published_at,
             url: Some(format!("https://articles.example/{id}")),
             content: Some(format!("Readable content for {id}")),
+            content_kind: ContentKind::Full,
             source: Source::Substack,
         }
     }
@@ -478,9 +646,58 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, 2);
 
         storage.close().await;
+    }
+
+    #[tokio::test]
+    async fn content_kind_migration_classifies_legacy_rows_conservatively() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608080001_initial_schema.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO feeds (id, platform, url) VALUES ('feed', 'other', 'https://example.com/feed')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO articles (id, feed_id, content, source) VALUES ('with-content', 'feed', '<p>legacy</p>', 'other'), ('without-content', 'feed', NULL, 'other')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608080002_article_content_kind.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, content_kind FROM articles ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("with-content".to_string(), "unknown".to_string()),
+                ("without-content".to_string(), "missing".to_string()),
+            ]
+        );
     }
 
     /// Verifies a feed import persists every configured value as active.
@@ -558,6 +775,76 @@ mod tests {
                     is_active: false,
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn add_feed_normalizes_url_detects_platform_and_generates_uuid() {
+        let storage = Storage::open_in_memory().await.unwrap();
+
+        let stored = storage
+            .add_feed(" https://letters.substack.com/feed#latest ", None)
+            .await
+            .unwrap();
+
+        assert!(uuid::Uuid::parse_str(&stored.id).is_ok());
+        assert_eq!(stored.url, "https://letters.substack.com/feed");
+        assert_eq!(stored.platform, Platform::Substack);
+        assert!(stored.is_active);
+    }
+
+    #[tokio::test]
+    async fn add_feed_uses_platform_override_and_rejects_active_duplicate() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let stored = storage
+            .add_feed("https://medium.com/feed/@reader", Some(Platform::Other))
+            .await
+            .unwrap();
+        assert_eq!(stored.platform, Platform::Other);
+
+        let error = storage
+            .add_feed("https://medium.com/feed/@reader#fragment", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SubscriptionError::DuplicateActiveUrl("https://medium.com/feed/@reader".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn add_feed_reactivates_retained_subscription_with_same_uuid() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let original = storage
+            .add_feed("https://example.com/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&original.id, false).await.unwrap();
+
+        let reactivated = storage
+            .add_feed("https://example.com/feed", Some(Platform::Medium))
+            .await
+            .unwrap();
+
+        assert_eq!(reactivated.id, original.id);
+        assert_eq!(reactivated.platform, Platform::Medium);
+        assert!(reactivated.is_active);
+    }
+
+    #[tokio::test]
+    async fn set_feed_active_preserves_articles_and_reports_unknown_ids() {
+        let storage = storage_with_feed().await;
+        let cached = article("astronomy::mars", "astronomy", None);
+        storage.upsert_articles(&[cached]).await.unwrap();
+
+        let inactive = storage.set_feed_active("astronomy", false).await.unwrap();
+
+        assert!(!inactive.is_active);
+        assert_eq!(storage.list_articles().await.unwrap().len(), 1);
+        assert!(storage.active_feed_config().await.unwrap().is_empty());
+        assert_eq!(
+            storage.set_feed_active("missing", true).await.unwrap_err(),
+            SubscriptionError::NotFound("missing".to_string())
         );
     }
 
@@ -652,6 +939,29 @@ mod tests {
         assert_eq!(stored[0].article.author, original.author);
         assert_eq!(stored[0].article.url, original.url);
         assert_eq!(stored[0].article.content, original.content);
+        assert_eq!(stored[0].article.content_kind, ContentKind::Full);
+    }
+
+    #[tokio::test]
+    async fn upsert_replaces_unknown_content_kind_after_refresh() {
+        let storage = storage_with_feed().await;
+        let mut legacy = article("astronomy::legacy", "astronomy", None);
+        legacy.content_kind = ContentKind::Unknown;
+        storage.upsert_articles(&[legacy.clone()]).await.unwrap();
+        let refreshed = Article {
+            content: Some("A complete refreshed body".to_string()),
+            content_kind: ContentKind::Full,
+            ..legacy
+        };
+
+        storage.upsert_articles(&[refreshed]).await.unwrap();
+
+        let stored = storage
+            .get_article("astronomy::legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.article.content_kind, ContentKind::Full);
     }
 
     /// Verifies an article batch reports inserted and updated rows independently.

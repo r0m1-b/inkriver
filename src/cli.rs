@@ -275,7 +275,7 @@ pub async fn run(cli: Cli) -> Result<CommandOutput, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::article::{Article, Source};
+    use crate::article::{Article, ContentKind, Source};
     use crate::config::{FeedConfig, Platform};
     use crate::service::{FeedCollectionError, FeedLoadError, FeedLoadStage};
     use chrono::{TimeZone, Utc};
@@ -290,6 +290,11 @@ mod tests {
             published_at: Some(Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap()),
             url: Some("https://articles.example/jupiter".to_string()),
             content: content.map(str::to_string),
+            content_kind: if content.is_some() {
+                ContentKind::Full
+            } else {
+                ContentKind::Missing
+            },
             source: Source::Substack,
         }
     }

@@ -7,6 +7,41 @@ pub enum Source {
     Other,
 }
 
+/// Describes how much article content was supplied by its feed.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum ContentKind {
+    Full,
+    Excerpt,
+    Missing,
+    Unknown,
+}
+
+impl ContentKind {
+    /// Returns the stable lowercase representation stored in SQLite.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Excerpt => "excerpt",
+            Self::Missing => "missing",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl TryFrom<&str> for ContentKind {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "full" => Ok(Self::Full),
+            "excerpt" => Ok(Self::Excerpt),
+            "missing" => Ok(Self::Missing),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(format!("Unknown article content kind: {value}")),
+        }
+    }
+}
+
 impl Source {
     /// Returns the stable lowercase representation stored in SQLite.
     pub const fn as_str(self) -> &'static str {
@@ -40,6 +75,7 @@ pub struct Article {
     pub published_at: Option<DateTime<Utc>>,
     pub url: Option<String>,
     pub content: Option<String>,
+    pub content_kind: ContentKind,
     pub source: Source,
 }
 
@@ -58,6 +94,7 @@ mod tests {
             published_at: None,
             url: Some("https://example.com/article".to_string()),
             content: Some("Test content".to_string()),
+            content_kind: ContentKind::Full,
             source: Source::Other,
         };
         assert_eq!(article.id, "1");
@@ -68,6 +105,19 @@ mod tests {
         assert_eq!(article.url.as_deref(), Some("https://example.com/article"));
         assert_eq!(article.source, Source::Other);
         assert_eq!(article.content.as_deref(), Some("Test content"));
+        assert_eq!(article.content_kind, ContentKind::Full);
+    }
+
+    #[test]
+    fn content_kinds_round_trip_through_storage_values() {
+        for kind in [
+            ContentKind::Full,
+            ContentKind::Excerpt,
+            ContentKind::Missing,
+            ContentKind::Unknown,
+        ] {
+            assert_eq!(ContentKind::try_from(kind.as_str()), Ok(kind));
+        }
     }
 
     /// Verifies every source has a stable SQLite representation and round-trips.

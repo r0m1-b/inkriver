@@ -3,3 +3,6 @@
 /reader.db-shm
 /reader.db-wal
 target/
+/app/node_modules/
+/app/dist/
+/app/src-tauri/gen/

@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::service::{self, CollectionReport, FeedCollectionError};
 use crate::storage::{Storage, UpsertStats};
 use anyhow::Result;
+#[cfg(test)]
 use std::future::Future;
 
 /// Summarizes one feed refresh and its persistence effects.
@@ -23,9 +24,23 @@ pub struct RefreshReport {
 ///
 /// Returns an error when subscriptions or collected articles cannot be persisted.
 pub async fn refresh(storage: &Storage, config: &Config) -> Result<RefreshReport> {
-    refresh_with_collector(storage, config, || service::collect_articles(config)).await
+    storage.import_feeds(&config.feeds).await?;
+    let report = service::collect_articles(config).await;
+    store_collection(storage, config, report).await
 }
 
+/// Refreshes only subscriptions currently active in SQLite.
+///
+/// Unlike [`refresh`], this never imports or synchronizes a TOML configuration.
+pub async fn refresh_active(storage: &Storage) -> Result<RefreshReport> {
+    let config = Config {
+        feeds: storage.active_feed_config().await?,
+    };
+    let report = service::collect_articles(&config).await;
+    store_collection(storage, &config, report).await
+}
+
+#[cfg(test)]
 async fn refresh_with_collector<F, Fut>(
     storage: &Storage,
     config: &Config,
@@ -36,7 +51,15 @@ where
     Fut: Future<Output = CollectionReport>,
 {
     storage.import_feeds(&config.feeds).await?;
-    let CollectionReport { articles, errors } = collect().await;
+    store_collection(storage, config, collect().await).await
+}
+
+async fn store_collection(
+    storage: &Storage,
+    config: &Config,
+    report: CollectionReport,
+) -> Result<RefreshReport> {
+    let CollectionReport { articles, errors } = report;
     let collected_articles = articles.len();
     let UpsertStats { inserted, updated } = storage.upsert_articles(&articles).await?;
 
@@ -52,7 +75,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::article::{Article, Source};
+    use crate::article::{Article, ContentKind, Source};
     use crate::config::{FeedConfig, Platform};
     use crate::service::{FeedCollectionError, FeedLoadError, FeedLoadStage};
     use chrono::{TimeZone, Utc};
@@ -77,6 +100,7 @@ mod tests {
             published_at: Some(Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap()),
             url: Some(format!("https://articles.example/{id}")),
             content: Some(format!("Coherent body for {id}")),
+            content_kind: ContentKind::Full,
             source,
         }
     }
@@ -235,5 +259,43 @@ mod tests {
         assert!(stored_bread.is_read);
         assert!(stored_bread.is_favorite);
         storage.close().await;
+    }
+
+    #[tokio::test]
+    async fn refresh_active_collects_only_active_sqlite_subscriptions() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let config = Config {
+            feeds: vec![
+                feed("astronomy", Platform::Substack),
+                feed("bread", Platform::Medium),
+            ],
+        };
+        storage.import_feeds(&config.feeds).await.unwrap();
+        storage.set_feed_active("bread", false).await.unwrap();
+
+        let active_config = Config {
+            feeds: storage.active_feed_config().await.unwrap(),
+        };
+        assert_eq!(active_config.feeds.len(), 1);
+        assert_eq!(active_config.feeds[0].id, "astronomy");
+        let report = store_collection(
+            &storage,
+            &active_config,
+            CollectionReport {
+                articles: vec![article("astronomy::mars", "astronomy", Source::Substack)],
+                errors: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.active_feeds, 1);
+        assert_eq!(report.inserted_articles, 1);
+        let feeds = storage.list_feeds().await.unwrap();
+        assert!(
+            feeds
+                .iter()
+                .any(|feed| feed.id == "bread" && !feed.is_active)
+        );
     }
 }

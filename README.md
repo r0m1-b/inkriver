@@ -4,9 +4,9 @@ Reader est un lecteur de flux RSS/Atom écrit en Rust. Son objectif est de réun
 les abonnements Medium, Substack et les autres flux compatibles dans une même
 chronologie, puis de rendre les articles disponibles hors ligne.
 
-Le projet est actuellement un prototype en ligne de commande. Le cœur Rust et
-le stockage SQLite sont conçus pour être réutilisés plus tard dans une interface
-Tauri sous Linux et Android.
+Le projet comprend un programme en ligne de commande et une interface Tauri 2
+pour Linux. Les deux utilisent le même cœur Rust et le même schéma SQLite. Une
+adaptation Android est prévue dans une étape ultérieure.
 
 ## Fonctionnalités actuelles
 
@@ -21,7 +21,10 @@ Tauri sous Linux et Android.
 - affichage des articles du plus récent au plus ancien ;
 - lecture du cache même lorsque certains flux sont indisponibles ;
 - commandes distinctes pour rafraîchir, lister, lire et modifier les états
-  locaux des articles.
+  locaux des articles ;
+- interface Linux à deux panneaux avec gestion des abonnements ;
+- distinction entre contenu complet, extrait et contenu absent ;
+- ouverture sécurisée de l'article original pour les extraits.
 
 ## Prérequis sous Ubuntu
 
@@ -32,12 +35,24 @@ Le projet nécessite :
 - un compilateur C pour construire la copie embarquée de SQLite ;
 - Git pour récupérer le dépôt.
 
-Les outils système peuvent être installés avec :
+Les outils système du CLI peuvent être installés avec :
 
 ```bash
 sudo apt update
 sudo apt install build-essential git
 ```
+
+Pour compiler l'application Tauri sous Ubuntu, installer également Node.js,
+`pkg-config`, WebKitGTK et les bibliothèques recommandées par Tauri :
+
+```bash
+sudo apt update
+sudo apt install pkg-config libwebkit2gtk-4.1-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev libxdo-dev curl wget file
+```
+
+Le frontend a été validé avec Node.js 24 et npm 11. Une version LTS récente de
+Node.js convient également.
 
 SQLite est compilé avec l'application. Il n'est pas nécessaire d'installer un
 serveur SQLite ni les bibliothèques de développement du système.
@@ -67,6 +82,48 @@ cargo build --release
 ```
 
 Le binaire se trouve alors dans `target/release/reader`.
+
+Installer ensuite les dépendances du frontend :
+
+```bash
+cd app
+npm install
+```
+
+Le fichier `app/package-lock.json` fixe les versions résolues et doit rester
+committé.
+
+## Utiliser l'application Linux
+
+Depuis `app/`, lancer l'application de développement :
+
+```bash
+npm run tauri dev
+```
+
+Au premier lancement, Reader crée automatiquement `reader.db` dans le
+répertoire de données du bundle `io.github.r0m1-b.reader` — généralement
+`~/.local/share/io.github.r0m1-b.reader/` sous Ubuntu. Cette base est distincte de
+la base `reader.db` du CLI.
+
+L'application affiche immédiatement son cache et ne contacte jamais le réseau
+au démarrage. Utiliser « Abonnements » pour ajouter une URL RSS/Atom, corriger
+si nécessaire la plateforme détectée, ou désactiver un flux. Utiliser ensuite
+« Actualiser » pour télécharger les articles.
+
+Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
+les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
+lieu de créer un nouvel historique.
+
+Créer les paquets Linux optimisés :
+
+```bash
+cd app
+npm run tauri build -- --bundles deb,appimage
+```
+
+Les paquets sont produits sous `target/release/bundle/deb/` et
+`target/release/bundle/appimage/`.
 
 ## Configurer les abonnements
 
@@ -190,7 +247,8 @@ Les migrations présentes dans `migrations/` sont intégrées au binaire puis
 appliquées à l'ouverture. La base contient actuellement :
 
 - `feeds` : abonnements, plateforme, URL et état actif ;
-- `articles` : contenu distant, relation au flux, état lu et favori ;
+- `articles` : contenu distant, type de contenu, relation au flux, état lu et
+  favori ;
 - `_sqlx_migrations` : migrations déjà appliquées par SQLx.
 
 SQLite peut aussi créer temporairement `reader.db-wal` et `reader.db-shm`. Ces
@@ -253,6 +311,19 @@ importe `feeds.toml` et télécharge les articles encore présents dans les flux
 Les anciens articles qui ne figurent plus dans les flux ne pourront pas être
 récupérés sans sauvegarde.
 
+Pour réinitialiser la base de l'application Tauri, fermer Reader, sauvegarder si
+nécessaire puis supprimer les trois fichiers SQLite de son répertoire AppData :
+
+```bash
+rm -f ~/.local/share/io.github.r0m1-b.reader/reader.db \
+  ~/.local/share/io.github.r0m1-b.reader/reader.db-shm \
+  ~/.local/share/io.github.r0m1-b.reader/reader.db-wal
+```
+
+Le prochain lancement recrée une base vide. Contrairement au CLI, l'application
+ne réimporte pas automatiquement `feeds.toml` : les abonnements doivent être
+ajoutés de nouveau dans l'interface.
+
 ### Retirer ou réactiver un abonnement
 
 Retirer une entrée de `feeds.toml`, puis exécuter `cargo run -- refresh`, marque
@@ -280,9 +351,14 @@ Commandes usuelles :
 
 ```bash
 cargo fmt
-cargo check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd app
+npm run typecheck
+npm test
+npm run build
 ```
 
 Les tests de collecte utilisent des contenus injectés et des fixtures locales.
@@ -301,21 +377,22 @@ src/storage.rs  stockage SQLite et états locaux
 src/refresh.rs  orchestration import → collecte → stockage
 src/main.rs     point d'entrée du CLI
 migrations/     évolution versionnée du schéma SQLite
+app/src/         interface Vanilla TypeScript
+app/src-tauri/   adaptation, commandes et configuration Tauri
 ```
 
 ## Limites actuelles
 
-- le lecteur ne possède pas encore d'interface graphique ou de navigation
-  interactive ;
 - les numéros affichés par `list` ne sont pas persistants entre deux
   chronologies, contrairement aux identifiants ;
 - les contenus nécessitant une connexion ou un abonnement payant ne sont pas
   pris en charge ;
-- `reader.db` se trouve encore dans le dépôt de développement.
+- l'interface n'est pas encore adaptée aux écrans mobiles ;
+- `reader.db` du CLI se trouve encore dans le dépôt de développement.
 
-L'étape suivante consiste à ajouter l'interface Tauri. Dans l'application
-installable, SQLite deviendra la source de vérité et la base sera placée dans le
-répertoire `AppData` propre au bundle `io.github.r0m1-b.reader`.
+L'étape suivante consiste à adapter l'interface à Android. Dans l'application
+installée, SQLite est déjà la source de vérité et se trouve dans le répertoire
+AppData propre au bundle `io.github.r0m1-b.reader`.
 
 La feuille de route détaillée est disponible dans [TODO.md](TODO.md).
 
@@ -348,3 +425,12 @@ arrêté ces processus.
 Conserver le message d'erreur, sauvegarder la base et vérifier l'ordre ainsi que
 le contenu des fichiers dans `migrations/`. En développement seulement, une
 réinitialisation complète permet de repartir d'un schéma vierge.
+
+### Une erreur GLIBC mentionne `/snap/core20`
+
+Un terminal intégré à une installation snap de VS Code peut injecter ses propres
+variables GTK/GIO. Elles mélangent alors les bibliothèques du snap et celles du
+système. Lancer Reader depuis un terminal Ubuntu normal. Pour un diagnostic
+ponctuel depuis le terminal intégré, retirer notamment `GTK_PATH`,
+`GIO_MODULE_DIR`, `GDK_PIXBUF_MODULE_FILE`, `GSETTINGS_SCHEMA_DIR` et `LOCPATH`
+de l'environnement avant `npm run tauri dev`.
