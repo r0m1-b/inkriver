@@ -1,50 +1,51 @@
 # Reader
 
-Reader est un lecteur de flux RSS/Atom écrit en Rust. Son objectif est de réunir
-les abonnements Medium, Substack et les autres flux compatibles dans une même
-chronologie, puis de rendre les articles disponibles hors ligne.
+**English** | [Français](README.fr.md)
 
-Le projet comprend un programme en ligne de commande et une interface Tauri 2
-pour Linux. Les deux utilisent le même cœur Rust et le même schéma SQLite. Une
-adaptation Android est prévue dans une étape ultérieure.
+Reader is an RSS/Atom feed reader written in Rust. It brings Medium, Substack,
+and other compatible subscriptions together in a single timeline and makes
+articles available offline.
 
-## Fonctionnalités actuelles
+The project includes a command-line application and a Tauri 2 desktop
+application for Linux. Both use the same Rust core and SQLite schema. Android
+support is planned for a later stage.
 
-- chargement de plusieurs flux depuis `feeds.toml` ;
-- prise en charge de Medium, Substack et des autres flux RSS/Atom ;
-- téléchargement asynchrone avec `reqwest` et Tokio ;
-- nettoyage du HTML reçu avant son stockage ;
-- déduplication des articles avec un identifiant propre à chaque flux ;
-- stockage local dans SQLite avec migrations automatiques ;
-- désactivation d'un abonnement sans perte d'historique ou suppression
-  définitive avec ses articles ;
-- états locaux « lu » et « favori » dans le cœur Rust ;
-- affichage des articles du plus récent au plus ancien ;
-- lecture du cache même lorsque certains flux sont indisponibles ;
-- commandes distinctes pour rafraîchir, lister, lire et modifier les états
-  locaux des articles ;
-- interface Linux à deux panneaux avec gestion des abonnements ;
-- distinction entre contenu complet, extrait et contenu absent ;
-- ouverture sécurisée de l'article original pour les extraits.
+## Current features
 
-## Prérequis sous Ubuntu
+- load multiple feeds from `feeds.toml`;
+- support Medium, Substack, and other RSS/Atom feeds;
+- download feeds asynchronously with `reqwest` and Tokio;
+- sanitize remote HTML before storing it;
+- deduplicate articles with feed-scoped identifiers;
+- store data locally in SQLite with automatic migrations;
+- disable a subscription without losing its history, or permanently delete it
+  with its articles;
+- maintain local read and favorite states in the Rust core;
+- display articles from newest to oldest;
+- read cached articles even when some feeds are unavailable;
+- use separate commands to refresh, list, read, and update article states;
+- use a two-pane Linux interface with subscription management;
+- distinguish full content, excerpts, and missing content;
+- safely open the original article when a feed only provides an excerpt.
 
-Le projet nécessite :
+## Ubuntu prerequisites
 
-- une installation récente de Rust et Cargo, de préférence avec
-  [rustup](https://rustup.rs/) ;
-- un compilateur C pour construire la copie embarquée de SQLite ;
-- Git pour récupérer le dépôt.
+The project requires:
 
-Les outils système du CLI peuvent être installés avec :
+- a recent Rust and Cargo installation, preferably through
+  [rustup](https://rustup.rs/);
+- a C compiler to build the bundled SQLite library;
+- Git to clone the repository.
+
+Install the system tools required by the CLI with:
 
 ```bash
 sudo apt update
 sudo apt install build-essential git
 ```
 
-Pour compiler l'application Tauri sous Ubuntu, installer également Node.js,
-`pkg-config`, WebKitGTK et les bibliothèques recommandées par Tauri :
+To build the Tauri application on Ubuntu, also install Node.js, `pkg-config`,
+WebKitGTK, and the libraries recommended by Tauri:
 
 ```bash
 sudo apt update
@@ -52,155 +53,154 @@ sudo apt install pkg-config libwebkit2gtk-4.1-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libxdo-dev curl wget file
 ```
 
-Le frontend a été validé avec Node.js 24 et npm 11. Une version LTS récente de
-Node.js convient également.
+The frontend has been tested with Node.js 24 and npm 11. A recent Node.js LTS
+release should work as well.
 
-SQLite est compilé avec l'application. Il n'est pas nécessaire d'installer un
-serveur SQLite ni les bibliothèques de développement du système.
+SQLite is compiled into the application. No SQLite server or system development
+library is required.
 
-Le programme `sqlite3` est toutefois pratique pour inspecter ou sauvegarder la
-base manuellement :
+The optional `sqlite3` program is useful for inspecting or backing up the
+database manually:
 
 ```bash
 sudo apt install sqlite3
 ```
 
-## Installation du projet
+## Install the project
 
-Depuis une copie locale du dépôt :
+From a local checkout:
 
 ```bash
 cargo build
 ```
 
-Cargo télécharge les crates déclarées dans `Cargo.toml` et produit le binaire de
-développement dans `target/debug/reader`.
+Cargo downloads the crates declared in `Cargo.toml` and creates the development
+binary at `target/debug/reader`.
 
-Pour une compilation optimisée :
+For an optimized build:
 
 ```bash
 cargo build --release
 ```
 
-Le binaire se trouve alors dans `target/release/reader`.
+The resulting binary is located at `target/release/reader`.
 
-Installer ensuite les dépendances du frontend :
+Then install the frontend dependencies:
 
 ```bash
 cd app
 npm install
 ```
 
-Le fichier `app/package-lock.json` fixe les versions résolues et doit rester
-committé.
+`app/package-lock.json` pins the resolved versions and should remain committed.
 
-## Utiliser l'application Linux
+## Use the Linux application
 
-Depuis `app/`, lancer l'application de développement :
+From `app/`, start the development application with:
 
 ```bash
 npm run tauri dev
 ```
 
-Au premier lancement, Reader crée automatiquement `reader.db` dans le
-répertoire de données du bundle `io.github.r0m1-b.reader` — généralement
-`~/.local/share/io.github.r0m1-b.reader/` sous Ubuntu. Cette base est distincte de
-la base `reader.db` du CLI.
+On first launch, Reader automatically creates `reader.db` in the data directory
+for the `io.github.r0m1-b.reader` bundle—usually
+`~/.local/share/io.github.r0m1-b.reader/` on Ubuntu. This database is separate
+from the CLI's `reader.db`.
 
-L'application affiche immédiatement son cache et ne contacte jamais le réseau
-au démarrage. Utiliser « Abonnements » pour ajouter une URL RSS/Atom, corriger
-si nécessaire la plateforme détectée, désactiver un flux ou le supprimer.
-Utiliser ensuite « Actualiser » pour télécharger les articles.
+The application displays its cache immediately and never accesses the network
+on startup. Use “Subscriptions” to add an RSS/Atom URL, correct the detected
+platform if necessary, disable a feed, or delete it. Then use “Refresh” to
+download articles.
 
-Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
-les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
-lieu de créer un nouvel historique.
+Disabling a subscription preserves its identifier, articles, favorites, and
+read states. Adding the same URL again reactivates that subscription instead of
+creating a new history.
 
-Supprimer est une action définitive distincte. Après confirmation, l'application
-efface dans une même transaction l'abonnement, tous ses articles ainsi que leurs
-états lu et favori. Ajouter de nouveau cette URL crée alors un nouvel abonnement
-sans restaurer l'ancien historique.
+Deletion is a separate, permanent action. After confirmation, the application
+deletes the subscription, all of its articles, and their read and favorite
+states in a single transaction. Adding the URL again creates a new subscription
+without restoring the previous history.
 
-Créer les paquets Linux optimisés :
+Build optimized Linux packages with:
 
 ```bash
 cd app
 npm run tauri build -- --bundles deb,appimage
 ```
 
-Les paquets sont produits sous `target/release/bundle/deb/` et
+Packages are generated under `target/release/bundle/deb/` and
 `target/release/bundle/appimage/`.
 
-## Configurer les abonnements
+## Configure subscriptions
 
-Créer un fichier `feeds.toml` à la racine du projet :
+Create a `feeds.toml` file at the project root:
 
 ```toml
 [[feeds]]
-id = "mon-substack"
+id = "my-substack"
 platform = "substack"
-url = "https://exemple.substack.com/feed"
+url = "https://example.substack.com/feed"
 
 [[feeds]]
-id = "mon-medium"
+id = "my-medium"
 platform = "medium"
-url = "https://medium.com/feed/@exemple"
+url = "https://medium.com/feed/@example"
 
 [[feeds]]
-id = "autre-blog"
+id = "another-blog"
 platform = "other"
 url = "https://example.org/feed.xml"
 ```
 
-Règles de configuration :
+Configuration rules:
 
-- chaque `id` doit être non vide et unique ;
-- `platform` accepte `medium`, `substack` ou `other`, en minuscules ;
-- `url` doit désigner directement un flux RSS ou Atom public ;
-- deux abonnements actifs ne peuvent pas utiliser exactement la même URL.
+- every `id` must be non-empty and unique;
+- `platform` accepts lowercase `medium`, `substack`, or `other`;
+- `url` must point directly to a public RSS or Atom feed;
+- two active subscriptions cannot use exactly the same URL.
 
-`feeds.toml` est volontairement ignoré par Git : il représente la configuration
-personnelle du développeur.
+`feeds.toml` is intentionally ignored by Git because it contains the
+developer's personal configuration.
 
-## Utiliser Reader
+## Use the CLI
 
-Afficher l'aide et les commandes disponibles :
+Display the help and available commands:
 
 ```bash
 cargo run -- --help
 ```
 
-Rafraîchir les abonnements :
+Refresh subscriptions:
 
 ```bash
 cargo run -- refresh
 ```
 
-La commande `refresh` :
+The `refresh` command:
 
-1. lit `feeds.toml` ;
-2. ouvre ou crée `reader.db` ;
-3. applique les migrations SQLite manquantes ;
-4. importe la liste courante des abonnements ;
-5. télécharge les flux ;
-6. insère ou met à jour les articles ;
-7. affiche le nombre d'articles reçus, ajoutés et mis à jour.
+1. reads `feeds.toml`;
+2. opens or creates `reader.db`;
+3. applies missing SQLite migrations;
+4. imports the current subscription list;
+5. downloads the feeds;
+6. inserts or updates articles;
+7. reports how many articles were received, inserted, and updated.
 
-Une erreur sur un flux est écrite sur la sortie d'erreur, mais elle n'efface pas
-les articles déjà enregistrés. Les autres flux continuent d'être traités.
+A feed error is written to standard error but does not erase cached articles.
+The remaining feeds continue to be processed.
 
-Lister les articles stockés, sans charger `feeds.toml` et sans réseau :
+List stored articles without loading `feeds.toml` or accessing the network:
 
 ```bash
 cargo run -- list
 ```
 
-La liste affiche un numéro à partir de 1 et l'identifiant stable de chaque
-article. Les commandes suivantes acceptent indifféremment l'un ou l'autre :
+The list displays a one-based number and a stable identifier for every article.
+The following commands accept either form:
 
 ```bash
 cargo run -- show 1
-cargo run -- show "mon-substack::identifiant-editeur"
+cargo run -- show "my-substack::publisher-identifier"
 
 cargo run -- mark-read 1
 cargo run -- mark-unread 1
@@ -208,61 +208,60 @@ cargo run -- favorite 1
 cargo run -- unfavorite 1
 ```
 
-`show` charge uniquement l'article sélectionné, convertit son HTML en texte
-lisible dans le terminal, affiche son URL originale et le marque automatiquement
-comme lu.
+`show` loads only the selected article, converts its HTML to readable terminal
+text, displays its original URL, and automatically marks it as read.
 
-Un numéro correspond à la position actuelle dans la chronologie et peut changer
-après un rafraîchissement. Pour les scripts, préférer l'identifiant stable.
+A number refers to the article's current position in the timeline and may
+change after a refresh. Scripts should use the stable identifier instead.
 
-Les chemins peuvent être remplacés pour une commande :
+Paths can be overridden for a command:
 
 ```bash
 cargo run -- \
-  --config /chemin/vers/feeds.toml \
-  --database /chemin/vers/reader.db \
+  --config /path/to/feeds.toml \
+  --database /path/to/reader.db \
   refresh
 ```
 
-`--config` n'est consulté que par `refresh`. `list`, `show` et les commandes
-d'état sont entièrement hors ligne.
+`--config` is only consulted by `refresh`. `list`, `show`, and the state
+commands work entirely offline.
 
-Codes de sortie :
+Exit codes:
 
-- `0` : commande réussie ;
-- `1` : erreur fatale de configuration, SQLite, sélection ou rendu ;
-- `2` : rafraîchissement partiellement réussi, avec au moins un flux en erreur.
+- `0`: command completed successfully;
+- `1`: fatal configuration, SQLite, selection, or rendering error;
+- `2`: partially successful refresh with at least one feed error.
 
-Le CLI actuel utilise des chemins déterminés à la compilation et ancrés à la
-racine du projet. Il s'agit d'un comportement de développement, pas encore d'une
-installation système portable.
+The current CLI uses compile-time paths anchored to the project root. This is a
+development behavior and is not yet suitable for a portable system
+installation.
 
-## Base de données SQLite
+## SQLite database
 
-### Installation et création
+### Installation and creation
 
-Il n'existe aucune étape d'installation séparée pour la base. Au premier
-`cargo run -- refresh` ou `cargo run -- list`, SQLx crée automatiquement à la
-racine du projet :
+The database does not require a separate installation step. On the first
+`cargo run -- refresh` or `cargo run -- list`, SQLx automatically creates this
+file at the project root:
 
 ```text
 reader.db
 ```
 
-Les migrations présentes dans `migrations/` sont intégrées au binaire puis
-appliquées à l'ouverture. La base contient actuellement :
+Migrations from `migrations/` are embedded in the binary and applied when the
+database is opened. The database currently contains:
 
-- `feeds` : abonnements, plateforme, URL et état actif ;
-- `articles` : contenu distant, type de contenu, relation au flux, état lu et
-  favori ;
-- `_sqlx_migrations` : migrations déjà appliquées par SQLx.
+- `feeds`: subscriptions, platforms, URLs, and active states;
+- `articles`: remote content, content kinds, feed relationships, read states,
+  and favorite states;
+- `_sqlx_migrations`: migrations already applied by SQLx.
 
-SQLite peut aussi créer temporairement `reader.db-wal` et `reader.db-shm`. Ces
-fichiers, comme la base principale, sont ignorés par Git.
+SQLite may also create temporary `reader.db-wal` and `reader.db-shm` files.
+These files and the main database are ignored by Git.
 
-### Inspecter la base
+### Inspect the database
 
-Avec le client optionnel `sqlite3` :
+With the optional `sqlite3` client:
 
 ```bash
 sqlite3 reader.db ".tables"
@@ -270,7 +269,7 @@ sqlite3 reader.db ".schema feeds"
 sqlite3 reader.db ".schema articles"
 ```
 
-Quelques requêtes de diagnostic en lecture seule :
+Some read-only diagnostic queries:
 
 ```bash
 sqlite3 -header -column reader.db \
@@ -280,45 +279,43 @@ sqlite3 -header -column reader.db \
   "SELECT id, title, published_at, is_read, is_favorite FROM articles ORDER BY published_at DESC LIMIT 20;"
 ```
 
-Il vaut mieux éviter de modifier manuellement ces tables : l'API Rust garantit
-les contraintes et préserve les états locaux pendant les rafraîchissements.
+Avoid editing these tables manually: the Rust API enforces their constraints
+and preserves local states during refreshes.
 
-### Sauvegarder la base
+### Back up the database
 
-Après avoir arrêté Reader, utiliser la commande de sauvegarde SQLite :
+After stopping Reader, use SQLite's backup command:
 
 ```bash
 sqlite3 reader.db ".backup 'reader-backup.db'"
 ```
 
-Une simple copie est également possible lorsque Reader et tout client SQLite
-sont fermés :
+A regular copy is also safe while Reader and every SQLite client are stopped:
 
 ```bash
 cp reader.db reader-backup.db
 ```
 
-Le fichier contient les articles, les abonnements importés et les états lu et
-favori. `feeds.toml` doit être sauvegardé séparément.
+The database contains articles, imported subscriptions, and read and favorite
+states. Back up `feeds.toml` separately.
 
-### Réinitialiser complètement la base
+### Reset the database completely
 
-Attention : cette opération supprime l'historique, les favoris et les états de
-lecture. Arrêter Reader, effectuer éventuellement une sauvegarde, puis exécuter
-depuis la racine du projet :
+Warning: this operation deletes article history, favorites, and read states.
+Stop Reader, make an optional backup, and run the following commands from the
+project root:
 
 ```bash
 rm -f reader.db reader.db-shm reader.db-wal
 cargo run -- refresh
 ```
 
-Le lancement suivant recrée une base vide, réapplique toutes les migrations,
-importe `feeds.toml` et télécharge les articles encore présents dans les flux.
-Les anciens articles qui ne figurent plus dans les flux ne pourront pas être
-récupérés sans sauvegarde.
+The next run creates an empty database, reapplies every migration, imports
+`feeds.toml`, and downloads articles still available in the feeds. Older
+articles no longer present in the feeds cannot be recovered without a backup.
 
-Pour réinitialiser la base de l'application Tauri, fermer Reader, sauvegarder si
-nécessaire puis supprimer les trois fichiers SQLite de son répertoire AppData :
+To reset the Tauri application's database, close Reader, create a backup if
+needed, and remove all three SQLite files from its AppData directory:
 
 ```bash
 rm -f ~/.local/share/io.github.r0m1-b.reader/reader.db \
@@ -326,38 +323,38 @@ rm -f ~/.local/share/io.github.r0m1-b.reader/reader.db \
   ~/.local/share/io.github.r0m1-b.reader/reader.db-wal
 ```
 
-Le prochain lancement recrée une base vide. Contrairement au CLI, l'application
-ne réimporte pas automatiquement `feeds.toml` : les abonnements doivent être
-ajoutés de nouveau dans l'interface.
+The next launch creates an empty database. Unlike the CLI, the application does
+not automatically import `feeds.toml`; subscriptions must be added again from
+the interface.
 
-### Retirer ou réactiver un abonnement
+### Remove or reactivate a subscription
 
-Cette section concerne le CLI. Dans l'application graphique, « Désactiver »
-conserve l'historique tandis que « Supprimer » efface définitivement
-l'abonnement et tous ses articles après confirmation.
+This section applies to the CLI. In the graphical application, “Disable” keeps
+the history, while “Delete” permanently removes the subscription and all of its
+articles after confirmation.
 
-Retirer une entrée de `feeds.toml`, puis exécuter `cargo run -- refresh`, marque
-l'abonnement comme inactif. Ses articles, favoris et états de lecture restent
-dans SQLite.
+Removing an entry from `feeds.toml` and then running `cargo run -- refresh`
+marks the subscription as inactive. Its articles, favorites, and read states
+remain in SQLite.
 
-Remettre ultérieurement le même `id` dans `feeds.toml`, puis rafraîchir, réactive
-l'abonnement et met à jour son URL et sa plateforme si nécessaire.
+Restoring the same `id` to `feeds.toml` and refreshing reactivates the
+subscription and updates its URL and platform if necessary.
 
-### Faire évoluer le schéma
+### Evolve the schema
 
-Ne pas modifier une migration déjà appliquée. Pour faire évoluer la base :
+Never edit an applied migration. To evolve the database:
 
-1. ajouter un nouveau fichier SQL versionné dans `migrations/` ;
-2. conserver les migrations précédentes ;
-3. compiler et exécuter les tests ;
-4. relancer Reader pour appliquer la nouvelle migration.
+1. add a new versioned SQL file under `migrations/`;
+2. keep every previous migration;
+3. compile and run the tests;
+4. restart Reader to apply the new migration.
 
-Le script `build.rs` demande à Cargo de reconstruire le binaire lorsque le
-dossier des migrations change.
+The `build.rs` script tells Cargo to rebuild the binary whenever the migrations
+directory changes.
 
-## Développement et qualité
+## Development and quality
 
-Commandes usuelles :
+Common commands:
 
 ```bash
 cargo fmt
@@ -371,74 +368,73 @@ npm test
 npm run build
 ```
 
-Les tests de collecte utilisent des contenus injectés et des fixtures locales.
-Les tests SQLite utilisent des bases en mémoire ou des fichiers temporaires :
-ils ne modifient pas `reader.db`.
+Collection tests use injected content and local fixtures. SQLite tests use
+in-memory databases or temporary files and never modify `reader.db`.
 
-Organisation principale :
+Main project structure:
 
 ```text
-src/config.rs   lecture et validation de feeds.toml
-src/cli.rs      arguments, commandes, rendu et codes de sortie
-src/http.rs     téléchargement HTTP asynchrone
-src/feed.rs     conversion RSS/Atom vers le modèle commun
-src/service.rs  collecte, déduplication et tri
-src/storage.rs  stockage SQLite et états locaux
-src/refresh.rs  orchestration import → collecte → stockage
-src/main.rs     point d'entrée du CLI
-migrations/     évolution versionnée du schéma SQLite
-app/src/         interface Vanilla TypeScript
-app/src-tauri/   adaptation, commandes et configuration Tauri
+src/config.rs   feeds.toml loading and validation
+src/cli.rs      arguments, commands, rendering, and exit codes
+src/http.rs     asynchronous HTTP downloads
+src/feed.rs     RSS/Atom conversion to the shared model
+src/service.rs  collection, deduplication, and sorting
+src/storage.rs  SQLite storage and local states
+src/refresh.rs  import → collection → storage orchestration
+src/main.rs     CLI entry point
+migrations/     versioned schema changes
+app/src/        Vanilla TypeScript interface
+app/src-tauri/  Tauri adapter, commands, and configuration
 ```
 
-## Limites actuelles
+## Current limitations
 
-- les numéros affichés par `list` ne sont pas persistants entre deux
-  chronologies, contrairement aux identifiants ;
-- les contenus nécessitant une connexion ou un abonnement payant ne sont pas
-  pris en charge ;
-- l'interface n'est pas encore adaptée aux écrans mobiles ;
-- `reader.db` du CLI se trouve encore dans le dépôt de développement.
+- the numbers displayed by `list` are not stable between timelines, unlike
+  article identifiers;
+- content requiring authentication or a paid subscription is not supported;
+- the interface is not yet adapted to mobile screens;
+- the CLI's `reader.db` is still stored in the development repository.
 
-L'étape suivante consiste à adapter l'interface à Android. Dans l'application
-installée, SQLite est déjà la source de vérité et se trouve dans le répertoire
-AppData propre au bundle `io.github.r0m1-b.reader`.
+The next step is to adapt the interface to Android. In the installed
+application, SQLite is already the source of truth and lives in the AppData
+directory for the `io.github.r0m1-b.reader` bundle.
 
-## Dépannage rapide
+## License
 
-### `feeds.toml` est introuvable
+Reader is distributed under the [MIT License](LICENSE).
 
-Créer le fichier à la racine du projet. Le chemin ne dépend pas du répertoire
-depuis lequel le binaire est lancé. Ce fichier n'est nécessaire que pour
-`refresh`.
+## Quick troubleshooting
 
-### La configuration TOML est refusée
+### `feeds.toml` cannot be found
 
-Vérifier les guillemets, les blocs `[[feeds]]`, les identifiants uniques et les
-valeurs autorisées de `platform`.
+Create the file at the project root. Its path does not depend on the directory
+from which the binary is launched. The file is only required by `refresh`.
 
-### Un flux échoue
+### The TOML configuration is rejected
 
-Vérifier que son URL retourne directement du RSS ou de l'Atom. Les articles déjà
-stockés restent affichés même lorsque le serveur est indisponible.
+Check the quotation marks, `[[feeds]]` blocks, unique identifiers, and accepted
+`platform` values.
 
-### La base est verrouillée
+### A feed fails
 
-Fermer les autres processus `reader` et les sessions `sqlite3` ouvertes sur
-`reader.db`, puis réessayer. Ne supprimer les fichiers de la base qu'après avoir
-arrêté ces processus.
+Make sure its URL returns RSS or Atom directly. Cached articles remain
+available when a server is unavailable.
 
-### Une migration échoue
+### The database is locked
 
-Conserver le message d'erreur, sauvegarder la base et vérifier l'ordre ainsi que
-le contenu des fichiers dans `migrations/`. En développement seulement, une
-réinitialisation complète permet de repartir d'un schéma vierge.
+Close other `reader` processes and open `sqlite3` sessions, then try again. Do
+not remove database files while any process is using them.
 
-### Une erreur GLIBC mentionne `/snap/core20`
+### A migration fails
 
-Un terminal intégré à une installation snap de VS Code peut injecter ses propres
-variables GTK/GIO. Elles mélangent alors les bibliothèques du snap et celles du
-système. Lancer Reader depuis un terminal Ubuntu normal. Pour un diagnostic
-ponctuel depuis le terminal intégré, retirer notamment `GTK_PATH`,
-`GIO_MODULE_DIR`, `GDK_PIXBUF_MODULE_FILE`, `GSETTINGS_SCHEMA_DIR` et `LOCPATH`
-de l'environnement avant `npm run tauri dev`.
+Keep the error message, back up the database, and check the order and contents
+of the files under `migrations/`. In development only, a full reset provides a
+clean schema.
+
+### A GLIBC error mentions `/snap/core20`
+
+An integrated terminal from a snap installation of VS Code may inject its own
+GTK/GIO variables, mixing snap libraries with system libraries. Run Reader from
+a regular Ubuntu terminal. For a one-off diagnosis in the integrated terminal,
+unset `GTK_PATH`, `GIO_MODULE_DIR`, `GDK_PIXBUF_MODULE_FILE`,
+`GSETTINGS_SCHEMA_DIR`, and `LOCPATH` before running `npm run tauri dev`.
