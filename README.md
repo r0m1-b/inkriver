@@ -108,9 +108,27 @@ directory for the `io.github.r0m1-b.inkriver` bundle—usually
 from the CLI's `inkriver.db`.
 
 The application displays its cache immediately and never accesses the network
-on startup. Use “Subscriptions” to add an RSS/Atom URL, correct the detected
-platform if necessary, disable a feed, or delete it. Then use “Refresh” to
-download articles.
+on startup. The **Subscriptions** page lists every active or inactive feed with
+its URL, author, description, latest publication, last successful refresh, and
+most recent detailed error. This status is stored in SQLite and remains visible
+after restarting InkRiver. Disabling and deleting actions are available on this
+page; **Add subscription** opens a separate dialog containing only the add form.
+Use **Refresh** to download articles and update these details.
+
+Opening an unread article automatically marks it as read. The reading panel
+shows the current state and lets you explicitly mark the article as read or
+unread; the change is stored in SQLite and immediately reflected in the
+timeline. Each timeline row also provides always-visible star and envelope
+buttons to change favorite and read states without opening the article.
+Source badges pair the Medium or Substack brand mark—or a generic RSS icon—with
+their text label. The brand vectors come from Simple Icons v16.21.0; Medium and
+Substack retain ownership of their respective trademarks.
+The **All** and **Favorites** tabs above the timeline provide an immediate,
+offline view of starred articles while keeping the same reading panel.
+
+HTTP(S) links contained in an article open in the system browser instead of
+navigating inside InkRiver. Relative links are resolved from the article URL.
+Links to sections within the current article are currently ignored.
 
 Disabling a subscription preserves its identifier, articles, favorites, and
 read states. Adding the same URL again reactivates that subscription instead of
@@ -251,7 +269,8 @@ inkriver.db
 Migrations from `migrations/` are embedded in the binary and applied when the
 database is opened. The database currently contains:
 
-- `feeds`: subscriptions, platforms, URLs, and active states;
+- `feeds`: subscriptions, platforms, URLs, active states, feed metadata, and
+  last refresh success or error;
 - `articles`: remote content, content kinds, feed relationships, read states,
   and favorite states;
 - `_sqlx_migrations`: migrations already applied by SQLx.
@@ -353,6 +372,17 @@ The `build.rs` script tells Cargo to rebuild the binary whenever the migrations
 directory changes.
 
 ## Development and quality
+
+### Branch workflow
+
+- `dev` is the integration branch for day-to-day development. Regular work is
+  committed and pushed there.
+- Short-lived branches may be created from `dev` for changes that benefit from
+  an isolated review, then merged back into `dev`.
+- `main` represents a stable, releasable version. It is updated from `dev` only
+  when a release is explicitly frozen, after all validation commands pass.
+- Releases are tagged on `main`; ordinary development is never committed
+  directly to that branch.
 
 Common commands:
 

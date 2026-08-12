@@ -3,5 +3,11 @@
   "identifier": "main-capability",
   "description": "Permissions minimales de la fenêtre principale",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }]
+    }
+  ]
 }

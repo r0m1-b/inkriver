@@ -74,8 +74,18 @@ pub struct Feed {
     pub title: String,
     pub link: String,
     pub description: String,
+    pub author: Option<String>,
     pub source: Source,
     pub entries: Vec<feed_rs::model::Entry>,
+}
+
+/// Contains the feed-level metadata retained after a successful collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedMetadata {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub author: Option<String>,
 }
 
 impl Feed {
@@ -85,6 +95,7 @@ impl Feed {
         title: String,
         link: String,
         description: String,
+        author: Option<String>,
         source: Source,
         entries: Vec<feed_rs::model::Entry>,
     ) -> Self {
@@ -93,8 +104,19 @@ impl Feed {
             title,
             link,
             description,
+            author,
             source,
             entries,
+        }
+    }
+
+    /// Copies the feed-level fields that must remain available after refresh.
+    pub fn metadata(&self) -> FeedMetadata {
+        FeedMetadata {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            author: self.author.clone(),
         }
     }
 
@@ -201,6 +223,7 @@ mod tests {
             "Test Feed".into(),
             "https://example.com".into(),
             "A simple test feed".into(),
+            Some("Test Author".into()),
             Source::Other,
             Vec::new(),
         );
@@ -209,6 +232,8 @@ mod tests {
         assert_eq!(feed.title, "Test Feed");
         assert_eq!(feed.link, "https://example.com");
         assert_eq!(feed.description, "A simple test feed");
+        assert_eq!(feed.author.as_deref(), Some("Test Author"));
+        assert_eq!(feed.metadata().title, "Test Feed");
         assert_eq!(feed.source, Source::Other);
     }
 
@@ -365,6 +390,7 @@ mod tests {
             "First feed".to_string(),
             "https://first.example".to_string(),
             String::new(),
+            None,
             Source::Substack,
             vec![duplicate_entry.clone()],
         );
@@ -373,6 +399,7 @@ mod tests {
             "Second feed".to_string(),
             "https://second.example".to_string(),
             String::new(),
+            None,
             Source::Medium,
             vec![duplicate_entry],
         );

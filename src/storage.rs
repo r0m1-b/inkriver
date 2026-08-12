@@ -1,6 +1,8 @@
 use crate::article::{Article, ContentKind, Source};
 use crate::config::{FeedConfig, FeedUrlError, Platform, detect_platform, normalize_feed_url};
+use crate::feed::FeedMetadata;
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -21,6 +23,28 @@ pub struct StoredFeed {
     pub platform: Platform,
     pub url: String,
     pub is_active: bool,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub last_published_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_error: Option<StoredFeedError>,
+}
+
+/// Describes the most recent failed refresh retained for a subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFeedError {
+    pub stage: String,
+    pub message: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// Contains one failed feed result ready to be persisted after collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedRefreshFailure {
+    pub feed_id: String,
+    pub stage: String,
+    pub message: String,
 }
 
 /// Summarizes a permanent subscription deletion.
@@ -79,6 +103,60 @@ pub struct ArticleSummary {
 pub struct UpsertStats {
     pub inserted: usize,
     pub updated: usize,
+}
+
+type StoredFeedRow = (
+    String,
+    String,
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<DateTime<Utc>>,
+    Option<String>,
+    Option<String>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+);
+
+fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
+    let (
+        id,
+        platform,
+        url,
+        is_active,
+        title,
+        description,
+        author,
+        last_success_at,
+        last_error_stage,
+        last_error_message,
+        last_error_at,
+        last_published_at,
+    ) = row;
+    let platform = Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
+    let last_error = match (last_error_stage, last_error_message, last_error_at) {
+        (Some(stage), Some(message), Some(occurred_at)) => Some(StoredFeedError {
+            stage,
+            message,
+            occurred_at,
+        }),
+        _ => None,
+    };
+
+    Ok(StoredFeed {
+        id,
+        platform,
+        url,
+        is_active,
+        title,
+        description,
+        author,
+        last_published_at,
+        last_success_at,
+        last_error,
+    })
 }
 
 type StoredArticleRow = (
@@ -212,23 +290,39 @@ impl Storage {
     ///
     /// Returns an error when rows cannot be loaded or contain an unknown platform.
     pub async fn list_feeds(&self) -> Result<Vec<StoredFeed>> {
-        let rows: Vec<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, platform, url, is_active FROM feeds ORDER BY id ASC")
-                .fetch_all(&self.pool)
-                .await
-                .context("Impossible de charger les abonnements")?;
+        let rows: Vec<StoredFeedRow> = sqlx::query_as(
+            r#"
+                SELECT feeds.id, feeds.platform, feeds.url, feeds.is_active,
+                       feeds.title, feeds.description,
+                       COALESCE(
+                           feeds.author,
+                           (
+                               SELECT articles.author
+                               FROM articles
+                               WHERE articles.feed_id = feeds.id
+                                 AND articles.author IS NOT NULL
+                                 AND TRIM(articles.author) <> ''
+                               ORDER BY articles.published_at IS NULL ASC,
+                                        articles.published_at DESC,
+                                        articles.id ASC
+                               LIMIT 1
+                           )
+                       ) AS author,
+                       feeds.last_success_at, feeds.last_error_stage,
+                       feeds.last_error_message, feeds.last_error_at,
+                       MAX(articles.published_at) AS last_published_at
+                FROM feeds
+                LEFT JOIN articles ON articles.feed_id = feeds.id
+                GROUP BY feeds.id
+                ORDER BY feeds.is_active DESC,
+                         COALESCE(feeds.title, feeds.url) COLLATE NOCASE ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les abonnements")?;
 
-        rows.into_iter()
-            .map(|(id, platform, url, is_active)| {
-                let platform = Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
-                Ok(StoredFeed {
-                    id,
-                    platform,
-                    url,
-                    is_active,
-                })
-            })
-            .collect()
+        rows.into_iter().map(stored_feed_from_row).collect()
     }
 
     /// Adds a subscription or reactivates a previously disabled matching URL.
@@ -259,12 +353,13 @@ impl Storage {
                 .execute(&self.pool)
                 .await
                 .map_err(|error| SubscriptionError::Database(error.to_string()))?;
-            return Ok(StoredFeed {
-                id,
-                platform,
-                url,
-                is_active: true,
-            });
+            return self
+                .list_feeds()
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?
+                .into_iter()
+                .find(|feed| feed.id == id)
+                .ok_or(SubscriptionError::NotFound(id));
         }
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -290,6 +385,12 @@ impl Storage {
             platform,
             url,
             is_active: true,
+            title: None,
+            description: None,
+            author: None,
+            last_published_at: None,
+            last_success_at: None,
+            last_error: None,
         })
     }
 
@@ -299,14 +400,13 @@ impl Storage {
         feed_id: &str,
         is_active: bool,
     ) -> std::result::Result<StoredFeed, SubscriptionError> {
-        let feed: Option<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, platform, url, is_active FROM feeds WHERE id = ?")
+        let feed: Option<(String, String)> =
+            sqlx::query_as("SELECT id, url FROM feeds WHERE id = ?")
                 .bind(feed_id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|error| SubscriptionError::Database(error.to_string()))?;
-        let (id, platform, url, _) =
-            feed.ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
+        let (id, url) = feed.ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
 
         if is_active {
             let duplicate: bool = sqlx::query_scalar(
@@ -328,14 +428,12 @@ impl Storage {
             .execute(&self.pool)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
-        let platform =
-            Platform::try_from(platform.as_str()).map_err(SubscriptionError::Database)?;
-        Ok(StoredFeed {
-            id,
-            platform,
-            url,
-            is_active,
-        })
+        self.list_feeds()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+            .into_iter()
+            .find(|feed| feed.id == id)
+            .ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))
     }
 
     /// Permanently deletes a subscription and all of its cached articles.
@@ -400,6 +498,75 @@ impl Storage {
                 })
             })
             .collect()
+    }
+
+    /// Persists metadata and the latest success or failure for each attempted feed.
+    ///
+    /// A successful result clears the previous error. A failed result retains the
+    /// last successful metadata and publication history.
+    pub async fn record_feed_refreshes(
+        &self,
+        successful_feeds: &[FeedMetadata],
+        failures: &[FeedRefreshFailure],
+        refreshed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de commencer l'enregistrement des états de flux")?;
+
+        for feed in successful_feeds {
+            let description = (!feed.description.trim().is_empty()).then_some(&feed.description);
+            let author = feed
+                .author
+                .as_ref()
+                .filter(|author| !author.trim().is_empty());
+            sqlx::query(
+                r#"
+                    UPDATE feeds
+                    SET title = ?, description = ?, author = ?, last_success_at = ?,
+                        last_error_stage = NULL, last_error_message = NULL,
+                        last_error_at = NULL
+                    WHERE id = ?
+                "#,
+            )
+            .bind(&feed.title)
+            .bind(description)
+            .bind(author)
+            .bind(refreshed_at)
+            .bind(&feed.id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Impossible d'enregistrer le succès du flux {:?}", feed.id))?;
+        }
+
+        for failure in failures {
+            sqlx::query(
+                r#"
+                    UPDATE feeds
+                    SET last_error_stage = ?, last_error_message = ?, last_error_at = ?
+                    WHERE id = ?
+                "#,
+            )
+            .bind(&failure.stage)
+            .bind(&failure.message)
+            .bind(refreshed_at)
+            .bind(&failure.feed_id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| {
+                format!(
+                    "Impossible d'enregistrer l'échec du flux {:?}",
+                    failure.feed_id
+                )
+            })?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider les états de rafraîchissement des flux")
     }
 
     /// Inserts new articles and refreshes existing remote metadata.
@@ -637,6 +804,21 @@ mod tests {
         }
     }
 
+    fn stored_feed(id: &str, platform: Platform, url: &str, is_active: bool) -> StoredFeed {
+        StoredFeed {
+            id: id.to_string(),
+            platform,
+            url: url.to_string(),
+            is_active,
+            title: None,
+            description: None,
+            author: None,
+            last_published_at: None,
+            last_success_at: None,
+            last_error: None,
+        }
+    }
+
     fn article(id: &str, feed_id: &str, published_at: Option<chrono::DateTime<Utc>>) -> Article {
         Article {
             id: id.to_string(),
@@ -701,9 +883,78 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 2);
+        assert_eq!(migration_count, 3);
 
         storage.close().await;
+    }
+
+    /// Verifies feed metadata and refresh errors survive reloads and a later
+    /// success clears only the obsolete error.
+    #[tokio::test]
+    async fn record_feed_refreshes_persists_details_and_clears_recovered_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("inkriver.db");
+        let storage = Storage::open(&database_path).await.unwrap();
+        storage
+            .import_feeds(&[feed(
+                "astronomy",
+                Platform::Substack,
+                "https://astronomy.example/feed",
+            )])
+            .await
+            .unwrap();
+        let published_at = Utc.with_ymd_and_hms(2026, 8, 10, 18, 0, 0).unwrap();
+        storage
+            .upsert_articles(&[article("astronomy::mars", "astronomy", Some(published_at))])
+            .await
+            .unwrap();
+        let failure_at = Utc.with_ymd_and_hms(2026, 8, 11, 9, 0, 0).unwrap();
+        storage
+            .record_feed_refreshes(
+                &[],
+                &[FeedRefreshFailure {
+                    feed_id: "astronomy".to_string(),
+                    stage: "HTTP request".to_string(),
+                    message: "network unavailable".to_string(),
+                }],
+                failure_at,
+            )
+            .await
+            .unwrap();
+
+        storage.close().await;
+        let storage = Storage::open(&database_path).await.unwrap();
+
+        let failed = storage.list_feeds().await.unwrap().remove(0);
+        assert_eq!(failed.author.as_deref(), Some("Test Author"));
+        assert_eq!(failed.last_published_at, Some(published_at));
+        assert_eq!(failed.last_error.as_ref().unwrap().occurred_at, failure_at);
+
+        let success_at = Utc.with_ymd_and_hms(2026, 8, 12, 10, 30, 0).unwrap();
+        storage
+            .record_feed_refreshes(
+                &[FeedMetadata {
+                    id: "astronomy".to_string(),
+                    title: "Night sky notes".to_string(),
+                    description: "A practical guide to astronomy".to_string(),
+                    author: Some("Claire du Ciel".to_string()),
+                }],
+                &[],
+                success_at,
+            )
+            .await
+            .unwrap();
+
+        let recovered = storage.list_feeds().await.unwrap().remove(0);
+        assert_eq!(recovered.title.as_deref(), Some("Night sky notes"));
+        assert_eq!(
+            recovered.description.as_deref(),
+            Some("A practical guide to astronomy")
+        );
+        assert_eq!(recovered.author.as_deref(), Some("Claire du Ciel"));
+        assert_eq!(recovered.last_success_at, Some(success_at));
+        assert_eq!(recovered.last_published_at, Some(published_at));
+        assert!(recovered.last_error.is_none());
     }
 
     #[tokio::test]
@@ -773,18 +1024,18 @@ mod tests {
         assert_eq!(
             storage.list_feeds().await.unwrap(),
             vec![
-                StoredFeed {
-                    id: "astronomy".to_string(),
-                    platform: Platform::Substack,
-                    url: "https://astronomy.example/feed".to_string(),
-                    is_active: true,
-                },
-                StoredFeed {
-                    id: "bread".to_string(),
-                    platform: Platform::Medium,
-                    url: "https://medium.com/feed/@bread".to_string(),
-                    is_active: true,
-                },
+                stored_feed(
+                    "astronomy",
+                    Platform::Substack,
+                    "https://astronomy.example/feed",
+                    true,
+                ),
+                stored_feed(
+                    "bread",
+                    Platform::Medium,
+                    "https://medium.com/feed/@bread",
+                    true,
+                ),
             ]
         );
     }
@@ -817,18 +1068,18 @@ mod tests {
         assert_eq!(
             storage.list_feeds().await.unwrap(),
             vec![
-                StoredFeed {
-                    id: "astronomy".to_string(),
-                    platform: Platform::Other,
-                    url: "https://astronomy.example/new-feed".to_string(),
-                    is_active: true,
-                },
-                StoredFeed {
-                    id: "bread".to_string(),
-                    platform: Platform::Medium,
-                    url: "https://medium.com/feed/@bread".to_string(),
-                    is_active: false,
-                },
+                stored_feed(
+                    "astronomy",
+                    Platform::Other,
+                    "https://astronomy.example/new-feed",
+                    true,
+                ),
+                stored_feed(
+                    "bread",
+                    Platform::Medium,
+                    "https://medium.com/feed/@bread",
+                    false,
+                ),
             ]
         );
     }
@@ -940,15 +1191,10 @@ mod tests {
                 deleted_articles: 2,
             }
         );
-        assert_eq!(
-            storage.list_feeds().await.unwrap(),
-            vec![StoredFeed {
-                id: "bread".to_string(),
-                platform: Platform::Medium,
-                url: "https://medium.com/feed/@bread".to_string(),
-                is_active: true,
-            }]
-        );
+        let retained_feeds = storage.list_feeds().await.unwrap();
+        assert_eq!(retained_feeds.len(), 1);
+        assert_eq!(retained_feeds[0].id, "bread");
+        assert_eq!(retained_feeds[0].author.as_deref(), Some("Test Author"));
         let articles = storage.list_articles().await.unwrap();
         assert_eq!(articles.len(), 1);
         assert_eq!(articles[0].article.id, "bread::starter");
@@ -1038,12 +1284,12 @@ mod tests {
 
         assert_eq!(
             storage.list_feeds().await.unwrap(),
-            vec![StoredFeed {
-                id: original.id,
-                platform: original.platform,
-                url: original.url,
-                is_active: true,
-            }]
+            vec![stored_feed(
+                &original.id,
+                original.platform,
+                &original.url,
+                true,
+            )]
         );
     }
 

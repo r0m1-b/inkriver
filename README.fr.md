@@ -110,9 +110,31 @@ répertoire de données du bundle `io.github.r0m1-b.inkriver` — généralement
 de la base `inkriver.db` du CLI.
 
 L'application affiche immédiatement son cache et ne contacte jamais le réseau
-au démarrage. Utiliser « Abonnements » pour ajouter une URL RSS/Atom, corriger
-si nécessaire la plateforme détectée, désactiver un flux ou le supprimer.
-Utiliser ensuite « Actualiser » pour télécharger les articles.
+au démarrage. La page **Abonnements** liste chaque flux actif ou inactif avec son
+URL, son auteur, sa description, sa dernière publication, sa dernière
+actualisation réussie et sa dernière erreur détaillée. Cet état est conservé
+dans SQLite et reste visible après un redémarrage d'InkRiver. Les actions de
+désactivation et de suppression se trouvent sur cette page ; **Ajouter un
+abonnement** ouvre une fenêtre séparée contenant uniquement le formulaire
+d'ajout. Utiliser **Actualiser** pour télécharger les articles et mettre à jour
+ces informations.
+
+L'ouverture d'un article non lu le marque automatiquement comme lu. Le panneau
+de lecture affiche son état courant et permet de le marquer explicitement comme
+lu ou non lu ; la modification est enregistrée dans SQLite et immédiatement
+répercutée dans la chronologie. Chaque ligne de la chronologie propose également
+des boutons étoile et enveloppe toujours visibles pour changer les états favori
+et lu sans ouvrir l'article.
+Les badges de source associent leur libellé à la marque Medium ou Substack, ou à
+une icône RSS générique. Les vecteurs de marque proviennent de Simple Icons
+v16.21.0 ; Medium et Substack restent propriétaires de leurs marques respectives.
+Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
+immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
+
+Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
+au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL
+de l'article. Les liens vers une section du même article sont actuellement
+ignorés.
 
 Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
 les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
@@ -254,7 +276,8 @@ inkriver.db
 Les migrations présentes dans `migrations/` sont intégrées au binaire puis
 appliquées à l'ouverture. La base contient actuellement :
 
-- `feeds` : abonnements, plateforme, URL et état actif ;
+- `feeds` : abonnements, plateforme, URL, état actif, métadonnées du flux et
+  dernier succès ou échec d'actualisation ;
 - `articles` : contenu distant, type de contenu, relation au flux, état lu et
   favori ;
 - `_sqlx_migrations` : migrations déjà appliquées par SQLx.
@@ -358,6 +381,18 @@ Le script `build.rs` demande à Cargo de reconstruire le binaire lorsque le
 dossier des migrations change.
 
 ## Développement et qualité
+
+### Flux de branches
+
+- `dev` est la branche d'intégration utilisée pour le développement courant.
+  Les changements ordinaires y sont commités et poussés.
+- Une branche temporaire peut être créée depuis `dev` lorsqu'un changement
+  mérite une revue isolée, puis fusionnée dans `dev`.
+- `main` représente une version stable et publiable. Elle n'est mise à jour
+  depuis `dev` que lorsqu'une release est explicitement figée, après réussite
+  de toutes les commandes de validation.
+- Les releases sont taguées sur `main` ; le développement courant n'est jamais
+  commité directement sur cette branche.
 
 Commandes usuelles :
 
