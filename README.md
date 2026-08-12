@@ -354,6 +354,17 @@ directory changes.
 
 ## Development and quality
 
+### Branch workflow
+
+- `dev` is the integration branch for day-to-day development. Regular work is
+  committed and pushed there.
+- Short-lived branches may be created from `dev` for changes that benefit from
+  an isolated review, then merged back into `dev`.
+- `main` represents a stable, releasable version. It is updated from `dev` only
+  when a release is explicitly frozen, after all validation commands pass.
+- Releases are tagged on `main`; ordinary development is never committed
+  directly to that branch.
+
 Common commands:
 
 ```bash

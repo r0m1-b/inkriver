@@ -359,6 +359,18 @@ dossier des migrations change.
 
 ## Développement et qualité
 
+### Flux de branches
+
+- `dev` est la branche d'intégration utilisée pour le développement courant.
+  Les changements ordinaires y sont commités et poussés.
+- Une branche temporaire peut être créée depuis `dev` lorsqu'un changement
+  mérite une revue isolée, puis fusionnée dans `dev`.
+- `main` représente une version stable et publiable. Elle n'est mise à jour
+  depuis `dev` que lorsqu'une release est explicitement figée, après réussite
+  de toutes les commandes de validation.
+- Les releases sont taguées sur `main` ; le développement courant n'est jamais
+  commité directement sur cette branche.
+
 Commandes usuelles :
 
 ```bash
