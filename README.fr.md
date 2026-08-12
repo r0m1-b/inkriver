@@ -121,6 +121,11 @@ répercutée dans la chronologie. Chaque ligne de la chronologie propose égalem
 des boutons étoile et enveloppe toujours visibles pour changer les états favori
 et lu sans ouvrir l'article.
 
+Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
+au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL
+de l'article. Les liens vers une section du même article sont actuellement
+ignorés.
+
 Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
 les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
 lieu de créer un nouvel historique.

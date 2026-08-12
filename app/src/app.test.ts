@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { InkRiverApp, canOpenOriginal, detectPlatform, errorMessage } from "./app";
+import {
+  InkRiverApp,
+  buildArticleDocument,
+  canOpenOriginal,
+  detectPlatform,
+  errorMessage,
+  prepareArticleContent,
+  resolveExternalArticleUrl,
+} from "./app";
 import type { InkRiverApi } from "./api";
 import type { ArticleDetail, ArticleSummary, Feed, RefreshReport } from "./types";
 
@@ -496,6 +504,86 @@ describe("InkRiverApp", () => {
     await flush();
     expect(opener).toHaveBeenCalledWith("https://space.example/mars");
   });
+
+  it("opens relative article links in the system browser without navigating the frame", async () => {
+    const linkedDetail = {
+      ...detail,
+      content: '<p><a href="/members/story"><span>Suite réservée</span></a></p>',
+    };
+    const api = fakeApi({ getArticle: vi.fn(async () => structuredClone(linkedDetail)) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(frame.srcdoc).toContain("Content-Security-Policy");
+    expect(frame.srcdoc).toContain("data-external-href=\"/members/story\"");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-link", href: "/members/story" },
+        source: frame.contentWindow,
+      }),
+    );
+    await flush();
+
+    expect(opener).toHaveBeenCalledWith("https://space.example/members/story");
+    expect(root.querySelector(".article-content")).not.toBeNull();
+  });
+
+  it("keeps fragment links inside the article frame", async () => {
+    const linkedDetail = {
+      ...detail,
+      content: '<a href="#notes">Notes</a><h2 id="notes">Notes</h2>',
+    };
+    const api = fakeApi({ getArticle: vi.fn(async () => structuredClone(linkedDetail)) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    expect(frame.srcdoc).toContain('data-internal-fragment="notes"');
+    expect(frame.srcdoc).toContain("destination.scrollIntoView");
+    expect(opener).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-HTTP article links and reports opener failures", async () => {
+    const linkedDetail = {
+      ...detail,
+      content: '<a href="mailto:test@example.com">Mail</a><a href="https://example.com/private">Privé</a>',
+    };
+    const api = fakeApi({ getArticle: vi.fn(async () => structuredClone(linkedDetail)) });
+    const opener = vi.fn(async () => Promise.reject(new Error("Navigateur indisponible")));
+    const mountedApp = await mounted(api, opener);
+    mountedApp.root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    let frame = mountedApp.root.querySelector<HTMLIFrameElement>(".article-content")!;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-link", href: "mailto:test@example.com" },
+        source: frame.contentWindow,
+      }),
+    );
+    await flush();
+    expect(opener).not.toHaveBeenCalled();
+    expect(mountedApp.root.querySelector('[role="alert"]')?.textContent).toContain(
+      "Seuls les liens HTTP(S)",
+    );
+
+    frame = mountedApp.root.querySelector<HTMLIFrameElement>(".article-content")!;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-link", href: "https://example.com/private" },
+        source: frame.contentWindow,
+      }),
+    );
+    await flush();
+    expect(opener).toHaveBeenCalledWith("https://example.com/private");
+    expect(mountedApp.root.querySelector('[role="alert"]')?.textContent).toContain(
+      "Navigateur indisponible",
+    );
+  });
 });
 
 describe("view helpers", () => {
@@ -515,5 +603,44 @@ describe("view helpers", () => {
   it("extracts structured errors and falls back to strings", () => {
     expect(errorMessage({ code: "storage", message: "Base indisponible" })).toBe("Base indisponible");
     expect(errorMessage("offline")).toBe("offline");
+  });
+
+  it("resolves only HTTP(S) article links", () => {
+    expect(resolveExternalArticleUrl("/members/story", detail.url)).toBe(
+      "https://space.example/members/story",
+    );
+    expect(resolveExternalArticleUrl("https://example.com/read")).toBe(
+      "https://example.com/read",
+    );
+    expect(() => resolveExternalArticleUrl("mailto:test@example.com", detail.url)).toThrow(
+      "Seuls les liens HTTP(S)",
+    );
+    expect(() => resolveExternalArticleUrl("relative-without-base")).toThrow("Lien invalide");
+  });
+
+  it("neutralizes external frame navigation while preserving fragment links", () => {
+    const content = prepareArticleContent(
+      '<a href="/story" target="_blank">Story</a><a href="#notes" target="_top">Notes</a>',
+    );
+    const document = new DOMParser().parseFromString(content, "text/html");
+    const links = document.querySelectorAll("a");
+    expect(links[0]?.getAttribute("href")).toBe("about:srcdoc#");
+    expect((links[0] as HTMLElement | undefined)?.dataset.externalHref).toBe("/story");
+    expect(links[0]?.hasAttribute("target")).toBe(false);
+    expect(links[1]?.getAttribute("href")).toBe("about:srcdoc#");
+    expect((links[1] as HTMLElement | undefined)?.dataset.externalHref).toBeUndefined();
+    expect((links[1] as HTMLElement | undefined)?.dataset.internalFragment).toBe("notes");
+    expect(links[1]?.hasAttribute("target")).toBe(false);
+  });
+
+  it("builds a nonce-protected iframe bridge for links", () => {
+    const document = buildArticleDocument(
+      '<a href="https://example.com/read">Read</a>',
+      "test-nonce",
+    );
+    expect(document).toContain("script-src 'nonce-test-nonce'");
+    expect(document).toContain('<script nonce="test-nonce">');
+    expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
+    expect(document).toContain('document.addEventListener("click"');
   });
 });

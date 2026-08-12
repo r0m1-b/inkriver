@@ -10,6 +10,7 @@ import type {
 
 type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmDeletion = (message: string) => boolean;
+const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 
 function escapeHtml(value: string): string {
   return value
@@ -51,6 +52,42 @@ export function canOpenOriginal(article: ArticleDetail): boolean {
   return Boolean(article.url && article.contentKind !== "full");
 }
 
+export function resolveExternalArticleUrl(rawUrl: string, articleUrl?: string | null): string {
+  let url: URL;
+  try {
+    url = articleUrl ? new URL(rawUrl, articleUrl) : new URL(rawUrl);
+  } catch {
+    throw new Error(`Lien invalide : ${rawUrl}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Seuls les liens HTTP(S) peuvent être ouverts.");
+  }
+  return url.toString();
+}
+
+export function prepareArticleContent(content: string): string {
+  const document = new DOMParser().parseFromString(content, "text/html");
+  document.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((link) => {
+    const href = link.getAttribute("href");
+    link.removeAttribute("target");
+    if (!href) return;
+    if (href.startsWith("#")) {
+      link.dataset.internalFragment = href.slice(1);
+      link.setAttribute("href", "about:srcdoc#");
+    } else {
+      link.dataset.externalHref = href;
+      link.setAttribute("href", "about:srcdoc#");
+    }
+  });
+  return document.body.innerHTML;
+}
+
+export function buildArticleDocument(content: string, nonce: string): string {
+  const preparedContent = prepareArticleContent(content);
+  const bridgeScript = `document.addEventListener("click",function(event){var target=event.target;var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
+}
+
 function favoriteIcon(isFavorite: boolean): string {
   return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.75 2.86 5.8 6.4.93-4.63 4.51 1.09 6.37L12 17.35l-5.72 3.01 1.09-6.37-4.63-4.51 6.4-.93L12 2.75Z" ${isFavorite ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"'}/></svg>`;
 }
@@ -79,7 +116,21 @@ export class InkRiverApp {
     private readonly api: InkRiverApi,
     private readonly openOriginal: OpenOriginal,
     private readonly confirmDeletion: ConfirmDeletion,
-  ) {}
+  ) {
+    this.root.ownerDocument.defaultView?.addEventListener("message", (event) => {
+      const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
+      if (!frame || event.source !== frame.contentWindow) return;
+      const message = event.data as { type?: unknown; href?: unknown } | null;
+      if (
+        !message ||
+        message.type !== ARTICLE_LINK_MESSAGE ||
+        typeof message.href !== "string"
+      ) {
+        return;
+      }
+      void this.openExternalUrl(message.href, this.selected?.url);
+    });
+  }
 
   async init(): Promise<void> {
     this.render();
@@ -260,18 +311,17 @@ export class InkRiverApp {
     }
   }
 
-  private async openSelectedOriginal(): Promise<void> {
-    if (!this.selected?.url) return;
+  private async openExternalUrl(rawUrl: string, articleUrl?: string | null): Promise<void> {
     try {
-      const url = new URL(this.selected.url);
-      if (!(["http:", "https:"] as string[]).includes(url.protocol)) {
-        throw new Error("Seuls les liens HTTP(S) peuvent être ouverts.");
-      }
-      await this.openOriginal(url.toString());
+      await this.openOriginal(resolveExternalArticleUrl(rawUrl, articleUrl));
     } catch (error) {
       this.error = errorMessage(error);
       this.render();
     }
+  }
+
+  private async openSelectedOriginal(): Promise<void> {
+    if (this.selected?.url) await this.openExternalUrl(this.selected.url);
   }
 
   private renderArticleList(): string {
@@ -312,7 +362,7 @@ export class InkRiverApp {
       ? '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
       : "";
     const content = article.content
-      ? '<iframe class="article-content" title="Contenu de l’article" sandbox=""></iframe>'
+      ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts"></iframe>'
       : '<p class="missing-content">Le flux ne fournit pas de contenu pour cet article.</p>';
     return `<article class="reader-article">
       <header><span class="source ${article.source}">${displayPlatform(article.source)}</span>
@@ -358,7 +408,8 @@ export class InkRiverApp {
 
     const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
     if (frame && this.selected?.content) {
-      frame.srcdoc = `<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="light dark"><style>body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style>${this.selected.content}`;
+      const nonce = globalThis.crypto.randomUUID();
+      frame.srcdoc = buildArticleDocument(this.selected.content, nonce);
     }
     this.bindEvents();
   }
