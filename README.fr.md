@@ -120,6 +120,8 @@ lu ou non lu ; la modification est enregistrée dans SQLite et immédiatement
 répercutée dans la chronologie. Chaque ligne de la chronologie propose également
 des boutons étoile et enveloppe toujours visibles pour changer les états favori
 et lu sans ouvrir l'article.
+Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
+immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
 
 Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
 au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL

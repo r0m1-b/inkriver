@@ -10,6 +10,7 @@ import type {
 
 type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmDeletion = (message: string) => boolean;
+type ArticleView = "all" | "favorites";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 
 function escapeHtml(value: string): string {
@@ -102,6 +103,7 @@ export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
   private selected: ArticleDetail | null = null;
+  private articleView: ArticleView = "all";
   private loading = true;
   private refreshing = false;
   private readonly updatingReadArticleIds = new Set<string>();
@@ -173,6 +175,15 @@ export class InkRiverApp {
   private async toggleFavorite(): Promise<void> {
     if (!this.selected) return;
     await this.setArticleFavoriteState(this.selected.id, !this.selected.isFavorite);
+  }
+
+  private showArticleView(view: ArticleView): void {
+    if (this.articleView === view) return;
+    this.articleView = view;
+    this.render();
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    if (timeline) timeline.scrollTop = 0;
+    this.scrollSelectedArticleIntoView();
   }
 
   private async setArticleFavoriteState(articleId: string, isFavorite: boolean): Promise<void> {
@@ -329,7 +340,13 @@ export class InkRiverApp {
     if (this.articles.length === 0) {
       return '<div class="state" data-testid="empty">Aucun article enregistré.<button class="text-button" data-action="subscriptions">Ajouter un abonnement</button></div>';
     }
-    return this.articles
+    const visibleArticles = this.articleView === "favorites"
+      ? this.articles.filter((article) => article.isFavorite)
+      : this.articles;
+    if (visibleArticles.length === 0) {
+      return '<div class="state" data-testid="favorites-empty"><strong>Aucun article favori.</strong><span>Utilisez l’étoile pour retrouver un article ici.</span></div>';
+    }
+    return visibleArticles
       .map((article) => {
         const title = article.title ?? "Sans titre";
         const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
@@ -349,6 +366,14 @@ export class InkRiverApp {
         </article>`;
       })
       .join("");
+  }
+
+  private renderArticleViews(): string {
+    const favoriteCount = this.articles.filter((article) => article.isFavorite).length;
+    return `<nav class="timeline-tabs" aria-label="Vues des articles" role="tablist">
+      <button type="button" class="timeline-tab ${this.articleView === "all" ? "active" : ""}" data-action="article-view" data-article-view="all" role="tab" aria-selected="${this.articleView === "all"}">Tous</button>
+      <button type="button" class="timeline-tab ${this.articleView === "favorites" ? "active" : ""}" data-action="article-view" data-article-view="favorites" role="tab" aria-selected="${this.articleView === "favorites"}">Favoris <span class="tab-count">${favoriteCount}</span></button>
+    </nav>`;
   }
 
   private renderReader(): string {
@@ -397,7 +422,7 @@ export class InkRiverApp {
       <header class="topbar"><div class="brand"><span>IR</span><div><strong>InkRiver</strong><small>Medium + Substack</small></div></div><div class="top-actions"><button data-action="subscriptions">Abonnements</button><button class="primary" data-action="refresh" ${this.refreshing ? "disabled" : ""}>${this.refreshing ? "Actualisation…" : "Actualiser"}</button></div></header>
       ${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}
       ${this.notice ? `<div class="banner notice" role="status">${escapeHtml(this.notice)}</div>` : ""}
-      <main><aside class="timeline" aria-label="Chronologie">${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section></main>
+      <main><aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section></main>
       ${this.renderSubscriptions()}
     </div>`;
 
@@ -415,6 +440,11 @@ export class InkRiverApp {
   }
 
   private bindEvents(): void {
+    this.root.querySelectorAll<HTMLElement>('[data-action="article-view"]').forEach((element) => {
+      element.addEventListener("click", () =>
+        this.showArticleView(element.dataset.articleView as ArticleView),
+      );
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="select-article"]').forEach((element) => {
       element.addEventListener("click", () => void this.selectArticle(element.dataset.articleId!));
     });

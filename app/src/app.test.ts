@@ -97,6 +97,60 @@ describe("InkRiverApp", () => {
     expect(api.refreshFeeds).not.toHaveBeenCalled();
   });
 
+  it("shows only cached favorites in the favorites tab and opens them", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async () => structuredClone(secondDetail)),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+
+    expect(root.querySelector('[data-article-view="favorites"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(root.textContent).not.toContain("Observer Mars au crépuscule");
+    expect(root.textContent).toContain("Observer Vénus à l'aube");
+    expect(api.listArticles).toHaveBeenCalledOnce();
+    expect(api.refreshFeeds).not.toHaveBeenCalled();
+
+    root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(api.getArticle).toHaveBeenCalledWith("space::venus");
+    expect(root.querySelector(".reader-article")?.textContent).toContain("Observer Vénus à l'aube");
+  });
+
+  it("renders an explicit empty state when no article is favorite", async () => {
+    const { root } = await mounted();
+
+    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+
+    expect(root.querySelector('[data-testid="favorites-empty"]')?.textContent).toContain(
+      "Aucun article favori",
+    );
+    expect(root.querySelector("[data-article-row-id]")).toBeNull();
+  });
+
+  it("immediately adds and removes the open article in the favorites view", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+    root.querySelector<HTMLElement>('[data-action="favorite"]')!.click();
+    await flush();
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-view="favorites"]')?.textContent).toContain("2");
+
+    root.querySelector<HTMLElement>('[data-action="favorite"]')!.click();
+    await flush();
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+    expect(root.querySelector('[data-article-view="favorites"]')?.textContent).toContain("1");
+    expect(root.querySelector(".reader-article")?.textContent).toContain("Observer Mars au crépuscule");
+  });
+
   it("renders accessible quick actions whose icons represent the current states", async () => {
     const api = fakeApi({
       listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
