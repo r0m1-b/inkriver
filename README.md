@@ -115,7 +115,8 @@ download articles.
 Opening an unread article automatically marks it as read. The reading panel
 shows the current state and lets you explicitly mark the article as read or
 unread; the change is stored in SQLite and immediately reflected in the
-timeline.
+timeline. Each timeline row also provides always-visible star and envelope
+buttons to change favorite and read states without opening the article.
 
 Disabling a subscription preserves its identifier, articles, favorites, and
 read states. Adding the same URL again reactivates that subscription instead of

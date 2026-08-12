@@ -51,13 +51,24 @@ export function canOpenOriginal(article: ArticleDetail): boolean {
   return Boolean(article.url && article.contentKind !== "full");
 }
 
+function favoriteIcon(isFavorite: boolean): string {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.75 2.86 5.8 6.4.93-4.63 4.51 1.09 6.37L12 17.35l-5.72 3.01 1.09-6.37-4.63-4.51 6.4-.93L12 2.75Z" ${isFavorite ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"'}/></svg>`;
+}
+
+function readIcon(isRead: boolean): string {
+  return isRead
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10 12 3l9 7v10H3V10Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m3 10 9 7 9-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v13H3V6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m3 7 9 7 9-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+}
+
 export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
   private selected: ArticleDetail | null = null;
   private loading = true;
   private refreshing = false;
-  private updatingReadState = false;
+  private readonly updatingReadArticleIds = new Set<string>();
+  private readonly updatingFavoriteArticleIds = new Set<string>();
   private subscriptionsOpen = false;
   private deletingFeedId: string | null = null;
   private error: string | null = null;
@@ -86,14 +97,12 @@ export class InkRiverApp {
   }
 
   private async selectArticle(articleId: string): Promise<void> {
+    if (this.selected?.id === articleId) return;
     this.error = null;
     try {
       this.selected = await this.api.getArticle(articleId);
       if (!this.selected.isRead) {
-        await this.api.setArticleRead(articleId, true);
-        this.selected.isRead = true;
-        const summary = this.articles.find((article) => article.id === articleId);
-        if (summary) summary.isRead = true;
+        await this.setArticleReadState(articleId, true);
       }
     } catch (error) {
       this.error = errorMessage(error);
@@ -103,36 +112,58 @@ export class InkRiverApp {
 
   private async toggleFavorite(): Promise<void> {
     if (!this.selected) return;
-    const nextValue = !this.selected.isFavorite;
-    try {
-      await this.api.setArticleFavorite(this.selected.id, nextValue);
-      this.selected.isFavorite = nextValue;
-      const summary = this.articles.find((article) => article.id === this.selected?.id);
-      if (summary) summary.isFavorite = nextValue;
-    } catch (error) {
-      this.error = errorMessage(error);
-    }
-    this.render();
+    await this.setArticleFavoriteState(this.selected.id, !this.selected.isFavorite);
   }
 
-  private async toggleReadState(): Promise<void> {
-    if (!this.selected || this.updatingReadState) return;
-    const articleId = this.selected.id;
-    const nextValue = !this.selected.isRead;
-    this.updatingReadState = true;
+  private async setArticleFavoriteState(articleId: string, isFavorite: boolean): Promise<void> {
+    if (this.updatingFavoriteArticleIds.has(articleId)) return;
+    this.updatingFavoriteArticleIds.add(articleId);
     this.error = null;
     this.render();
     try {
-      await this.api.setArticleRead(articleId, nextValue);
-      if (this.selected?.id === articleId) this.selected.isRead = nextValue;
+      await this.api.setArticleFavorite(articleId, isFavorite);
+      if (this.selected?.id === articleId) this.selected.isFavorite = isFavorite;
       const summary = this.articles.find((article) => article.id === articleId);
-      if (summary) summary.isRead = nextValue;
+      if (summary) summary.isFavorite = isFavorite;
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
-      this.updatingReadState = false;
+      this.updatingFavoriteArticleIds.delete(articleId);
       this.render();
     }
+  }
+
+  private async toggleReadState(): Promise<void> {
+    if (!this.selected) return;
+    await this.setArticleReadState(this.selected.id, !this.selected.isRead);
+  }
+
+  private async setArticleReadState(articleId: string, isRead: boolean): Promise<void> {
+    if (this.updatingReadArticleIds.has(articleId)) return;
+    this.updatingReadArticleIds.add(articleId);
+    this.error = null;
+    this.render();
+    try {
+      await this.api.setArticleRead(articleId, isRead);
+      if (this.selected?.id === articleId) this.selected.isRead = isRead;
+      const summary = this.articles.find((article) => article.id === articleId);
+      if (summary) summary.isRead = isRead;
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.updatingReadArticleIds.delete(articleId);
+      this.render();
+    }
+  }
+
+  private async toggleTimelineFavorite(articleId: string): Promise<void> {
+    const article = this.articles.find((candidate) => candidate.id === articleId);
+    if (article) await this.setArticleFavoriteState(articleId, !article.isFavorite);
+  }
+
+  private async toggleTimelineReadState(articleId: string): Promise<void> {
+    const article = this.articles.find((candidate) => candidate.id === articleId);
+    if (article) await this.setArticleReadState(articleId, !article.isRead);
   }
 
   private async refresh(): Promise<void> {
@@ -240,14 +271,24 @@ export class InkRiverApp {
       return '<div class="state" data-testid="empty">Aucun article enregistré.<button class="text-button" data-action="subscriptions">Ajouter un abonnement</button></div>';
     }
     return this.articles
-      .map(
-        (article) => `<button class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-id="${escapeHtml(article.id)}">
+      .map((article) => {
+        const title = article.title ?? "Sans titre";
+        const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
+        const readAction = article.isRead ? "Marquer comme non lu" : "Marquer comme lu";
+        const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
+        const readPending = this.updatingReadArticleIds.has(article.id);
+        return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
+          <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}">
           <span class="row-top"><span class="source ${article.source}">${displayPlatform(article.source)}</span><time>${displayDate(article.publishedAt)}</time></span>
-          <strong>${escapeHtml(article.title ?? "Sans titre")}</strong>
+          <strong>${escapeHtml(title)}</strong>
           <span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span>
-          ${article.isFavorite ? '<span class="favorite-mark" aria-label="Favori">★</span>' : ""}
-        </button>`,
-      )
+          </button>
+          <span class="article-row-actions">
+            <button type="button" class="article-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="timeline-favorite" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${favoriteAction} : ${title}`)}" title="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
+            <button type="button" class="article-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="timeline-read" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${readAction} : ${title}`)}" title="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readIcon(article.isRead)}</button>
+          </span>
+        </article>`;
+      })
       .join("");
   }
 
@@ -256,6 +297,8 @@ export class InkRiverApp {
       return '<div class="reader-placeholder"><span>IR</span><p>Sélectionnez un article dans la chronologie.</p></div>';
     }
     const article = this.selected;
+    const readPending = this.updatingReadArticleIds.has(article.id);
+    const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
     const originalButton = canOpenOriginal(article)
       ? '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
       : "";
@@ -267,7 +310,7 @@ export class InkRiverApp {
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
       <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div>
-      <div class="reader-actions"><button data-action="toggle-read" ${this.updatingReadState ? "disabled" : ""}>${this.updatingReadState ? "Enregistrement…" : article.isRead ? "Marquer comme non lu" : "Marquer comme lu"}</button><button data-action="favorite" aria-pressed="${article.isFavorite}">${article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
+      <div class="reader-actions"><button data-action="toggle-read" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readPending ? "Enregistrement…" : article.isRead ? "Marquer comme non lu" : "Marquer comme lu"}</button><button data-action="favorite" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoritePending ? "Enregistrement…" : article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
       ${content}
     </article>`;
   }
@@ -305,8 +348,18 @@ export class InkRiverApp {
   }
 
   private bindEvents(): void {
-    this.root.querySelectorAll<HTMLElement>("[data-article-id]").forEach((element) => {
+    this.root.querySelectorAll<HTMLElement>('[data-action="select-article"]').forEach((element) => {
       element.addEventListener("click", () => void this.selectArticle(element.dataset.articleId!));
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="timeline-favorite"]').forEach((element) => {
+      element.addEventListener("click", () =>
+        void this.toggleTimelineFavorite(element.dataset.stateArticleId!),
+      );
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="timeline-read"]').forEach((element) => {
+      element.addEventListener("click", () =>
+        void this.toggleTimelineReadState(element.dataset.stateArticleId!),
+      );
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="subscriptions"]').forEach((element) => {
       element.addEventListener("click", () => {

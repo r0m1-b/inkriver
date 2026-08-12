@@ -21,6 +21,20 @@ const detail: ArticleDetail = {
   contentKind: "excerpt",
 };
 
+const secondSummary: ArticleSummary = {
+  ...summary,
+  id: "space::venus",
+  title: "Observer Vénus à l'aube",
+  isRead: true,
+  isFavorite: true,
+};
+
+const secondDetail: ArticleDetail = {
+  ...secondSummary,
+  content: "<p>Vénus brille avant le lever du Soleil.</p>",
+  contentKind: "full",
+};
+
 const feed: Feed = {
   id: "stable-feed-id",
   platform: "substack",
@@ -75,6 +89,103 @@ describe("InkRiverApp", () => {
     expect(api.refreshFeeds).not.toHaveBeenCalled();
   });
 
+  it("renders accessible quick actions whose icons represent the current states", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+    });
+    const { root } = await mounted(api);
+    const firstRow = root.querySelector<HTMLElement>(
+      '[data-article-row-id="space::mars"]',
+    )!;
+    const secondRow = root.querySelector<HTMLElement>(
+      '[data-article-row-id="space::venus"]',
+    )!;
+
+    expect(firstRow.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("false");
+    expect(firstRow.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-label")).toContain("Ajouter aux favoris");
+    expect(firstRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("false");
+    expect(firstRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-label")).toContain("Marquer comme lu");
+    expect(secondRow.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(secondRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(firstRow.querySelectorAll("button")).toHaveLength(3);
+  });
+
+  it("toggles a favorite from the timeline without opening the article", async () => {
+    const { root, api } = await mounted();
+
+    root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!.click();
+    await flush();
+
+    expect(api.setArticleFavorite).toHaveBeenCalledWith("space::mars", true);
+    expect(api.getArticle).not.toHaveBeenCalled();
+    const button = root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!;
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(button.getAttribute("title")).toBe("Retirer des favoris");
+
+    button.click();
+    await flush();
+    expect(api.setArticleFavorite).toHaveBeenNthCalledWith(2, "space::mars", false);
+    expect(root.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("toggles read state from the timeline without opening the article", async () => {
+    const { root, api } = await mounted();
+
+    root.querySelector<HTMLElement>('[data-action="timeline-read"]')!.click();
+    await flush();
+
+    expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", true);
+    expect(api.getArticle).not.toHaveBeenCalled();
+    expect(root.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
+
+    root.querySelector<HTMLElement>('[data-action="timeline-read"]')!.click();
+    await flush();
+    expect(api.setArticleRead).toHaveBeenNthCalledWith(2, "space::mars", false);
+    expect(root.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps other quick actions available while a timeline update is pending", async () => {
+    let finishUpdate: (() => void) | undefined;
+    const api = fakeApi({
+      setArticleRead: vi.fn(
+        () => new Promise<void>((resolve) => {
+          finishUpdate = resolve;
+        }),
+      ),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-action="timeline-read"]')!.click();
+    const pendingRead = root.querySelector<HTMLButtonElement>('[data-action="timeline-read"]')!;
+    const favorite = root.querySelector<HTMLButtonElement>('[data-action="timeline-favorite"]')!;
+    expect(pendingRead.disabled).toBe(true);
+    expect(pendingRead.getAttribute("aria-busy")).toBe("true");
+    expect(favorite.disabled).toBe(false);
+    pendingRead.click();
+    expect(api.setArticleRead).toHaveBeenCalledOnce();
+
+    finishUpdate!();
+    await flush();
+    expect(root.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("keeps quick-action state unchanged when persistence fails", async () => {
+    const api = fakeApi({
+      setArticleFavorite: vi.fn(async () =>
+        Promise.reject({ code: "storage", message: "Favori non enregistré" }),
+      ),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!.click();
+    await flush();
+
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("Favori non enregistré");
+    expect(root.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("false");
+    expect(api.getArticle).not.toHaveBeenCalled();
+  });
+
   it("renders an empty state that opens subscription management", async () => {
     const { root } = await mounted(fakeApi({ listArticles: vi.fn(async () => []) }));
     expect(root.querySelector('[data-testid="empty"]')).not.toBeNull();
@@ -99,7 +210,7 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-action="toggle-read"]')?.textContent).toContain(
       "Marquer comme non lu",
     );
-    expect(root.querySelector("[data-article-id]")?.classList).toContain("read");
+    expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
     expect(root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc).toContain(
       "Mars prend une teinte orangée",
     );
@@ -132,13 +243,49 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-action="toggle-read"]')?.textContent).toContain(
       "Marquer comme lu",
     );
-    expect(root.querySelector("[data-article-id]")?.classList).toContain("unread");
+    expect(root.querySelector("[data-article-row-id]")?.classList).toContain("unread");
 
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
     await flush();
     expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
     expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
-    expect(root.querySelector("[data-article-id]")?.classList).toContain("read");
+    expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
+  });
+
+  it("keeps a selected article unread until it is reopened after another selection", async () => {
+    const getArticle = vi.fn(async (articleId: string) =>
+      articleId === secondDetail.id
+        ? structuredClone(secondDetail)
+        : structuredClone(detail),
+    );
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle,
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+    root.querySelector<HTMLElement>(
+      '[data-article-row-id="space::mars"] [data-action="timeline-read"]',
+    )!.click();
+    await flush();
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+    expect(getArticle).toHaveBeenCalledTimes(1);
+    expect(api.setArticleRead).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+
+    root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+
+    expect(getArticle).toHaveBeenCalledTimes(3);
+    expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
   });
 
   it("disables the read action while its update is pending", async () => {
@@ -186,7 +333,7 @@ describe("InkRiverApp", () => {
       "État de lecture non enregistré",
     );
     expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
-    expect(root.querySelector("[data-article-id]")?.classList).toContain("read");
+    expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
   });
 
   it("toggles a favorite from the reading panel", async () => {
@@ -197,6 +344,14 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.setArticleFavorite).toHaveBeenCalledWith("space::mars", true);
     expect(root.textContent).toContain("Retirer des favoris");
+    expect(root.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("true");
+
+    root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!.click();
+    await flush();
+    expect(api.setArticleFavorite).toHaveBeenNthCalledWith(2, "space::mars", false);
+    expect(root.querySelector('[data-action="favorite"]')?.textContent).toContain(
+      "Ajouter aux favoris",
+    );
   });
 
   it("reports a partial refresh while retaining cached articles", async () => {
