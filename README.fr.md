@@ -110,9 +110,14 @@ répertoire de données du bundle `io.github.r0m1-b.inkriver` — généralement
 de la base `inkriver.db` du CLI.
 
 L'application affiche immédiatement son cache et ne contacte jamais le réseau
-au démarrage. Utiliser « Abonnements » pour ajouter une URL RSS/Atom, corriger
-si nécessaire la plateforme détectée, désactiver un flux ou le supprimer.
-Utiliser ensuite « Actualiser » pour télécharger les articles.
+au démarrage. La page **Abonnements** liste chaque flux actif ou inactif avec son
+URL, son auteur, sa description, sa dernière publication, sa dernière
+actualisation réussie et sa dernière erreur détaillée. Cet état est conservé
+dans SQLite et reste visible après un redémarrage d'InkRiver. Les actions de
+désactivation et de suppression se trouvent sur cette page ; **Ajouter un
+abonnement** ouvre une fenêtre séparée contenant uniquement le formulaire
+d'ajout. Utiliser **Actualiser** pour télécharger les articles et mettre à jour
+ces informations.
 
 L'ouverture d'un article non lu le marque automatiquement comme lu. Le panneau
 de lecture affiche son état courant et permet de le marquer explicitement comme
@@ -271,7 +276,8 @@ inkriver.db
 Les migrations présentes dans `migrations/` sont intégrées au binaire puis
 appliquées à l'ouverture. La base contient actuellement :
 
-- `feeds` : abonnements, plateforme, URL et état actif ;
+- `feeds` : abonnements, plateforme, URL, état actif, métadonnées du flux et
+  dernier succès ou échec d'actualisation ;
 - `articles` : contenu distant, type de contenu, relation au flux, état lu et
   favori ;
 - `_sqlx_migrations` : migrations déjà appliquées par SQLx.

@@ -23,6 +23,18 @@ export interface Feed {
   platform: Platform;
   url: string;
   isActive: boolean;
+  title: string | null;
+  description: string | null;
+  author: string | null;
+  lastPublishedAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: FeedStatusError | null;
+}
+
+export interface FeedStatusError {
+  stage: string;
+  message: string;
+  occurredAt: string;
 }
 
 export interface DeleteFeedResult {

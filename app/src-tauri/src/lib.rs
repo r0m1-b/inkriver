@@ -104,6 +104,20 @@ pub struct FeedDto {
     pub platform: String,
     pub url: String,
     pub is_active: bool,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub last_published_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_error: Option<StoredFeedErrorDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredFeedErrorDto {
+    pub stage: String,
+    pub message: String,
+    pub occurred_at: String,
 }
 
 impl From<StoredFeed> for FeedDto {
@@ -113,6 +127,16 @@ impl From<StoredFeed> for FeedDto {
             platform: feed.platform.as_str().to_string(),
             url: feed.url,
             is_active: feed.is_active,
+            title: feed.title,
+            description: feed.description,
+            author: feed.author,
+            last_published_at: feed.last_published_at.map(|date| date.to_rfc3339()),
+            last_success_at: feed.last_success_at.map(|date| date.to_rfc3339()),
+            last_error: feed.last_error.map(|error| StoredFeedErrorDto {
+                stage: error.stage,
+                message: error.message,
+                occurred_at: error.occurred_at.to_rfc3339(),
+            }),
         }
     }
 }
@@ -406,8 +430,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
     use inkriver::article::{Article, ContentKind, Source};
     use inkriver::config::FeedConfig;
+    use inkriver::feed::FeedMetadata;
+    use inkriver::storage::FeedRefreshFailure;
 
     async fn test_storage() -> (tempfile::TempDir, Storage) {
         let directory = tempfile::tempdir().unwrap();
@@ -551,6 +578,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_adapter_exposes_persisted_metadata_and_error_details() {
+        let (_directory, storage) = storage_with_article().await;
+        let refreshed_at = Utc.with_ymd_and_hms(2026, 8, 12, 18, 30, 0).unwrap();
+        storage
+            .record_feed_refreshes(
+                &[FeedMetadata {
+                    id: "space".to_string(),
+                    title: "Carnet du ciel".to_string(),
+                    description: "Observer les planètes".to_string(),
+                    author: Some("Claire".to_string()),
+                }],
+                &[],
+                refreshed_at,
+            )
+            .await
+            .unwrap();
+        let failed_at = Utc.with_ymd_and_hms(2026, 8, 12, 19, 0, 0).unwrap();
+        storage
+            .record_feed_refreshes(
+                &[],
+                &[FeedRefreshFailure {
+                    feed_id: "space".to_string(),
+                    stage: "HTTP request".to_string(),
+                    message: "offline".to_string(),
+                }],
+                failed_at,
+            )
+            .await
+            .unwrap();
+
+        let feed = list_feeds_from(&storage).await.unwrap().remove(0);
+        assert_eq!(feed.title.as_deref(), Some("Carnet du ciel"));
+        assert_eq!(feed.description.as_deref(), Some("Observer les planètes"));
+        assert_eq!(
+            feed.last_success_at.as_deref(),
+            Some("2026-08-12T18:30:00+00:00")
+        );
+        assert_eq!(feed.last_error.as_ref().unwrap().stage, "HTTP request");
+        assert_eq!(feed.last_error.as_ref().unwrap().message, "offline");
+        assert_eq!(
+            feed.last_error.as_ref().unwrap().occurred_at,
+            "2026-08-12T19:00:00+00:00"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_feed_adapter_removes_articles_and_maps_missing_feed_error() {
         let (_directory, storage) = storage_with_article().await;
 
@@ -577,6 +650,12 @@ mod tests {
             platform: "medium".to_string(),
             url: "https://medium.com/feed/@inkriver".to_string(),
             is_active: true,
+            title: Some("InkRiver on Medium".to_string()),
+            description: None,
+            author: Some("InkRiver".to_string()),
+            last_published_at: None,
+            last_success_at: None,
+            last_error: None,
         })
         .unwrap();
         assert_eq!(value["isActive"], true);

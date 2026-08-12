@@ -1,7 +1,7 @@
 use crate::article::{Article, Source};
 use crate::config::{Config, FeedConfig, Platform};
-use crate::feed::Feed;
 use crate::feed::MISSING_ENTRY_ID;
+use crate::feed::{Feed, FeedMetadata};
 use crate::http;
 use feed_rs::parser;
 use std::collections::HashSet;
@@ -63,8 +63,16 @@ impl fmt::Display for FeedCollectionError {
 
 /// Contains all successfully collected articles and per-feed failures.
 pub struct CollectionReport {
+    pub feeds: Vec<FeedMetadata>,
     pub articles: Vec<Article>,
     pub errors: Vec<FeedCollectionError>,
+}
+
+fn readable_feed_description(raw_description: &str) -> String {
+    html2text::config::plain_no_decorate()
+        .string_from_read(raw_description.as_bytes(), 1_000)
+        .map(|description| description.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|_| raw_description.trim().to_string())
 }
 
 /// Builds the application feed model from data parsed by `feed-rs`.
@@ -90,8 +98,10 @@ fn build_feed_from_data(
 
     let description = raw_feed
         .description
-        .map(|description| description.content)
+        .map(|description| readable_feed_description(&description.content))
         .unwrap_or_default();
+
+    let author = raw_feed.authors.first().map(|author| author.name.clone());
 
     let source = Source::from(platform);
 
@@ -100,6 +110,7 @@ fn build_feed_from_data(
         title,
         link,
         description,
+        author,
         source,
         raw_feed.entries,
     ))
@@ -173,12 +184,14 @@ where
     Fut: Future<Output = Result<Feed, FeedLoadError>>,
 {
     let mut articles = Vec::new();
+    let mut feeds = Vec::new();
     let mut errors = Vec::new();
     let mut article_ids = HashSet::new();
 
     for feed_config in &config.feeds {
         match load_feed(feed_config.clone()).await {
             Ok(feed) => {
+                feeds.push(feed.metadata());
                 for article in feed.get_articles() {
                     if article_ids.insert(article.id.clone()) {
                         articles.push(article);
@@ -194,7 +207,11 @@ where
     }
 
     sort_articles_newest_first(&mut articles);
-    CollectionReport { articles, errors }
+    CollectionReport {
+        feeds,
+        articles,
+        errors,
+    }
 }
 
 /// Asynchronously downloads all feeds and reports successes and failures separately.
@@ -237,6 +254,16 @@ mod tests {
             </item>
           </channel>
         </rss>"#;
+
+    const SIMPLE_ATOM_WITH_AUTHOR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <title>Letters from orbit</title>
+          <link href="https://orbit.example/" />
+          <author><name>Claire du Ciel</name></author>
+          <subtitle type="html">Une lettre &lt;strong&gt;pratique&lt;/strong&gt; sur l'astronomie.</subtitle>
+          <id>https://orbit.example/</id>
+          <updated>2026-08-12T10:00:00Z</updated>
+        </feed>"#;
 
     const RSS_WITHOUT_TITLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <rss version="2.0">
@@ -305,6 +332,17 @@ mod tests {
         assert_eq!(feed.description, "A test feed about the night sky.");
         assert_eq!(feed.source, Source::Substack);
         assert_eq!(feed.entries.len(), 1);
+    }
+
+    /// Verifies feed-level authors and readable descriptions survive parsing.
+    #[test]
+    fn build_feed_keeps_author_and_plain_description() {
+        let raw_feed = parser::parse(SIMPLE_ATOM_WITH_AUTHOR.as_bytes()).unwrap();
+
+        let feed = build_feed_from_data(raw_feed, "orbit", Platform::Other).unwrap();
+
+        assert_eq!(feed.author.as_deref(), Some("Claire du Ciel"));
+        assert_eq!(feed.description, "Une lettre pratique sur l'astronomie.");
     }
 
     /// Verifies the complete loading pipeline from injected RSS content.
@@ -508,6 +546,8 @@ mod tests {
         .await;
 
         assert!(report.errors.is_empty());
+        assert_eq!(report.feeds.len(), 2);
+        assert_eq!(report.feeds[0].title, "Carnet du ciel — Substack");
         assert_eq!(report.articles.len(), 10);
         assert_eq!(
             report
@@ -558,6 +598,7 @@ mod tests {
         .await;
 
         assert_eq!(loader_calls, 2);
+        assert_eq!(report.feeds.len(), 1);
         assert_eq!(report.articles.len(), 5);
         assert!(
             report
@@ -595,6 +636,7 @@ mod tests {
             source_feed.title.clone(),
             source_feed.link.clone(),
             source_feed.description.clone(),
+            source_feed.author.clone(),
             source_feed.source,
             vec![duplicate_entry.clone(), duplicate_entry],
         ));
@@ -608,6 +650,7 @@ mod tests {
         .await;
 
         assert!(report.errors.is_empty());
+        assert_eq!(report.feeds.len(), 1);
         assert_eq!(report.articles.len(), 1);
         assert_eq!(report.articles[0].id, "astronomy::substack-astronomie-1");
     }

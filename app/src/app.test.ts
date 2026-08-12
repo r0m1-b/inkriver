@@ -48,6 +48,12 @@ const feed: Feed = {
   platform: "substack",
   url: "https://space.substack.com/feed",
   isActive: true,
+  title: "Carnet du ciel",
+  description: "Une lettre pour observer le ciel.",
+  author: "Claire du Ciel",
+  lastPublishedAt: "2026-08-08T12:00:00Z",
+  lastSuccessAt: "2026-08-08T12:05:00Z",
+  lastError: null,
 };
 
 function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
@@ -333,11 +339,12 @@ describe("InkRiverApp", () => {
     expect(api.getArticle).not.toHaveBeenCalled();
   });
 
-  it("renders an empty state that opens subscription management", async () => {
+  it("renders an empty state that opens the add-subscription dialog", async () => {
     const { root } = await mounted(fakeApi({ listArticles: vi.fn(async () => []) }));
     expect(root.querySelector('[data-testid="empty"]')).not.toBeNull();
-    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-testid="empty"] [data-action="add-subscription"]')!.click();
     expect(root.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(root.querySelector('[role="dialog"] [data-action="toggle-feed"]')).toBeNull();
   });
 
   it("keeps a fatal startup error visible", async () => {
@@ -518,9 +525,76 @@ describe("InkRiverApp", () => {
     expect(root.textContent).toContain("Observer Mars au crépuscule");
   });
 
+  it("renders subscription metadata and the persisted detailed error", async () => {
+    const failedFeed: Feed = {
+      ...structuredClone(feed),
+      lastError: {
+        stage: "HTTP request",
+        message: "La connexion a expiré",
+        occurredAt: "2026-08-12T17:45:00Z",
+      },
+    };
+    const api = fakeApi({ listFeeds: vi.fn(async () => [failedFeed]) });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    const card = root.querySelector<HTMLElement>('[data-feed-card-id="stable-feed-id"]')!;
+    expect(card.textContent).toContain("Carnet du ciel");
+    expect(card.textContent).toContain("Claire du Ciel");
+    expect(card.textContent).toContain("Une lettre pour observer le ciel");
+    expect(card.textContent).toContain(feed.url);
+    expect(card.textContent).toContain("Dernière publication");
+    expect(card.textContent).toContain("Dernière actualisation réussie");
+    expect(card.querySelector(".feed-error")?.textContent).toContain("HTTP request");
+    expect(card.querySelector(".feed-error")?.textContent).toContain("La connexion a expiré");
+  });
+
+  it("reloads persisted feed errors after a partial refresh", async () => {
+    const failedFeed: Feed = {
+      ...structuredClone(feed),
+      lastError: {
+        stage: "feed parsing",
+        message: "Document XML invalide",
+        occurredAt: "2026-08-12T18:00:00Z",
+      },
+    };
+    const listFeeds = vi
+      .fn<InkRiverApi["listFeeds"]>()
+      .mockResolvedValueOnce([structuredClone(feed)])
+      .mockResolvedValueOnce([failedFeed]);
+    const api = fakeApi({
+      listFeeds,
+      refreshFeeds: vi.fn(async () => ({
+        activeFeeds: 1,
+        collectedArticles: 0,
+        insertedArticles: 0,
+        updatedArticles: 0,
+        errors: [{
+          feedId: feed.id,
+          feedUrl: feed.url,
+          stage: "feed parsing",
+          message: "Document XML invalide",
+        }],
+      })),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+    await flush();
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    expect(listFeeds).toHaveBeenCalledTimes(2);
+    expect(root.textContent).toContain("Consultez la page Abonnements");
+    expect(root.querySelector(".feed-error")?.textContent).toContain("Document XML invalide");
+  });
+
   it("adds and deactivates subscriptions without triggering a refresh", async () => {
     const { root, api } = await mounted();
     root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+    root.querySelector<HTMLElement>('[data-action="add-subscription"]')!.click();
+    expect(root.querySelector('[role="dialog"] [data-feed-card-id]')).toBeNull();
     const input = root.querySelector<HTMLInputElement>('input[name="url"]')!;
     input.value = "https://notes.medium.com/feed";
     input.dispatchEvent(new Event("input"));
@@ -547,6 +621,7 @@ describe("InkRiverApp", () => {
     expect(confirmer).toHaveBeenCalledWith(expect.stringContaining("favoris"));
     expect(api.deleteFeed).not.toHaveBeenCalled();
     expect(root.textContent).toContain(feed.url);
+    root.querySelector<HTMLElement>('[data-action="show-articles"]')!.click();
     expect(root.textContent).toContain(summary.title);
   });
 
@@ -573,6 +648,7 @@ describe("InkRiverApp", () => {
     expect(listArticles).toHaveBeenCalledTimes(2);
     expect(root.textContent).toContain("Abonnement supprimé avec 1 article supprimé.");
     expect(root.textContent).toContain("Aucun abonnement");
+    root.querySelector<HTMLElement>('[data-action="show-articles"]')!.click();
     expect(root.textContent).toContain("Sélectionnez un article");
     expect(root.textContent).not.toContain(summary.title);
   });
@@ -589,6 +665,7 @@ describe("InkRiverApp", () => {
 
     expect(root.querySelector('[role="alert"]')?.textContent).toContain("Suppression impossible");
     expect(root.textContent).toContain(feed.url);
+    root.querySelector<HTMLElement>('[data-action="show-articles"]')!.click();
     expect(root.textContent).toContain(summary.title);
   });
 

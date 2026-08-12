@@ -108,9 +108,12 @@ directory for the `io.github.r0m1-b.inkriver` bundle—usually
 from the CLI's `inkriver.db`.
 
 The application displays its cache immediately and never accesses the network
-on startup. Use “Subscriptions” to add an RSS/Atom URL, correct the detected
-platform if necessary, disable a feed, or delete it. Then use “Refresh” to
-download articles.
+on startup. The **Subscriptions** page lists every active or inactive feed with
+its URL, author, description, latest publication, last successful refresh, and
+most recent detailed error. This status is stored in SQLite and remains visible
+after restarting InkRiver. Disabling and deleting actions are available on this
+page; **Add subscription** opens a separate dialog containing only the add form.
+Use **Refresh** to download articles and update these details.
 
 Opening an unread article automatically marks it as read. The reading panel
 shows the current state and lets you explicitly mark the article as read or
@@ -266,7 +269,8 @@ inkriver.db
 Migrations from `migrations/` are embedded in the binary and applied when the
 database is opened. The database currently contains:
 
-- `feeds`: subscriptions, platforms, URLs, and active states;
+- `feeds`: subscriptions, platforms, URLs, active states, feed metadata, and
+  last refresh success or error;
 - `articles`: remote content, content kinds, feed relationships, read states,
   and favorite states;
 - `_sqlx_migrations`: migrations already applied by SQLx.

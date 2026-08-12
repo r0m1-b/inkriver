@@ -1,7 +1,8 @@
 use crate::config::Config;
 use crate::service::{self, CollectionReport, FeedCollectionError};
-use crate::storage::{Storage, UpsertStats};
+use crate::storage::{FeedRefreshFailure, Storage, UpsertStats};
 use anyhow::Result;
+use chrono::Utc;
 #[cfg(test)]
 use std::future::Future;
 
@@ -59,9 +60,24 @@ async fn store_collection(
     config: &Config,
     report: CollectionReport,
 ) -> Result<RefreshReport> {
-    let CollectionReport { articles, errors } = report;
+    let CollectionReport {
+        feeds,
+        articles,
+        errors,
+    } = report;
     let collected_articles = articles.len();
     let UpsertStats { inserted, updated } = storage.upsert_articles(&articles).await?;
+    let failures = errors
+        .iter()
+        .map(|error| FeedRefreshFailure {
+            feed_id: error.feed_id.clone(),
+            stage: error.error.stage.to_string(),
+            message: error.error.message.clone(),
+        })
+        .collect::<Vec<_>>();
+    storage
+        .record_feed_refreshes(&feeds, &failures, Utc::now())
+        .await?;
 
     Ok(RefreshReport {
         active_feeds: config.feeds.len(),
@@ -77,6 +93,7 @@ mod tests {
     use super::*;
     use crate::article::{Article, ContentKind, Source};
     use crate::config::{FeedConfig, Platform};
+    use crate::feed::FeedMetadata;
     use crate::service::{FeedCollectionError, FeedLoadError, FeedLoadStage};
     use chrono::{TimeZone, Utc};
     use std::future::Future;
@@ -136,6 +153,12 @@ mod tests {
             ],
         };
         let report = CollectionReport {
+            feeds: vec![FeedMetadata {
+                id: "astronomy".to_string(),
+                title: "Night sky notes".to_string(),
+                description: "Practical astronomy".to_string(),
+                author: Some("Claire".to_string()),
+            }],
             articles: vec![article("astronomy::jupiter", "astronomy", Source::Substack)],
             errors: vec![collection_error("bread")],
         };
@@ -151,13 +174,18 @@ mod tests {
         assert_eq!(result.inserted_articles, 1);
         assert_eq!(result.updated_articles, 0);
         assert_eq!(storage.list_articles().await.unwrap().len(), 1);
-        assert!(
-            storage
-                .list_feeds()
-                .await
-                .unwrap()
-                .iter()
-                .all(|f| f.is_active)
+        let feeds = storage.list_feeds().await.unwrap();
+        assert!(feeds.iter().all(|feed| feed.is_active));
+        let astronomy = feeds.iter().find(|feed| feed.id == "astronomy").unwrap();
+        assert_eq!(astronomy.title.as_deref(), Some("Night sky notes"));
+        assert_eq!(astronomy.author.as_deref(), Some("Claire"));
+        assert!(astronomy.last_success_at.is_some());
+        assert!(astronomy.last_error.is_none());
+        let bread = feeds.iter().find(|feed| feed.id == "bread").unwrap();
+        assert_eq!(bread.last_error.as_ref().unwrap().stage, "HTTP request");
+        assert_eq!(
+            bread.last_error.as_ref().unwrap().message,
+            "network unavailable"
         );
     }
 
@@ -169,6 +197,7 @@ mod tests {
             feeds: vec![feed("astronomy", Platform::Substack)],
         };
         let initial = CollectionReport {
+            feeds: Vec::new(),
             articles: vec![article("astronomy::jupiter", "astronomy", Source::Substack)],
             errors: Vec::new(),
         };
@@ -177,6 +206,7 @@ mod tests {
             .unwrap();
 
         let offline = CollectionReport {
+            feeds: Vec::new(),
             articles: Vec::new(),
             errors: vec![collection_error("astronomy")],
         };
@@ -206,6 +236,7 @@ mod tests {
         let astronomy = article("astronomy::jupiter", "astronomy", Source::Substack);
         let bread = article("bread::sourdough", "bread", Source::Medium);
         let first_collection = CollectionReport {
+            feeds: Vec::new(),
             articles: vec![astronomy.clone(), bread.clone()],
             errors: Vec::new(),
         };
@@ -218,6 +249,7 @@ mod tests {
 
         let storage = Storage::open(&database_path).await.unwrap();
         let second_collection = CollectionReport {
+            feeds: Vec::new(),
             articles: vec![astronomy, bread.clone()],
             errors: Vec::new(),
         };
@@ -235,6 +267,7 @@ mod tests {
             feeds: vec![feed("astronomy", Platform::Substack)],
         };
         let offline_collection = CollectionReport {
+            feeds: Vec::new(),
             articles: Vec::new(),
             errors: vec![collection_error("astronomy")],
         };
@@ -282,6 +315,7 @@ mod tests {
             &storage,
             &active_config,
             CollectionReport {
+                feeds: Vec::new(),
                 articles: vec![article("astronomy::mars", "astronomy", Source::Substack)],
                 errors: Vec::new(),
             },

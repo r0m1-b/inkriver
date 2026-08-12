@@ -40,6 +40,7 @@ fn parse_mock_feed(xml: &str, id: &str, source: crate::article::Source) -> Feed 
             .description
             .expect("the mock feed must have a description")
             .content,
+        raw_feed.authors.first().map(|author| author.name.clone()),
         source,
         raw_feed.entries,
     )
