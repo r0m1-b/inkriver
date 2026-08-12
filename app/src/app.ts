@@ -108,6 +108,15 @@ export class InkRiverApp {
       this.error = errorMessage(error);
     }
     this.render();
+    if (this.selected?.id === articleId) this.scrollSelectedArticleIntoView();
+  }
+
+  private scrollSelectedArticleIntoView(): void {
+    if (!this.selected) return;
+    const selectedRow = Array.from(
+      this.root.querySelectorAll<HTMLElement>("[data-article-row-id]"),
+    ).find((row) => row.dataset.articleRowId === this.selected?.id);
+    selectedRow?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }
 
   private async toggleFavorite(): Promise<void> {
@@ -332,6 +341,8 @@ export class InkRiverApp {
   }
 
   render(): void {
+    const timelineScrollTop =
+      this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><span>IR</span><div><strong>InkRiver</strong><small>Medium + Substack</small></div></div><div class="top-actions"><button data-action="subscriptions">Abonnements</button><button class="primary" data-action="refresh" ${this.refreshing ? "disabled" : ""}>${this.refreshing ? "Actualisation…" : "Actualiser"}</button></div></header>
       ${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}
@@ -339,6 +350,11 @@ export class InkRiverApp {
       <main><aside class="timeline" aria-label="Chronologie">${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section></main>
       ${this.renderSubscriptions()}
     </div>`;
+
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    if (timeline && timelineScrollTop !== undefined) {
+      timeline.scrollTop = timelineScrollTop;
+    }
 
     const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
     if (frame && this.selected?.content) {

@@ -128,6 +128,49 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("preserves timeline scroll position across action renders", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>(".timeline")!.scrollTop = 420;
+
+    root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!.click();
+    expect(root.querySelector<HTMLElement>(".timeline")!.scrollTop).toBe(420);
+    await flush();
+
+    expect(root.querySelector<HTMLElement>(".timeline")!.scrollTop).toBe(420);
+  });
+
+  it("scrolls a newly selected article into view with the nearest alignment", async () => {
+    const scrollIntoView = vi.fn();
+    const previousScrollIntoView = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollIntoView",
+    );
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+      writable: true,
+    });
+    try {
+      const { root } = await mounted();
+
+      root.querySelector<HTMLElement>("[data-article-id]")!.click();
+      await flush();
+
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+    } finally {
+      if (previousScrollIntoView) {
+        Object.defineProperty(
+          HTMLElement.prototype,
+          "scrollIntoView",
+          previousScrollIntoView,
+        );
+      } else {
+        delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+      }
+    }
+  });
+
   it("toggles read state from the timeline without opening the article", async () => {
     const { root, api } = await mounted();
 
