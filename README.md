@@ -112,6 +112,11 @@ on startup. Use “Subscriptions” to add an RSS/Atom URL, correct the detected
 platform if necessary, disable a feed, or delete it. Then use “Refresh” to
 download articles.
 
+Opening an unread article automatically marks it as read. The reading panel
+shows the current state and lets you explicitly mark the article as read or
+unread; the change is stored in SQLite and immediately reflected in the
+timeline.
+
 Disabling a subscription preserves its identifier, articles, favorites, and
 read states. Adding the same URL again reactivates that subscription instead of
 creating a new history.

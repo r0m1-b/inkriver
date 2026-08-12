@@ -95,9 +95,98 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.getArticle).toHaveBeenCalledWith("space::mars");
     expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", true);
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+    expect(root.querySelector('[data-action="toggle-read"]')?.textContent).toContain(
+      "Marquer comme non lu",
+    );
+    expect(root.querySelector("[data-article-id]")?.classList).toContain("read");
     expect(root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc).toContain(
       "Mars prend une teinte orangée",
     );
+  });
+
+  it("does not write the read state when opening an article that is already read", async () => {
+    const readSummary = { ...summary, isRead: true };
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(readSummary)]),
+      getArticle: vi.fn(async () => ({ ...structuredClone(detail), isRead: true })),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    expect(api.setArticleRead).not.toHaveBeenCalled();
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+  });
+
+  it("marks the selected article unread and read again in both panels", async () => {
+    const { root, api } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
+    await flush();
+    expect(api.setArticleRead).toHaveBeenNthCalledWith(2, "space::mars", false);
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+    expect(root.querySelector('[data-action="toggle-read"]')?.textContent).toContain(
+      "Marquer comme lu",
+    );
+    expect(root.querySelector("[data-article-id]")?.classList).toContain("unread");
+
+    root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
+    await flush();
+    expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+    expect(root.querySelector("[data-article-id]")?.classList).toContain("read");
+  });
+
+  it("disables the read action while its update is pending", async () => {
+    let finishUpdate: (() => void) | undefined;
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [{ ...structuredClone(summary), isRead: true }]),
+      getArticle: vi.fn(async () => ({ ...structuredClone(detail), isRead: true })),
+      setArticleRead: vi.fn(
+        () => new Promise<void>((resolve) => {
+          finishUpdate = resolve;
+        }),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
+    const pendingButton = root.querySelector<HTMLButtonElement>('[data-action="toggle-read"]')!;
+    expect(pendingButton.disabled).toBe(true);
+    expect(pendingButton.textContent).toContain("Enregistrement");
+
+    finishUpdate!();
+    await flush();
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+  });
+
+  it("keeps the previous read state when the explicit update fails", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [{ ...structuredClone(summary), isRead: true }]),
+      getArticle: vi.fn(async () => ({ ...structuredClone(detail), isRead: true })),
+      setArticleRead: vi.fn(async () =>
+        Promise.reject({ code: "storage", message: "État de lecture non enregistré" }),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
+    await flush();
+
+    expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", false);
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      "État de lecture non enregistré",
+    );
+    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+    expect(root.querySelector("[data-article-id]")?.classList).toContain("read");
   });
 
   it("toggles a favorite from the reading panel", async () => {

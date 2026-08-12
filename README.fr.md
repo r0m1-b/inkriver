@@ -114,6 +114,11 @@ au démarrage. Utiliser « Abonnements » pour ajouter une URL RSS/Atom, corrige
 si nécessaire la plateforme détectée, désactiver un flux ou le supprimer.
 Utiliser ensuite « Actualiser » pour télécharger les articles.
 
+L'ouverture d'un article non lu le marque automatiquement comme lu. Le panneau
+de lecture affiche son état courant et permet de le marquer explicitement comme
+lu ou non lu ; la modification est enregistrée dans SQLite et immédiatement
+répercutée dans la chronologie.
+
 Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
 les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
 lieu de créer un nouvel historique.

@@ -57,6 +57,7 @@ export class InkRiverApp {
   private selected: ArticleDetail | null = null;
   private loading = true;
   private refreshing = false;
+  private updatingReadState = false;
   private subscriptionsOpen = false;
   private deletingFeedId: string | null = null;
   private error: string | null = null;
@@ -112,6 +113,26 @@ export class InkRiverApp {
       this.error = errorMessage(error);
     }
     this.render();
+  }
+
+  private async toggleReadState(): Promise<void> {
+    if (!this.selected || this.updatingReadState) return;
+    const articleId = this.selected.id;
+    const nextValue = !this.selected.isRead;
+    this.updatingReadState = true;
+    this.error = null;
+    this.render();
+    try {
+      await this.api.setArticleRead(articleId, nextValue);
+      if (this.selected?.id === articleId) this.selected.isRead = nextValue;
+      const summary = this.articles.find((article) => article.id === articleId);
+      if (summary) summary.isRead = nextValue;
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.updatingReadState = false;
+      this.render();
+    }
   }
 
   private async refresh(): Promise<void> {
@@ -245,7 +266,8 @@ export class InkRiverApp {
       <header><span class="source ${article.source}">${displayPlatform(article.source)}</span>
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
-      <div class="reader-actions"><button data-action="favorite" aria-pressed="${article.isFavorite}">${article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
+      <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div>
+      <div class="reader-actions"><button data-action="toggle-read" ${this.updatingReadState ? "disabled" : ""}>${this.updatingReadState ? "Enregistrement…" : article.isRead ? "Marquer comme non lu" : "Marquer comme lu"}</button><button data-action="favorite" aria-pressed="${article.isFavorite}">${article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
       ${content}
     </article>`;
   }
@@ -297,6 +319,7 @@ export class InkRiverApp {
       this.render();
     });
     this.root.querySelector<HTMLElement>('[data-action="refresh"]')?.addEventListener("click", () => void this.refresh());
+    this.root.querySelector<HTMLElement>('[data-action="toggle-read"]')?.addEventListener("click", () => void this.toggleReadState());
     this.root.querySelector<HTMLElement>('[data-action="favorite"]')?.addEventListener("click", () => void this.toggleFavorite());
     this.root.querySelector<HTMLElement>('[data-action="open-original"]')?.addEventListener("click", () => void this.openSelectedOriginal());
     this.root.querySelector<HTMLFormElement>("#feed-form")?.addEventListener("submit", (event) => {

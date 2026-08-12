@@ -60,6 +60,8 @@ main { min-height: 0; display: grid; grid-template-columns: 370px minmax(0, 1fr)
 .reader-article > header { max-width: 780px; margin: 0 auto; padding: 58px 46px 24px; }
 .reader-article h1 { margin: 16px 0 12px; font: 700 clamp(32px, 4vw, 52px)/1.08 Georgia, serif; letter-spacing: -.025em; }
 .reader-article header p { color: var(--muted); }
+.read-state { margin-top: 18px; color: var(--muted); font-size: 13px; }
+.read-state strong { color: var(--ink); }
 .reader-actions { display: flex; gap: 10px; margin-top: 24px; }
 .article-content { display: block; width: 100%; min-height: calc(100vh - 330px); border: 0; background: transparent; }
 .missing-content { max-width: 720px; margin: 28px auto; padding: 28px; color: var(--muted); background: var(--wash); border-radius: 8px; }

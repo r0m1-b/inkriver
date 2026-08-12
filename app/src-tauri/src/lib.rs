@@ -488,6 +488,12 @@ mod tests {
         let article = storage.get_article("space::mars").await.unwrap().unwrap();
         assert!(article.is_read);
         assert!(article.is_favorite);
+        set_article_read_in(&storage, "space::mars", false)
+            .await
+            .unwrap();
+        let article = storage.get_article("space::mars").await.unwrap().unwrap();
+        assert!(!article.is_read);
+        assert!(article.is_favorite);
         assert_eq!(
             set_article_read_in(&storage, "missing", true)
                 .await
