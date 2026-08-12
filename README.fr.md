@@ -120,6 +120,9 @@ lu ou non lu ; la modification est enregistrée dans SQLite et immédiatement
 répercutée dans la chronologie. Chaque ligne de la chronologie propose également
 des boutons étoile et enveloppe toujours visibles pour changer les états favori
 et lu sans ouvrir l'article.
+Les badges de source associent leur libellé à la marque Medium ou Substack, ou à
+une icône RSS générique. Les vecteurs de marque proviennent de Simple Icons
+v16.21.0 ; Medium et Substack restent propriétaires de leurs marques respectives.
 Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
 immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
 

@@ -117,6 +117,9 @@ shows the current state and lets you explicitly mark the article as read or
 unread; the change is stored in SQLite and immediately reflected in the
 timeline. Each timeline row also provides always-visible star and envelope
 buttons to change favorite and read states without opening the article.
+Source badges pair the Medium or Substack brand mark—or a generic RSS icon—with
+their text label. The brand vectors come from Simple Icons v16.21.0; Medium and
+Substack retain ownership of their respective trademarks.
 The **All** and **Favorites** tabs above the timeline provide an immediate,
 offline view of starred articles while keeping the same reading panel.
 

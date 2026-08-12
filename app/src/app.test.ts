@@ -172,6 +172,48 @@ describe("InkRiverApp", () => {
     expect(firstRow.querySelectorAll("button")).toHaveLength(3);
   });
 
+  it("renders a platform icon while retaining the source label", async () => {
+    const mediumArticle = {
+      ...structuredClone(summary),
+      id: "source::medium",
+      source: "medium" as const,
+    };
+    const rssArticle = {
+      ...structuredClone(summary),
+      id: "source::rss",
+      source: "other" as const,
+    };
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [
+        structuredClone(summary),
+        mediumArticle,
+        rssArticle,
+      ]),
+    });
+    const { root } = await mounted(api);
+
+    expect(root.querySelector('[data-source-icon="substack"]')).not.toBeNull();
+    expect(root.querySelector('[data-source-icon="medium"]')).not.toBeNull();
+    expect(root.querySelector('[data-source-icon="rss"]')).not.toBeNull();
+    expect(root.querySelector('[data-source-icon="medium"] path')?.getAttribute("d")).toMatch(
+      /^M4\.21 0A4\.201/,
+    );
+    expect(root.querySelector('[data-source-icon="substack"] path')?.getAttribute("d")).toBe(
+      "M22.539 8.242H1.46V5.406h21.08v2.836zM1.46 10.812V24L12 18.11 22.54 24V10.812H1.46zM22.54 0H1.46v2.836h21.08V0z",
+    );
+    expect(root.querySelector('[data-source-icon="medium"]')?.closest(".source-logo")).not.toBeNull();
+    expect(root.querySelector('[data-source-icon="medium"]')?.closest(".source")).toBeNull();
+    expect(root.querySelector('[data-article-row-id="source::medium"] .source')?.textContent).toBe(
+      "Medium",
+    );
+    expect(root.querySelector('[data-article-row-id="source::rss"] .source')?.textContent).toBe(
+      "RSS",
+    );
+    expect(root.querySelector('[data-source-icon="substack"]')?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
+  });
+
   it("toggles a favorite from the timeline without opening the article", async () => {
     const { root, api } = await mounted();
 
