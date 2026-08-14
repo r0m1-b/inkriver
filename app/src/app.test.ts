@@ -113,6 +113,28 @@ describe("InkRiverApp", () => {
     expect(api.refreshFeeds).not.toHaveBeenCalled();
   });
 
+  it("renders the full InkRiver wordmark while no article is selected", async () => {
+    const { root } = await mounted();
+    const logo = root.querySelector<HTMLImageElement>(".reader-placeholder-logo");
+
+    expect(logo?.getAttribute("src")).toBe("/inkriver-wordmark.png");
+    expect(logo?.getAttribute("alt")).toBe("InkRiver");
+    expect(root.querySelector(".reader-placeholder")?.textContent).toContain(
+      "Sélectionnez un article dans la chronologie.",
+    );
+  });
+
+  it("renders refresh as an accessible icon-only action", async () => {
+    const { root } = await mounted();
+    const refresh = root.querySelector<HTMLButtonElement>('[data-action="refresh"]')!;
+
+    expect(refresh.textContent?.trim()).toBe("");
+    expect(refresh.getAttribute("title")).toBe("Actualiser");
+    expect(refresh.getAttribute("aria-label")).toBe("Actualiser");
+    expect(refresh.getAttribute("aria-busy")).toBe("false");
+    expect(refresh.querySelector("svg")).not.toBeNull();
+  });
+
   it("shows only cached favorites in the favorites tab and opens them", async () => {
     const api = fakeApi({
       listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
@@ -371,9 +393,12 @@ describe("InkRiverApp", () => {
     expect(api.getArticle).toHaveBeenCalledWith("space::mars");
     expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", true);
     expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
-    expect(root.querySelector('[data-action="toggle-read"]')?.textContent).toContain(
-      "Marquer comme non lu",
-    );
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.textContent?.trim()).toBe("");
+    expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme non lu");
+    expect(readButton.getAttribute("aria-pressed")).toBe("true");
+    expect(readButton.querySelector("svg")).not.toBeNull();
     expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
     expect(root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc).toContain(
       "Mars prend une teinte orangée",
@@ -404,9 +429,10 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.setArticleRead).toHaveBeenNthCalledWith(2, "space::mars", false);
     expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
-    expect(root.querySelector('[data-action="toggle-read"]')?.textContent).toContain(
+    expect(root.querySelector('[data-action="toggle-read"]')?.getAttribute("title")).toBe(
       "Marquer comme lu",
     );
+    expect(root.querySelector('[data-action="toggle-read"]')?.getAttribute("aria-pressed")).toBe("false");
     expect(root.querySelector("[data-article-row-id]")?.classList).toContain("unread");
 
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
@@ -470,7 +496,9 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
     const pendingButton = root.querySelector<HTMLButtonElement>('[data-action="toggle-read"]')!;
     expect(pendingButton.disabled).toBe(true);
-    expect(pendingButton.textContent).toContain("Enregistrement");
+    expect(pendingButton.textContent?.trim()).toBe("");
+    expect(pendingButton.getAttribute("aria-busy")).toBe("true");
+    expect(pendingButton.getAttribute("title")).toBe("Marquer comme non lu");
 
     finishUpdate!();
     await flush();
@@ -507,13 +535,18 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="favorite"]')!.click();
     await flush();
     expect(api.setArticleFavorite).toHaveBeenCalledWith("space::mars", true);
-    expect(root.textContent).toContain("Retirer des favoris");
+    const favoriteButton = root.querySelector<HTMLElement>('[data-action="favorite"]')!;
+    expect(favoriteButton.textContent?.trim()).toBe("");
+    expect(favoriteButton.getAttribute("title")).toBe("Retirer des favoris");
+    expect(favoriteButton.getAttribute("aria-label")).toBe("Retirer des favoris");
+    expect(favoriteButton.getAttribute("aria-pressed")).toBe("true");
+    expect(favoriteButton.querySelector("svg")).not.toBeNull();
     expect(root.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("true");
 
     root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!.click();
     await flush();
     expect(api.setArticleFavorite).toHaveBeenNthCalledWith(2, "space::mars", false);
-    expect(root.querySelector('[data-action="favorite"]')?.textContent).toContain(
+    expect(root.querySelector('[data-action="favorite"]')?.getAttribute("title")).toBe(
       "Ajouter aux favoris",
     );
   });

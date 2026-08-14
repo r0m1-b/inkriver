@@ -132,6 +132,10 @@ function readIcon(isRead: boolean): string {
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v13H3V6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m3 7 9 7 9-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
 }
 
+function refreshIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.22 6.5L3 16m0 0v5m0-5h5M3 12A9 9 0 0 1 18.22 5.5L21 8m0 0V3m0 5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
 export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
@@ -417,11 +421,13 @@ export class InkRiverApp {
 
   private renderReader(): string {
     if (!this.selected) {
-      return '<div class="reader-placeholder"><span>IR</span><p>Sélectionnez un article dans la chronologie.</p></div>';
+      return '<div class="reader-placeholder"><img class="reader-placeholder-logo" src="/inkriver-wordmark.png" alt="InkRiver"><p>Sélectionnez un article dans la chronologie.</p></div>';
     }
     const article = this.selected;
     const readPending = this.updatingReadArticleIds.has(article.id);
     const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
+    const readAction = article.isRead ? "Marquer comme non lu" : "Marquer comme lu";
+    const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
     const sourceHost = articleSourceHost(article.url);
     const sourceLink = sourceHost && article.url
       ? `<div class="article-source">Source : <button type="button" class="article-source-link" data-action="open-source" title="${escapeHtml(article.url)}" aria-label="${escapeHtml(`Ouvrir la source ${sourceHost} dans le navigateur`)}">${escapeHtml(sourceHost)} ↗</button></div>`
@@ -438,7 +444,7 @@ export class InkRiverApp {
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
       ${sourceLink}
       <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div>
-      <div class="reader-actions"><button data-action="toggle-read" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readPending ? "Enregistrement…" : article.isRead ? "Marquer comme non lu" : "Marquer comme lu"}</button><button data-action="favorite" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoritePending ? "Enregistrement…" : article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
+      <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>${originalButton}</div></header>
       ${content}
     </article>`;
   }
@@ -477,7 +483,7 @@ export class InkRiverApp {
     const timelineScrollTop =
       this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
     this.root.innerHTML = `<div class="shell">
-      <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button class="primary" data-action="refresh" ${this.refreshing ? "disabled" : ""}>${this.refreshing ? "Actualisation…" : "Actualiser"}</button></div></header>
+      <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice" role="status">${escapeHtml(this.notice)}</div>` : ""}</div>
       <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section>` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
