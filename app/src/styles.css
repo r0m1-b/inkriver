@@ -27,7 +27,8 @@ button.danger:hover { color: #fff; border-color: #9b2f27; background: #9b2f27; }
 .shell { height: 100vh; display: grid; grid-template-rows: 68px auto 1fr; overflow: hidden; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 22px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 94%, transparent); }
 .brand { display: flex; align-items: center; gap: 11px; }
-.brand > span, .reader-placeholder > span { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; color: white; background: var(--accent); font: 700 21px Georgia, serif; }
+.brand-logo { display: block; width: 64px; height: 64px; object-fit: contain; }
+.reader-placeholder > span { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; color: white; background: var(--accent); font: 700 21px Georgia, serif; }
 .brand div { display: grid; }
 .brand strong { font: 700 20px Georgia, serif; }
 .brand small { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }

@@ -96,6 +96,15 @@ async function mounted(
 }
 
 describe("InkRiverApp", () => {
+  it("renders the InkRiver logo in the application header", async () => {
+    const { root } = await mounted();
+    const logo = root.querySelector<HTMLImageElement>(".brand-logo");
+
+    expect(logo?.getAttribute("src")).toBe("/inkriver-logo.png");
+    expect(logo?.getAttribute("alt")).toBe("");
+    expect(root.querySelector(".brand small")?.textContent).toBe("All your feeds. One flow.");
+  });
+
   it("renders the cached timeline without refreshing on startup", async () => {
     const { root, api } = await mounted();
     expect(root.textContent).toContain("Observer Mars au crépuscule");
