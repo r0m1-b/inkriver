@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   InkRiverApp,
+  articleSourceHost,
   buildArticleDocument,
   canOpenOriginal,
   detectPlatform,
@@ -678,13 +679,71 @@ describe("InkRiverApp", () => {
     expect(root.textContent).toContain(summary.title);
   });
 
-  it("opens an excerpt original through the injected opener", async () => {
+  it("shows the source and original actions for an excerpt", async () => {
     const { root, opener } = await mounted();
     root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
+
+    const sourceLink = root.querySelector<HTMLElement>('[data-action="open-source"]')!;
+    expect(sourceLink.textContent).toContain("space.example");
+    expect(sourceLink.getAttribute("title")).toBe("https://space.example/mars");
+    sourceLink.click();
+    await flush();
     root.querySelector<HTMLElement>('[data-action="open-original"]')!.click();
     await flush();
+
+    expect(opener).toHaveBeenNthCalledWith(1, "https://space.example/mars");
+    expect(opener).toHaveBeenNthCalledWith(2, "https://space.example/mars");
+  });
+
+  it("shows a source action but no original button for full content", async () => {
+    const fullDetail = { ...detail, contentKind: "full" as const };
+    const api = fakeApi({ getArticle: vi.fn(async () => structuredClone(fullDetail)) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    expect(root.querySelector('[data-action="open-original"]')).toBeNull();
+    root.querySelector<HTMLElement>('[data-action="open-source"]')!.click();
+    await flush();
     expect(opener).toHaveBeenCalledWith("https://space.example/mars");
+    expect(root.querySelector(".reader-article")).not.toBeNull();
+  });
+
+  it("renders unavailable source states without an opener action", async () => {
+    const missingApi = fakeApi({
+      getArticle: vi.fn(async () => ({ ...structuredClone(detail), url: null })),
+    });
+    const missing = await mounted(missingApi);
+    missing.root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+    expect(missing.root.querySelector(".article-source")?.textContent).toContain("Source indisponible");
+    expect(missing.root.querySelector('[data-action="open-source"]')).toBeNull();
+    expect(missing.root.querySelector('[data-action="open-original"]')).toBeNull();
+    expect(missing.opener).not.toHaveBeenCalled();
+
+    const invalidApi = fakeApi({
+      getArticle: vi.fn(async () => ({ ...structuredClone(detail), url: "mailto:author@example.com" })),
+    });
+    const invalid = await mounted(invalidApi);
+    invalid.root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+    expect(invalid.root.querySelector(".article-source")?.textContent).toContain("Source non prise en charge");
+    expect(invalid.root.querySelector('[data-action="open-source"]')).toBeNull();
+    expect(invalid.root.querySelector('[data-action="open-original"]')).toBeNull();
+    expect(invalid.opener).not.toHaveBeenCalled();
+  });
+
+  it("keeps the article visible when opening its source fails", async () => {
+    const opener = vi.fn(async () => Promise.reject(new Error("Navigateur indisponible")));
+    const { root } = await mounted(undefined, opener);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="open-source"]')!.click();
+    await flush();
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("Navigateur indisponible");
+    expect(root.querySelector(".reader-article")?.textContent).toContain("Observer Mars au crépuscule");
   });
 
   it("opens relative article links in the system browser without navigating the frame", async () => {
@@ -780,6 +839,15 @@ describe("view helpers", () => {
     expect(canOpenOriginal({ ...detail, contentKind: "missing" })).toBe(true);
     expect(canOpenOriginal({ ...detail, contentKind: "unknown" })).toBe(true);
     expect(canOpenOriginal({ ...detail, contentKind: "full" })).toBe(false);
+    expect(canOpenOriginal({ ...detail, url: null })).toBe(false);
+    expect(canOpenOriginal({ ...detail, url: "mailto:author@example.com" })).toBe(false);
+  });
+
+  it("extracts the host only from absolute HTTP(S) article sources", () => {
+    expect(articleSourceHost("https://space.example:8443/mars")).toBe("space.example:8443");
+    expect(articleSourceHost("mailto:author@example.com")).toBeNull();
+    expect(articleSourceHost("not a URL")).toBeNull();
+    expect(articleSourceHost(null)).toBeNull();
   });
 
   it("extracts structured errors and falls back to strings", () => {

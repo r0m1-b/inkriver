@@ -129,6 +129,10 @@ offline view of starred articles while keeping the same reading panel.
 HTTP(S) links contained in an article open in the system browser instead of
 navigating inside InkRiver. Relative links are resolved from the article URL.
 Links to sections within the current article are currently ignored.
+The reading panel always identifies the article's original source by domain and
+opens it in the system browser. When the feed contains only an excerpt or no
+content, the more prominent **Read original** button remains available as well.
+Articles without a usable HTTP(S) source display a non-interactive status.
 
 Disabling a subscription preserves its identifier, articles, favorites, and
 read states. Adding the same URL again reactivates that subscription instead of

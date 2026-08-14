@@ -72,8 +72,18 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
+export function articleSourceHost(rawUrl: string | null): string | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.host : null;
+  } catch {
+    return null;
+  }
+}
+
 export function canOpenOriginal(article: ArticleDetail): boolean {
-  return Boolean(article.url && article.contentKind !== "full");
+  return Boolean(articleSourceHost(article.url) && article.contentKind !== "full");
 }
 
 export function resolveExternalArticleUrl(rawUrl: string, articleUrl?: string | null): string {
@@ -412,6 +422,10 @@ export class InkRiverApp {
     const article = this.selected;
     const readPending = this.updatingReadArticleIds.has(article.id);
     const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
+    const sourceHost = articleSourceHost(article.url);
+    const sourceLink = sourceHost && article.url
+      ? `<div class="article-source">Source : <button type="button" class="article-source-link" data-action="open-source" title="${escapeHtml(article.url)}" aria-label="${escapeHtml(`Ouvrir la source ${sourceHost} dans le navigateur`)}">${escapeHtml(sourceHost)} ↗</button></div>`
+      : `<div class="article-source">${article.url ? "Source non prise en charge" : "Source indisponible"}</div>`;
     const originalButton = canOpenOriginal(article)
       ? '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
       : "";
@@ -422,6 +436,7 @@ export class InkRiverApp {
       <header>${renderSourceBadge(article.source)}
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
+      ${sourceLink}
       <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div>
       <div class="reader-actions"><button data-action="toggle-read" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readPending ? "Enregistrement…" : article.isRead ? "Marquer comme non lu" : "Marquer comme lu"}</button><button data-action="favorite" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoritePending ? "Enregistrement…" : article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
       ${content}
@@ -524,6 +539,7 @@ export class InkRiverApp {
     this.root.querySelector<HTMLElement>('[data-action="refresh"]')?.addEventListener("click", () => void this.refresh());
     this.root.querySelector<HTMLElement>('[data-action="toggle-read"]')?.addEventListener("click", () => void this.toggleReadState());
     this.root.querySelector<HTMLElement>('[data-action="favorite"]')?.addEventListener("click", () => void this.toggleFavorite());
+    this.root.querySelector<HTMLElement>('[data-action="open-source"]')?.addEventListener("click", () => void this.openSelectedOriginal());
     this.root.querySelector<HTMLElement>('[data-action="open-original"]')?.addEventListener("click", () => void this.openSelectedOriginal());
     this.root.querySelector<HTMLFormElement>("#feed-form")?.addEventListener("submit", (event) => {
       event.preventDefault();

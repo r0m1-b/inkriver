@@ -135,6 +135,11 @@ Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
 au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL
 de l'article. Les liens vers une section du même article sont actuellement
 ignorés.
+Le panneau de lecture identifie toujours la source d'origine de l'article par
+son domaine et permet de l'ouvrir dans le navigateur système. Lorsque le flux ne
+contient qu'un extrait ou aucun contenu, le bouton plus visible **Lire
+l'original** reste également disponible. Un état non interactif est affiché si
+l'article ne possède aucune source HTTP(S) exploitable.
 
 Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
 les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
