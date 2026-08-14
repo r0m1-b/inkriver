@@ -13,6 +13,7 @@ pub struct RefreshReport {
     pub collected_articles: usize,
     pub inserted_articles: usize,
     pub updated_articles: usize,
+    pub auto_archived_articles: usize,
     pub errors: Vec<FeedCollectionError>,
 }
 
@@ -75,15 +76,18 @@ async fn store_collection(
             message: error.error.message.clone(),
         })
         .collect::<Vec<_>>();
+    let refreshed_at = Utc::now();
     storage
-        .record_feed_refreshes(&feeds, &failures, Utc::now())
+        .record_feed_refreshes(&feeds, &failures, refreshed_at)
         .await?;
+    let auto_archived_articles = storage.archive_expired_read_articles(refreshed_at).await?;
 
     Ok(RefreshReport {
         active_feeds: config.feeds.len(),
         collected_articles,
         inserted_articles: inserted,
         updated_articles: updated,
+        auto_archived_articles,
         errors,
     })
 }
@@ -331,5 +335,50 @@ mod tests {
                 .iter()
                 .any(|feed| feed.id == "bread" && !feed.is_active)
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_applies_retention_and_never_restores_the_tombstone() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let config = Config {
+            feeds: vec![feed("astronomy", Platform::Substack)],
+        };
+        storage.import_feeds(&config.feeds).await.unwrap();
+        let old_article = Article {
+            published_at: Some(Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap()),
+            ..article("astronomy::old", "astronomy", Source::Substack)
+        };
+        storage
+            .upsert_articles(std::slice::from_ref(&old_article))
+            .await
+            .unwrap();
+        storage.set_read(&old_article.id, true).await.unwrap();
+
+        let first = refresh_with_collector(&storage, &config, || async {
+            CollectionReport {
+                feeds: Vec::new(),
+                articles: vec![old_article.clone()],
+                errors: Vec::new(),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(first.updated_articles, 1);
+        assert_eq!(first.auto_archived_articles, 1);
+        assert!(storage.list_articles().await.unwrap().is_empty());
+
+        let second = refresh_with_collector(&storage, &config, || async {
+            CollectionReport {
+                feeds: Vec::new(),
+                articles: vec![old_article],
+                errors: Vec::new(),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(second.inserted_articles, 0);
+        assert_eq!(second.updated_articles, 0);
+        assert_eq!(second.auto_archived_articles, 0);
+        assert!(storage.list_articles().await.unwrap().is_empty());
     }
 }

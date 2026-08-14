@@ -173,6 +173,7 @@ pub struct RefreshReportDto {
     pub collected_articles: usize,
     pub inserted_articles: usize,
     pub updated_articles: usize,
+    pub auto_archived_articles: usize,
     pub errors: Vec<FeedRefreshErrorDto>,
 }
 
@@ -183,6 +184,7 @@ impl From<RefreshReport> for RefreshReportDto {
             collected_articles: report.collected_articles,
             inserted_articles: report.inserted_articles,
             updated_articles: report.updated_articles,
+            auto_archived_articles: report.auto_archived_articles,
             errors: report
                 .errors
                 .into_iter()
@@ -281,6 +283,21 @@ async fn set_article_favorite_in(
     }
 }
 
+async fn archive_article_in(storage: &Storage, article_id: &str) -> Result<(), ApiError> {
+    if storage
+        .archive_article_now(article_id)
+        .await
+        .map_err(ApiError::storage)?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "article_not_found",
+            format!("Article introuvable : {article_id}"),
+        ))
+    }
+}
+
 async fn list_feeds_from(storage: &Storage) -> Result<Vec<FeedDto>, ApiError> {
     storage
         .list_feeds()
@@ -365,6 +382,11 @@ async fn set_article_favorite(
 }
 
 #[tauri::command]
+async fn archive_article(state: State<'_, AppState>, article_id: String) -> Result<(), ApiError> {
+    archive_article_in(&state.storage, &article_id).await
+}
+
+#[tauri::command]
 async fn list_feeds(state: State<'_, AppState>) -> Result<Vec<FeedDto>, ApiError> {
     list_feeds_from(&state.storage).await
 }
@@ -396,9 +418,9 @@ async fn delete_feed(
 }
 
 fn open_storage(database_path: &Path) -> Result<Storage, Box<dyn std::error::Error>> {
-    Ok(tauri::async_runtime::block_on(Storage::open(
-        database_path,
-    ))?)
+    let storage = tauri::async_runtime::block_on(Storage::open(database_path))?;
+    tauri::async_runtime::block_on(storage.apply_article_retention())?;
+    Ok(storage)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -418,6 +440,7 @@ pub fn run() {
             refresh_feeds,
             set_article_read,
             set_article_favorite,
+            archive_article,
             list_feeds,
             add_feed,
             set_feed_active,
@@ -530,6 +553,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn archive_adapter_hides_article_and_maps_missing_ids() {
+        let (_directory, storage) = storage_with_article().await;
+
+        archive_article_in(&storage, "space::mars").await.unwrap();
+
+        assert!(list_articles_from(&storage).await.unwrap().is_empty());
+        assert_eq!(
+            get_article_from(&storage, "space::mars").await.unwrap_err(),
+            ApiError::new("article_not_found", "Article introuvable : space::mars")
+        );
+        assert_eq!(
+            archive_article_in(&storage, "space::mars")
+                .await
+                .unwrap_err()
+                .code,
+            "article_not_found"
+        );
+    }
+
+    #[test]
+    fn opening_app_storage_applies_retention_before_first_list() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("inkriver.db");
+        tauri::async_runtime::block_on(async {
+            let storage = Storage::open(&path).await.unwrap();
+            storage
+                .import_feeds(&[FeedConfig {
+                    id: "space".to_string(),
+                    platform: Platform::Substack,
+                    url: "https://space.substack.com/feed".to_string(),
+                }])
+                .await
+                .unwrap();
+            storage
+                .upsert_articles(&[Article {
+                    id: "space::old".to_string(),
+                    feed_id: "space".to_string(),
+                    title: Some("Ancien article".to_string()),
+                    author: None,
+                    published_at: Some(Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap()),
+                    url: Some("https://space.example/old".to_string()),
+                    content: Some("Old body".to_string()),
+                    content_kind: ContentKind::Full,
+                    source: Source::Substack,
+                }])
+                .await
+                .unwrap();
+            storage.set_read("space::old", true).await.unwrap();
+            storage.close().await;
+        });
+
+        let storage = open_storage(&path).unwrap();
+        assert!(
+            tauri::async_runtime::block_on(storage.list_article_summaries())
+                .unwrap()
+                .is_empty()
+        );
+        tauri::async_runtime::block_on(storage.close());
+    }
+
     #[test]
     fn refresh_report_keeps_partial_feed_errors() {
         use inkriver::service::{FeedCollectionError, FeedLoadError, FeedLoadStage};
@@ -538,6 +622,7 @@ mod tests {
             collected_articles: 0,
             inserted_articles: 0,
             updated_articles: 0,
+            auto_archived_articles: 2,
             errors: vec![FeedCollectionError {
                 feed_id: "space".to_string(),
                 feed_url: "https://space.example/feed".to_string(),
@@ -549,6 +634,7 @@ mod tests {
         });
         assert_eq!(dto.errors[0].stage, "HTTP request");
         assert_eq!(dto.errors[0].message, "offline");
+        assert_eq!(dto.auto_archived_articles, 2);
     }
 
     #[tokio::test]
@@ -669,5 +755,17 @@ mod tests {
         assert_eq!(deletion["feedId"], "feed-id");
         assert_eq!(deletion["deletedArticles"], 3);
         assert!(deletion.get("deleted_articles").is_none());
+
+        let refresh = serde_json::to_value(RefreshReportDto {
+            active_feeds: 2,
+            collected_articles: 5,
+            inserted_articles: 3,
+            updated_articles: 2,
+            auto_archived_articles: 4,
+            errors: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(refresh["autoArchivedArticles"], 4);
+        assert!(refresh.get("auto_archived_articles").is_none());
     }
 }

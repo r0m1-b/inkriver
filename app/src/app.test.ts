@@ -66,10 +66,12 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       collectedArticles: 1,
       insertedArticles: 0,
       updatedArticles: 1,
+      autoArchivedArticles: 0,
       errors: [],
     })),
     setArticleRead: vi.fn(async () => undefined),
     setArticleFavorite: vi.fn(async () => undefined),
+    archiveArticle: vi.fn(async () => undefined),
     listFeeds: vi.fn(async () => [structuredClone(feed)]),
     addFeed: vi.fn(async () => structuredClone(feed)),
     setFeedActive: vi.fn(async () => structuredClone(feed)),
@@ -551,6 +553,121 @@ describe("InkRiverApp", () => {
     );
   });
 
+  it("opens an accessible archive dialog and honors cancellation", async () => {
+    const confirmer = vi.fn(() => true);
+    const mountedApp = await mounted(fakeApi(), undefined, confirmer);
+    mountedApp.root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const archive = mountedApp.root.querySelector<HTMLButtonElement>(
+      '[data-action="archive-article"]',
+    )!;
+    expect(archive.textContent?.trim()).toBe("");
+    expect(archive.getAttribute("title")).toBe("Archiver l’article");
+    expect(archive.getAttribute("aria-label")).toBe("Archiver l’article");
+    expect(archive.querySelector("svg")).not.toBeNull();
+    archive.click();
+
+    const dialog = mountedApp.root.querySelector<HTMLElement>(".archive-confirmation")!;
+    expect(dialog.getAttribute("role")).toBe("dialog");
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.textContent).toContain("Observer Mars au crépuscule");
+    expect(dialog.textContent).toContain("ne pourra pas être restauré");
+    expect(document.activeElement?.getAttribute("data-action")).toBe("cancel-archive");
+    expect(confirmer).not.toHaveBeenCalled();
+    expect(mountedApp.api.archiveArticle).not.toHaveBeenCalled();
+
+    dialog.querySelector<HTMLElement>('[data-action="cancel-archive"]')!.click();
+    expect(mountedApp.root.querySelector(".archive-confirmation")).toBeNull();
+    expect(mountedApp.api.archiveArticle).not.toHaveBeenCalled();
+    expect(mountedApp.root.querySelector(".reader-article")).not.toBeNull();
+    expect(document.activeElement?.getAttribute("data-action")).toBe("archive-article");
+  });
+
+  it("closes the archive dialog with Escape", async () => {
+    const { root, api } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+    root.querySelector<HTMLElement>('[data-action="archive-article"]')!.click();
+
+    root.querySelector<HTMLElement>(".archive-confirmation")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(root.querySelector(".archive-confirmation")).toBeNull();
+    expect(api.archiveArticle).not.toHaveBeenCalled();
+  });
+
+  it("archives the selected article after confirmation", async () => {
+    const { root, api, confirmer } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="archive-article"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+    await flush();
+
+    expect(confirmer).not.toHaveBeenCalled();
+    expect(api.archiveArticle).toHaveBeenCalledWith("space::mars");
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+    expect(root.querySelector(".reader-placeholder")).not.toBeNull();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("Article archivé");
+  });
+
+  it("keeps the selected article visible when archiving fails", async () => {
+    const api = fakeApi({
+      archiveArticle: vi.fn(async () =>
+        Promise.reject({ code: "storage", message: "Archivage impossible" }),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="archive-article"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+    await flush();
+
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("Archivage impossible");
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
+    expect(root.querySelector(".reader-article")).not.toBeNull();
+  });
+
+  it("clears an article selected before automatic retention runs", async () => {
+    const listArticles = vi
+      .fn<InkRiverApi["listArticles"]>()
+      .mockResolvedValueOnce([structuredClone(summary)])
+      .mockResolvedValueOnce([]);
+    const getArticle = vi
+      .fn<InkRiverApi["getArticle"]>()
+      .mockResolvedValueOnce(structuredClone(detail))
+      .mockRejectedValueOnce({ code: "article_not_found", message: "Article archivé" });
+    const api = fakeApi({
+      listArticles,
+      getArticle,
+      refreshFeeds: vi.fn(async () => ({
+        activeFeeds: 1,
+        collectedArticles: 1,
+        insertedArticles: 0,
+        updatedArticles: 1,
+        autoArchivedArticles: 1,
+        errors: [],
+      })),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+    await flush();
+
+    expect(root.querySelector("[data-article-row-id]")).toBeNull();
+    expect(root.querySelector(".reader-placeholder")).not.toBeNull();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(
+      "1 ancien(s) supprimé(s) automatiquement",
+    );
+  });
+
   it("reports a partial refresh while retaining cached articles", async () => {
     const api = fakeApi({
       refreshFeeds: vi.fn(async () => ({
@@ -558,6 +675,7 @@ describe("InkRiverApp", () => {
         collectedArticles: 1,
         insertedArticles: 1,
         updatedArticles: 0,
+        autoArchivedArticles: 2,
         errors: [{ feedId: "bread", feedUrl: "https://bread.example", stage: "HTTP request", message: "offline" }],
       })),
     });
@@ -565,6 +683,7 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
     await flush();
     expect(root.textContent).toContain("Actualisation partielle");
+    expect(root.textContent).toContain("2 ancien(s) supprimé(s) automatiquement");
     expect(root.textContent).toContain("Observer Mars au crépuscule");
   });
 
@@ -613,6 +732,7 @@ describe("InkRiverApp", () => {
         collectedArticles: 0,
         insertedArticles: 0,
         updatedArticles: 0,
+        autoArchivedArticles: 0,
         errors: [{
           feedId: feed.id,
           feedUrl: feed.url,

@@ -126,6 +126,16 @@ Substack retain ownership of their respective trademarks.
 The **All** and **Favorites** tabs above the timeline provide an immediate,
 offline view of starred articles while keeping the same reading panel.
 
+The reading panel also provides an archive icon. After mandatory confirmation,
+the article disappears from every list and cannot be restored from the current
+interface. InkRiver keeps a small database tombstone so a later refresh cannot
+recreate it, but removes the stored article body.
+
+On application startup and after every refresh, InkRiver applies a fixed
+30-day retention rule. It automatically archives only articles that are read,
+not favorites, have a publication date, and are strictly older than 30 days.
+Unread, favorite, undated, and exactly 30-day-old articles are preserved.
+
 HTTP(S) links contained in an article open in the system browser instead of
 navigating inside InkRiver. Relative links are resolved from the article URL.
 Links to sections within the current article are currently ignored.
@@ -206,7 +216,9 @@ The `refresh` command:
 4. imports the current subscription list;
 5. downloads the feeds;
 6. inserts or updates articles;
-7. reports how many articles were received, inserted, and updated.
+7. applies the same 30-day retention rule as the application;
+8. reports how many articles were received, inserted, updated, and automatically
+   archived.
 
 A feed error is written to standard error but does not erase cached articles.
 The remaining feeds continue to be processed.
@@ -275,8 +287,8 @@ database is opened. The database currently contains:
 
 - `feeds`: subscriptions, platforms, URLs, active states, feed metadata, and
   last refresh success or error;
-- `articles`: remote content, content kinds, feed relationships, read states,
-  and favorite states;
+- `articles`: remote content, content kinds, feed relationships, read and
+  favorite states, plus archive tombstones and their reason;
 - `_sqlx_migrations`: migrations already applied by SQLx.
 
 SQLite may also create temporary `inkriver.db-wal` and `inkriver.db-shm` files.
@@ -304,6 +316,11 @@ sqlite3 -header -column inkriver.db \
 
 Avoid editing these tables manually: the Rust API enforces their constraints
 and preserves local states during refreshes.
+
+Archived rows intentionally retain their identifiers and metadata so the same
+remote entries remain hidden on later refreshes. Their content is set to
+`NULL`, but SQLite does not immediately shrink the database file and InkRiver
+does not run `VACUUM` automatically.
 
 ### Back up the database
 

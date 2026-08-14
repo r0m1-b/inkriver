@@ -54,6 +54,7 @@ export interface RefreshReport {
   collectedArticles: number;
   insertedArticles: number;
   updatedArticles: number;
+  autoArchivedArticles: number;
   errors: FeedRefreshError[];
 }
 

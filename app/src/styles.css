@@ -128,6 +128,16 @@ main { min-height: 0; display: grid; grid-template-columns: 370px minmax(0, 1fr)
 .subscriptions h2 { margin: 3px 0 0; font: 700 32px Georgia, serif; }
 .eyebrow { color: var(--accent); font-size: 11px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
 .icon-button { padding: 3px 11px; border: 0; font-size: 25px; }
+.confirmation-dialog { width: min(480px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); box-shadow: 0 24px 70px rgb(0 0 0 / 30%); }
+.confirmation-dialog > header { display: flex; align-items: start; justify-content: space-between; margin-bottom: 18px; }
+.confirmation-symbol { display: grid; place-items: center; width: 48px; height: 48px; color: #9b2f27; border: 1px solid #e4b8b1; border-radius: 50%; background: #fff2ef; }
+.confirmation-symbol svg { width: 24px; height: 24px; }
+.confirmation-dialog h2 { margin: 5px 0 14px; font: 700 31px/1.15 Georgia, serif; }
+.confirmation-dialog p { margin: 0; color: var(--muted); line-height: 1.55; }
+.confirmation-dialog .confirmation-subject { margin-bottom: 12px; color: var(--ink); font: 650 17px/1.4 Georgia, serif; }
+.confirmation-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 26px; }
+.confirmation-danger { display: inline-flex; align-items: center; gap: 8px; }
+.confirmation-danger svg { width: 18px; height: 18px; }
 #feed-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; align-items: end; gap: 12px; padding: 18px; background: var(--wash); border-radius: 10px; }
 #feed-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
 #feed-form input, #feed-form select { width: 100%; padding: 10px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 7px; }
@@ -149,4 +159,5 @@ main { min-height: 0; display: grid; grid-template-columns: 370px minmax(0, 1fr)
   .feed-status { color: #bfe0c2; background: #29462d; }
   .feed-error { color: #f1b4ad; border-color: #754841; background: #352724; }
   button.danger { color: #f0aaa3; border-color: #754841; background: #352724; }
+  .confirmation-symbol { color: #f0aaa3; border-color: #754841; background: #352724; }
 }

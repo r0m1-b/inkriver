@@ -10,6 +10,7 @@ use std::path::Path;
 use std::{error::Error, fmt};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+pub const ARTICLE_RETENTION_DAYS: i64 = 30;
 
 /// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
@@ -586,14 +587,19 @@ impl Storage {
         let mut stats = UpsertStats::default();
 
         for article in articles {
-            let already_exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM articles WHERE id = ?)")
+            let existing_archived: Option<bool> =
+                sqlx::query_scalar("SELECT is_archived FROM articles WHERE id = ?")
                     .bind(&article.id)
-                    .fetch_one(&mut *transaction)
+                    .fetch_optional(&mut *transaction)
                     .await
                     .with_context(|| {
                         format!("Impossible de rechercher l'article {:?}", article.id)
                     })?;
+
+            if existing_archived == Some(true) {
+                continue;
+            }
+            let already_exists = existing_archived.is_some();
 
             sqlx::query(
                 r#"
@@ -656,6 +662,7 @@ impl Storage {
                 SELECT id, feed_id, title, author, published_at, url, content,
                        content_kind, source, is_read, is_favorite
                 FROM articles
+                WHERE is_archived = 0
                 ORDER BY published_at IS NULL ASC, published_at DESC, id ASC
             "#,
         )
@@ -689,6 +696,7 @@ impl Storage {
                 SELECT id, feed_id, title, author, published_at, url, source,
                        is_read, is_favorite
                 FROM articles
+                WHERE is_archived = 0
                 ORDER BY published_at IS NULL ASC, published_at DESC, id ASC
             "#,
         )
@@ -727,7 +735,7 @@ impl Storage {
                 SELECT id, feed_id, title, author, published_at, url, content,
                        content_kind, source, is_read, is_favorite
                 FROM articles
-                WHERE id = ?
+                WHERE id = ? AND is_archived = 0
             "#,
         )
         .bind(article_id)
@@ -747,12 +755,13 @@ impl Storage {
     ///
     /// Returns an error when SQLite cannot execute the update.
     pub async fn set_read(&self, article_id: &str, is_read: bool) -> Result<bool> {
-        let result = sqlx::query("UPDATE articles SET is_read = ? WHERE id = ?")
-            .bind(is_read)
-            .bind(article_id)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("Impossible de modifier l'état lu de {article_id:?}"))?;
+        let result =
+            sqlx::query("UPDATE articles SET is_read = ? WHERE id = ? AND is_archived = 0")
+                .bind(is_read)
+                .bind(article_id)
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("Impossible de modifier l'état lu de {article_id:?}"))?;
 
         Ok(result.rows_affected() == 1)
     }
@@ -766,14 +775,80 @@ impl Storage {
     ///
     /// Returns an error when SQLite cannot execute the update.
     pub async fn set_favorite(&self, article_id: &str, is_favorite: bool) -> Result<bool> {
-        let result = sqlx::query("UPDATE articles SET is_favorite = ? WHERE id = ?")
-            .bind(is_favorite)
-            .bind(article_id)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("Impossible de modifier le favori {article_id:?}"))?;
+        let result =
+            sqlx::query("UPDATE articles SET is_favorite = ? WHERE id = ? AND is_archived = 0")
+                .bind(is_favorite)
+                .bind(article_id)
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("Impossible de modifier le favori {article_id:?}"))?;
 
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Archives one visible article and releases its cached body.
+    ///
+    /// Returns `false` when the article is missing or already archived.
+    pub async fn archive_article(
+        &self,
+        article_id: &str,
+        archived_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+                UPDATE articles
+                SET is_archived = 1,
+                    archived_at = ?,
+                    archive_reason = 'manual',
+                    content = NULL,
+                    content_kind = 'missing'
+                WHERE id = ? AND is_archived = 0
+            "#,
+        )
+        .bind(archived_at)
+        .bind(article_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("Impossible d'archiver l'article {article_id:?}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Archives one article using the current UTC time.
+    pub async fn archive_article_now(&self, article_id: &str) -> Result<bool> {
+        self.archive_article(article_id, Utc::now()).await
+    }
+
+    /// Archives old read articles that are not favorites and releases their bodies.
+    pub async fn archive_expired_read_articles(&self, now: DateTime<Utc>) -> Result<usize> {
+        let cutoff = now - chrono::Duration::days(ARTICLE_RETENTION_DAYS);
+        let result = sqlx::query(
+            r#"
+                UPDATE articles
+                SET is_archived = 1,
+                    archived_at = ?,
+                    archive_reason = 'retention',
+                    content = NULL,
+                    content_kind = 'missing'
+                WHERE is_archived = 0
+                  AND is_read = 1
+                  AND is_favorite = 0
+                  AND published_at IS NOT NULL
+                  AND published_at < ?
+            "#,
+        )
+        .bind(now)
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'archiver les anciens articles lus")?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
+    /// Applies the fixed retention policy using the current UTC time.
+    pub async fn apply_article_retention(&self) -> Result<usize> {
+        self.archive_expired_read_articles(Utc::now()).await
     }
 
     #[cfg(test)]
@@ -883,7 +958,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 4);
 
         storage.close().await;
     }
@@ -1004,6 +1079,59 @@ mod tests {
                 ("without-content".to_string(), "missing".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn archiving_migration_keeps_existing_articles_visible_by_default() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080001_initial_schema.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080002_article_content_kind.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608120001_feed_details.sql"
+            )),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO feeds (id, platform, url) VALUES ('feed', 'other', 'https://example.com/feed')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO articles (id, feed_id, content, source) VALUES ('legacy', 'feed', '<p>legacy</p>', 'other')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608140001_article_archiving.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state: (bool, Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
+            "SELECT is_archived, archived_at, archive_reason FROM articles WHERE id = 'legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, (false, None, None));
     }
 
     /// Verifies a feed import persists every configured value as active.
@@ -1181,6 +1309,13 @@ mod tests {
             .set_favorite("astronomy::venus", true)
             .await
             .unwrap();
+        storage
+            .archive_article(
+                "astronomy::mars",
+                Utc.with_ymd_and_hms(2026, 8, 12, 12, 0, 0).unwrap(),
+            )
+            .await
+            .unwrap();
 
         let result = storage.delete_feed("astronomy").await.unwrap();
 
@@ -1198,6 +1333,12 @@ mod tests {
         let articles = storage.list_articles().await.unwrap();
         assert_eq!(articles.len(), 1);
         assert_eq!(articles[0].article.id, "bread::starter");
+        let astronomy_articles: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM articles WHERE feed_id = 'astronomy'")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        assert_eq!(astronomy_articles, 0);
     }
 
     #[tokio::test]
@@ -1485,6 +1626,141 @@ mod tests {
         assert!(!stored.is_read);
         assert!(stored.is_favorite);
         assert!(storage.get_article("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_archive_hides_article_releases_content_and_blocks_reimport() {
+        let storage = storage_with_feed().await;
+        let original = article(
+            "astronomy::jupiter",
+            "astronomy",
+            Some(Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap()),
+        );
+        storage
+            .upsert_articles(std::slice::from_ref(&original))
+            .await
+            .unwrap();
+        storage.set_read(&original.id, true).await.unwrap();
+        let archived_at = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
+
+        assert!(
+            storage
+                .archive_article(&original.id, archived_at)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .archive_article(&original.id, archived_at)
+                .await
+                .unwrap()
+        );
+        assert!(storage.list_articles().await.unwrap().is_empty());
+        assert!(storage.list_article_summaries().await.unwrap().is_empty());
+        assert!(storage.get_article(&original.id).await.unwrap().is_none());
+        assert!(!storage.set_read(&original.id, false).await.unwrap());
+        assert!(!storage.set_favorite(&original.id, true).await.unwrap());
+
+        type TombstoneRow = (
+            bool,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        );
+        let tombstone: TombstoneRow = sqlx::query_as(
+            r#"
+                SELECT is_archived, archived_at, archive_reason, content,
+                       content_kind, title
+                FROM articles WHERE id = ?
+            "#,
+        )
+        .bind(&original.id)
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            tombstone,
+            (
+                true,
+                Some(archived_at),
+                Some("manual".to_string()),
+                None,
+                "missing".to_string(),
+                original.title.clone(),
+            )
+        );
+
+        let stats = storage.upsert_articles(&[original]).await.unwrap();
+        assert_eq!(stats, UpsertStats::default());
+        let content: Option<String> =
+            sqlx::query_scalar("SELECT content FROM articles WHERE id = 'astronomy::jupiter'")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        assert!(content.is_none());
+    }
+
+    #[tokio::test]
+    async fn retention_archives_only_old_read_non_favorite_dated_articles() {
+        let storage = storage_with_feed().await;
+        let now = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
+        let cutoff = now - chrono::Duration::days(ARTICLE_RETENTION_DAYS);
+        let old = cutoff - chrono::Duration::seconds(1);
+        let recent = cutoff + chrono::Duration::seconds(1);
+        let articles = [
+            article("astronomy::eligible", "astronomy", Some(old)),
+            article("astronomy::unread", "astronomy", Some(old)),
+            article("astronomy::favorite", "astronomy", Some(old)),
+            article("astronomy::recent", "astronomy", Some(recent)),
+            article("astronomy::undated", "astronomy", None),
+            article("astronomy::boundary", "astronomy", Some(cutoff)),
+        ];
+        storage.upsert_articles(&articles).await.unwrap();
+        for id in [
+            "astronomy::eligible",
+            "astronomy::favorite",
+            "astronomy::recent",
+            "astronomy::undated",
+            "astronomy::boundary",
+        ] {
+            storage.set_read(id, true).await.unwrap();
+        }
+        storage
+            .set_favorite("astronomy::favorite", true)
+            .await
+            .unwrap();
+
+        assert_eq!(storage.archive_expired_read_articles(now).await.unwrap(), 1);
+        let visible_ids: Vec<String> = storage
+            .list_article_summaries()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|article| article.id)
+            .collect();
+        assert!(!visible_ids.contains(&"astronomy::eligible".to_string()));
+        for retained in ["unread", "favorite", "recent", "undated", "boundary"] {
+            assert!(visible_ids.contains(&format!("astronomy::{retained}")));
+        }
+
+        let archived: (bool, Option<String>, Option<String>, String) = sqlx::query_as(
+            "SELECT is_archived, archive_reason, content, content_kind FROM articles WHERE id = 'astronomy::eligible'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            archived,
+            (
+                true,
+                Some("retention".to_string()),
+                None,
+                "missing".to_string()
+            )
+        );
+        assert_eq!(storage.archive_expired_read_articles(now).await.unwrap(), 0);
     }
 
     /// Verifies article batches are atomic when one row references an unknown feed.

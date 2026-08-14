@@ -131,6 +131,18 @@ v16.21.0 ; Medium et Substack restent propriétaires de leurs marques respective
 Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
 immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
 
+Le panneau de lecture propose aussi une icône d'archivage. Après une confirmation
+obligatoire, l'article disparaît de toutes les listes et ne peut pas être restauré
+depuis l'interface actuelle. InkRiver conserve une petite pierre tombale dans la
+base afin qu'un rafraîchissement ultérieur ne recrée pas l'article, mais efface
+son corps enregistré.
+
+Au démarrage de l'application et après chaque rafraîchissement, InkRiver applique
+une rétention fixe de 30 jours. Seuls les articles lus, non favoris, possédant une
+date de publication et strictement plus vieux que 30 jours sont archivés
+automatiquement. Les articles non lus, favoris, sans date ou vieux d'exactement
+30 jours sont conservés.
+
 Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
 au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL
 de l'article. Les liens vers une section du même article sont actuellement
@@ -213,7 +225,9 @@ La commande `refresh` :
 4. importe la liste courante des abonnements ;
 5. télécharge les flux ;
 6. insère ou met à jour les articles ;
-7. affiche le nombre d'articles reçus, ajoutés et mis à jour.
+7. applique la même rétention de 30 jours que l'application ;
+8. affiche le nombre d'articles reçus, ajoutés, mis à jour et archivés
+   automatiquement.
 
 Une erreur sur un flux est écrite sur la sortie d'erreur, mais elle n'efface pas
 les articles déjà enregistrés. Les autres flux continuent d'être traités.
@@ -283,8 +297,8 @@ appliquées à l'ouverture. La base contient actuellement :
 
 - `feeds` : abonnements, plateforme, URL, état actif, métadonnées du flux et
   dernier succès ou échec d'actualisation ;
-- `articles` : contenu distant, type de contenu, relation au flux, état lu et
-  favori ;
+- `articles` : contenu distant, type de contenu, relation au flux, états lu et
+  favori, ainsi que les pierres tombales d'archivage et leur motif ;
 - `_sqlx_migrations` : migrations déjà appliquées par SQLx.
 
 SQLite peut aussi créer temporairement `inkriver.db-wal` et `inkriver.db-shm`. Ces
@@ -312,6 +326,12 @@ sqlite3 -header -column inkriver.db \
 
 Il vaut mieux éviter de modifier manuellement ces tables : l'API Rust garantit
 les contraintes et préserve les états locaux pendant les rafraîchissements.
+
+Les lignes archivées conservent volontairement leur identifiant et leurs
+métadonnées afin que les mêmes entrées distantes restent masquées lors des
+rafraîchissements suivants. Leur contenu passe à `NULL`, mais SQLite ne réduit
+pas immédiatement la taille du fichier et InkRiver n'exécute pas automatiquement
+`VACUUM`.
 
 ### Sauvegarder la base
 
