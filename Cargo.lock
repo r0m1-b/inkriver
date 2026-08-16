@@ -2162,16 +2162,19 @@ dependencies = [
 
 [[package]]
 name = "inkriver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ammonia",
  "anyhow",
  "chrono",
  "clap",
  "feed-rs",
+ "futures-util",
  "html2text",
+ "legible",
  "reqwest",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "tempfile",
@@ -2182,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "inkriver-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "inkriver",
@@ -2381,6 +2384,23 @@ dependencies = [
  "bitflags 2.13.1",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "legible"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1365098e73aae697c4d747782d2fd5b9bfa3d6a82f2a3f6070c2039053146e5"
+dependencies = [
+ "html5ever 0.39.0",
+ "memchr",
+ "regex",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tendril",
+ "thiserror 2.0.19",
+ "url",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@ Le projet comprend un programme en ligne de commande et une interface Tauri 2
 pour Linux. Les deux utilisent le même cœur Rust et le même schéma SQLite. Une
 adaptation Android est prévue dans une étape ultérieure.
 
+Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
+
 ## Fonctionnalités actuelles
 
 - chargement de plusieurs flux depuis `feeds.toml` ;
@@ -26,7 +28,11 @@ adaptation Android est prévue dans une étape ultérieure.
 - commandes distinctes pour rafraîchir, lister, lire et modifier les états
   locaux des articles ;
 - interface Linux à deux panneaux avec gestion des abonnements ;
-- distinction entre contenu complet, extrait et contenu absent ;
+- distinction entre contenu fourni par le flux, extrait du Web, résumé et
+  contenu absent ;
+- archivage manuel et rétention automatique des articles devenus inutiles ;
+- extraction sécurisée des pages complètes pour les articles incomplets des
+  autres flux ;
 - ouverture sécurisée de l'article original pour les extraits.
 
 ## Prérequis sous Ubuntu
@@ -131,10 +137,27 @@ v16.21.0 ; Medium et Substack restent propriétaires de leurs marques respective
 Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
 immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
 
+Le panneau de lecture propose aussi une icône d'archivage. Après une confirmation
+obligatoire, l'article disparaît de toutes les listes et ne peut pas être restauré
+depuis l'interface actuelle. InkRiver conserve une petite pierre tombale dans la
+base afin qu'un rafraîchissement ultérieur ne recrée pas l'article, mais efface
+son corps enregistré.
+
+Au démarrage de l'application et après chaque rafraîchissement, InkRiver applique
+une rétention fixe de 30 jours. Seuls les articles lus, non favoris, possédant une
+date de publication et strictement plus vieux que 30 jours sont archivés
+automatiquement. Les articles non lus, favoris, sans date ou vieux d'exactement
+30 jours sont conservés.
+
 Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
 au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL
 de l'article. Les liens vers une section du même article sont actuellement
 ignorés.
+Le panneau de lecture identifie toujours la source d'origine de l'article par
+son domaine et permet de l'ouvrir dans le navigateur système. Lorsque le flux ne
+contient qu'un extrait ou aucun contenu, le bouton plus visible **Lire
+l'original** reste également disponible. Un état non interactif est affiché si
+l'article ne possède aucune source HTTP(S) exploitable.
 
 Désactiver un abonnement conserve son identifiant, ses articles, les favoris et
 les états de lecture. Ajouter de nouveau la même URL réactive cet abonnement au
@@ -208,7 +231,11 @@ La commande `refresh` :
 4. importe la liste courante des abonnements ;
 5. télécharge les flux ;
 6. insère ou met à jour les articles ;
-7. affiche le nombre d'articles reçus, ajoutés et mis à jour.
+7. applique la même rétention de 30 jours que l'application ;
+8. tente d'extraire les pages complètes des articles éligibles hors Medium et
+   Substack ;
+9. affiche le nombre d'articles reçus, ajoutés, mis à jour, extraits et archivés
+   automatiquement.
 
 Une erreur sur un flux est écrite sur la sortie d'erreur, mais elle n'efface pas
 les articles déjà enregistrés. Les autres flux continuent d'être traités.
@@ -278,8 +305,8 @@ appliquées à l'ouverture. La base contient actuellement :
 
 - `feeds` : abonnements, plateforme, URL, état actif, métadonnées du flux et
   dernier succès ou échec d'actualisation ;
-- `articles` : contenu distant, type de contenu, relation au flux, état lu et
-  favori ;
+- `articles` : contenu distant, type de contenu, relation au flux, états lu et
+  favori, ainsi que les pierres tombales d'archivage et leur motif ;
 - `_sqlx_migrations` : migrations déjà appliquées par SQLx.
 
 SQLite peut aussi créer temporairement `inkriver.db-wal` et `inkriver.db-shm`. Ces
@@ -307,6 +334,12 @@ sqlite3 -header -column inkriver.db \
 
 Il vaut mieux éviter de modifier manuellement ces tables : l'API Rust garantit
 les contraintes et préserve les états locaux pendant les rafraîchissements.
+
+Les lignes archivées conservent volontairement leur identifiant et leurs
+métadonnées afin que les mêmes entrées distantes restent masquées lors des
+rafraîchissements suivants. Leur contenu passe à `NULL`, mais SQLite ne réduit
+pas immédiatement la taille du fichier et InkRiver n'exécute pas automatiquement
+`VACUUM`.
 
 ### Sauvegarder la base
 
@@ -412,6 +445,37 @@ Les tests de collecte utilisent des contenus injectés et des fixtures locales.
 Les tests SQLite utilisent des bases en mémoire ou des fichiers temporaires :
 ils ne modifient pas `inkriver.db`.
 
+### Corpus local facultatif pour l'extraction
+
+L'extracteur de contenu principal possède des fixtures synthétiques committées
+et s'exécute donc avec la suite de tests ordinaire. Un corpus plus large de
+pages tierces complètes peut être conservé localement sous `tests/pages/` ; ce
+répertoire est ignoré par Git et n'est jamais lu par les tests ordinaires.
+
+Chaque page est décrite par le fichier local `tests/pages/description.json`.
+Exécuter son test de régression explicitement ignoré avec :
+
+```bash
+cargo test --test extraction_corpus -- --ignored
+```
+
+Seuls les documents HTML enregistrés sont nécessaires. Les répertoires de
+ressources `*_files` créés par le navigateur ne sont pas lus par l'extracteur.
+
+### Extraction automatique des pages d'articles
+
+Pendant une actualisation manuelle, InkRiver peut compléter les articles des
+flux `Other` dont l'entrée RSS ne contient qu'un extrait ou aucun corps. Medium,
+Substack, les entrées RSS complètes et les articles archivés ne sont jamais
+téléchargés ainsi. Une page acceptée est stockée avec
+`content_kind = extracted` ; un échec conserve intact le contenu RSS de repli.
+
+Les téléchargements sont limités à 20 tentatives par actualisation et quatre
+requêtes simultanées, avec un délai maximal de 10 secondes, un corps limité à
+2 Mio et cinq redirections HTTP(S) validées. Les destinations privées ou
+locales sont rejetées. Après un échec, la page n'est retentée qu'au bout de sept
+jours ; une modification de son URL la rend immédiatement éligible.
+
 Organisation principale :
 
 ```text
@@ -419,6 +483,9 @@ src/config.rs   lecture et validation de feeds.toml
 src/cli.rs      arguments, commandes, rendu et codes de sortie
 src/http.rs     téléchargement HTTP asynchrone
 src/feed.rs     conversion RSS/Atom vers le modèle commun
+src/content_extractor.rs  extraction hors ligne et nettoyage du contenu principal
+src/page_http.rs  téléchargement borné des pages sur le réseau public
+src/enrichment.rs  sélection, concurrence et persistance des extractions
 src/service.rs  collecte, déduplication et tri
 src/storage.rs  stockage SQLite et états locaux
 src/refresh.rs  orchestration import → collecte → stockage

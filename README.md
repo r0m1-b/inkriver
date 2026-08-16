@@ -10,6 +10,8 @@ The project includes a command-line application and a Tauri 2 desktop
 application for Linux. Both use the same Rust core and SQLite schema. Android
 support is planned for a later stage.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Current features
 
 - load multiple feeds from `feeds.toml`;
@@ -25,7 +27,9 @@ support is planned for a later stage.
 - read cached articles even when some feeds are unavailable;
 - use separate commands to refresh, list, read, and update article states;
 - use a two-pane Linux interface with subscription management;
-- distinguish full content, excerpts, and missing content;
+- distinguish feed-provided, extracted, excerpt, and missing content;
+- archive articles manually and automatically retain only relevant history;
+- safely extract complete pages for incomplete articles from other feeds;
 - safely open the original article when a feed only provides an excerpt.
 
 ## Ubuntu prerequisites
@@ -126,9 +130,23 @@ Substack retain ownership of their respective trademarks.
 The **All** and **Favorites** tabs above the timeline provide an immediate,
 offline view of starred articles while keeping the same reading panel.
 
+The reading panel also provides an archive icon. After mandatory confirmation,
+the article disappears from every list and cannot be restored from the current
+interface. InkRiver keeps a small database tombstone so a later refresh cannot
+recreate it, but removes the stored article body.
+
+On application startup and after every refresh, InkRiver applies a fixed
+30-day retention rule. It automatically archives only articles that are read,
+not favorites, have a publication date, and are strictly older than 30 days.
+Unread, favorite, undated, and exactly 30-day-old articles are preserved.
+
 HTTP(S) links contained in an article open in the system browser instead of
 navigating inside InkRiver. Relative links are resolved from the article URL.
 Links to sections within the current article are currently ignored.
+The reading panel always identifies the article's original source by domain and
+opens it in the system browser. When the feed contains only an excerpt or no
+content, the more prominent **Read original** button remains available as well.
+Articles without a usable HTTP(S) source display a non-interactive status.
 
 Disabling a subscription preserves its identifier, articles, favorites, and
 read states. Adding the same URL again reactivates that subscription instead of
@@ -202,7 +220,11 @@ The `refresh` command:
 4. imports the current subscription list;
 5. downloads the feeds;
 6. inserts or updates articles;
-7. reports how many articles were received, inserted, and updated.
+7. applies the same 30-day retention rule as the application;
+8. attempts to extract complete pages for eligible non-Medium/non-Substack
+   articles;
+9. reports how many articles were received, inserted, updated, extracted, and
+   automatically archived.
 
 A feed error is written to standard error but does not erase cached articles.
 The remaining feeds continue to be processed.
@@ -271,8 +293,8 @@ database is opened. The database currently contains:
 
 - `feeds`: subscriptions, platforms, URLs, active states, feed metadata, and
   last refresh success or error;
-- `articles`: remote content, content kinds, feed relationships, read states,
-  and favorite states;
+- `articles`: remote content, content kinds, feed relationships, read and
+  favorite states, plus archive tombstones and their reason;
 - `_sqlx_migrations`: migrations already applied by SQLx.
 
 SQLite may also create temporary `inkriver.db-wal` and `inkriver.db-shm` files.
@@ -300,6 +322,11 @@ sqlite3 -header -column inkriver.db \
 
 Avoid editing these tables manually: the Rust API enforces their constraints
 and preserves local states during refreshes.
+
+Archived rows intentionally retain their identifiers and metadata so the same
+remote entries remain hidden on later refreshes. Their content is set to
+`NULL`, but SQLite does not immediately shrink the database file and InkRiver
+does not run `VACUUM` automatically.
 
 ### Back up the database
 
@@ -401,6 +428,37 @@ npm run build
 Collection tests use injected content and local fixtures. SQLite tests use
 in-memory databases or temporary files and never modify `inkriver.db`.
 
+### Optional local extraction corpus
+
+The main-content extractor has committed synthetic fixtures and therefore runs
+with the regular test suite. A larger corpus of complete third-party pages can
+be kept locally under `tests/pages/`; this directory is ignored by Git and is
+never accessed by ordinary tests.
+
+Each page is described by the local `tests/pages/description.json`. Run its
+explicitly ignored regression test with:
+
+```bash
+cargo test --test extraction_corpus -- --ignored
+```
+
+Only the saved HTML documents are required. Browser-generated `*_files`
+resource directories are not read by the extractor.
+
+### Automatic article-page extraction
+
+During a manual refresh, InkRiver can complete articles from `Other` feeds when
+their RSS entry contains only an excerpt or no body. Medium, Substack, complete
+RSS entries, and archived articles are never fetched this way. A successful
+page is stored with `content_kind = extracted`; a failure leaves the RSS
+fallback untouched.
+
+Page downloads are limited to 20 attempts per refresh and four concurrent
+requests, with a 10-second timeout, a 2 MiB body limit, and at most five
+validated HTTP(S) redirects. Private or local network destinations are
+rejected. Failed pages enter a seven-day cooldown; changing an article URL
+makes it eligible immediately.
+
 Main project structure:
 
 ```text
@@ -408,6 +466,9 @@ src/config.rs   feeds.toml loading and validation
 src/cli.rs      arguments, commands, rendering, and exit codes
 src/http.rs     asynchronous HTTP downloads
 src/feed.rs     RSS/Atom conversion to the shared model
+src/content_extractor.rs  offline main-content extraction and sanitization
+src/page_http.rs  bounded and public-network-only article page downloads
+src/enrichment.rs  extraction selection, concurrency, and persistence
 src/service.rs  collection, deduplication, and sorting
 src/storage.rs  SQLite storage and local states
 src/refresh.rs  import → collection → storage orchestration

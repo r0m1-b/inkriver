@@ -17,6 +17,7 @@ target/
 /script.sh~
 /FEATURE_REQUESTS.md
 /TODO.md
+/tests/pages/
 
 # Temporary files
 *.tmp

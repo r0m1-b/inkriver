@@ -9,10 +9,12 @@ import type {
 } from "./types";
 
 type OpenOriginal = (url: string) => Promise<void>;
-type ConfirmDeletion = (message: string) => boolean;
+type ConfirmAction = (message: string) => boolean;
 type ArticleView = "all" | "favorites";
 type MainView = "articles" | "feeds";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
+const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
+const MAX_ARTICLE_FRAME_HEIGHT = 10_000_000;
 
 function escapeHtml(value: string): string {
   return value
@@ -72,8 +74,21 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
+export function articleSourceHost(rawUrl: string | null): string | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.host : null;
+  } catch {
+    return null;
+  }
+}
+
 export function canOpenOriginal(article: ArticleDetail): boolean {
-  return Boolean(article.url && article.contentKind !== "full");
+  return Boolean(
+    articleSourceHost(article.url) &&
+      ["excerpt", "missing", "unknown"].includes(article.contentKind),
+  );
 }
 
 export function resolveExternalArticleUrl(rawUrl: string, articleUrl?: string | null): string {
@@ -108,8 +123,8 @@ export function prepareArticleContent(content: string): string {
 
 export function buildArticleDocument(content: string, nonce: string): string {
   const preparedContent = prepareArticleContent(content);
-  const bridgeScript = `document.addEventListener("click",function(event){var target=event.target;var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
+  const bridgeScript = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"${ARTICLE_HEIGHT_MESSAGE}",height:height},"*");}document.addEventListener("click",function(event){var target=event.target;var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
 }
 
 function favoriteIcon(isFavorite: boolean): string {
@@ -120,6 +135,14 @@ function readIcon(isRead: boolean): string {
   return isRead
     ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10 12 3l9 7v10H3V10Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m3 10 9 7 9-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>'
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v13H3V6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m3 7 9 7 9-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+}
+
+function refreshIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.22 6.5L3 16m0 0v5m0-5h5M3 12A9 9 0 0 1 18.22 5.5L21 8m0 0V3m0 5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function archiveIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v12H4v-12Zm-1-3h18v3H3v-3Zm6 7h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
 export class InkRiverApp {
@@ -134,6 +157,8 @@ export class InkRiverApp {
   private readonly updatingFavoriteArticleIds = new Set<string>();
   private addSubscriptionOpen = false;
   private deletingFeedId: string | null = null;
+  private archivingArticleId: string | null = null;
+  private archiveConfirmationArticleId: string | null = null;
   private error: string | null = null;
   private notice: string | null = null;
 
@@ -141,20 +166,25 @@ export class InkRiverApp {
     private readonly root: HTMLElement,
     private readonly api: InkRiverApi,
     private readonly openOriginal: OpenOriginal,
-    private readonly confirmDeletion: ConfirmDeletion,
+    private readonly confirmAction: ConfirmAction,
   ) {
     this.root.ownerDocument.defaultView?.addEventListener("message", (event) => {
       const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
       if (!frame || event.source !== frame.contentWindow) return;
-      const message = event.data as { type?: unknown; href?: unknown } | null;
-      if (
-        !message ||
-        message.type !== ARTICLE_LINK_MESSAGE ||
-        typeof message.href !== "string"
-      ) {
+      const message = event.data as { type?: unknown; href?: unknown; height?: unknown } | null;
+      if (!message) {
         return;
       }
-      void this.openExternalUrl(message.href, this.selected?.url);
+      if (message.type === ARTICLE_HEIGHT_MESSAGE && typeof message.height === "number") {
+        const height = Math.ceil(message.height);
+        if (Number.isFinite(height) && height > 0 && height <= MAX_ARTICLE_FRAME_HEIGHT) {
+          frame.style.height = `${height}px`;
+        }
+        return;
+      }
+      if (message.type === ARTICLE_LINK_MESSAGE && typeof message.href === "string") {
+        void this.openExternalUrl(message.href, this.selected?.url);
+      }
     });
   }
 
@@ -285,7 +315,7 @@ export class InkRiverApp {
   }
 
   private refreshNotice(report: RefreshReport): string {
-    const result = `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s)`;
+    const result = `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s), ${report.extractedArticles} extrait(s), ${report.extractionFailedArticles} extraction(s) en échec, ${report.extractionSkippedArticles} différée(s), ${report.autoArchivedArticles} ancien(s) supprimé(s) automatiquement`;
     return report.errors.length === 0
       ? `Actualisation terminée : ${result}.`
       : `Actualisation partielle : ${result}, ${report.errors.length} flux en erreur. Consultez la page Abonnements.`;
@@ -323,7 +353,7 @@ export class InkRiverApp {
   private async deleteFeed(feedId: string): Promise<void> {
     const feed = this.feeds.find((candidate) => candidate.id === feedId);
     if (!feed) return;
-    const confirmed = this.confirmDeletion(
+    const confirmed = this.confirmAction(
       `Supprimer l’abonnement « ${feed.url} » ? Ses articles, favoris et états de lecture seront définitivement supprimés.`,
     );
     if (!confirmed) return;
@@ -362,6 +392,49 @@ export class InkRiverApp {
 
   private async openSelectedOriginal(): Promise<void> {
     if (this.selected?.url) await this.openExternalUrl(this.selected.url);
+  }
+
+  private requestArchiveSelectedArticle(): void {
+    if (!this.selected) return;
+    this.archiveConfirmationArticleId = this.selected.id;
+    this.render();
+  }
+
+  private cancelArchiveSelectedArticle(): void {
+    this.archiveConfirmationArticleId = null;
+    this.render();
+    this.root
+      .querySelector<HTMLElement>('[data-action="archive-article"]')
+      ?.focus();
+  }
+
+  private async confirmArchiveSelectedArticle(): Promise<void> {
+    if (
+      !this.selected ||
+      this.selected.id !== this.archiveConfirmationArticleId
+    ) {
+      this.archiveConfirmationArticleId = null;
+      this.render();
+      return;
+    }
+    const article = this.selected;
+
+    this.archiveConfirmationArticleId = null;
+    this.archivingArticleId = article.id;
+    this.error = null;
+    this.notice = null;
+    this.render();
+    try {
+      await this.api.archiveArticle(article.id);
+      this.articles = this.articles.filter((candidate) => candidate.id !== article.id);
+      this.selected = null;
+      this.notice = "Article archivé.";
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.archivingArticleId = null;
+      this.render();
+    }
   }
 
   private renderArticleList(): string {
@@ -407,23 +480,31 @@ export class InkRiverApp {
 
   private renderReader(): string {
     if (!this.selected) {
-      return '<div class="reader-placeholder"><span>IR</span><p>Sélectionnez un article dans la chronologie.</p></div>';
+      return '<div class="reader-placeholder"><img class="reader-placeholder-logo" src="/inkriver-wordmark.png" alt="InkRiver"><p>Sélectionnez un article dans la chronologie.</p></div>';
     }
     const article = this.selected;
     const readPending = this.updatingReadArticleIds.has(article.id);
     const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
+    const archivePending = this.archivingArticleId === article.id;
+    const readAction = article.isRead ? "Marquer comme non lu" : "Marquer comme lu";
+    const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
+    const sourceHost = articleSourceHost(article.url);
+    const sourceLink = sourceHost && article.url
+      ? `<div class="article-source">Source : <button type="button" class="article-source-link" data-action="open-source" title="${escapeHtml(article.url)}" aria-label="${escapeHtml(`Ouvrir la source ${sourceHost} dans le navigateur`)}">${escapeHtml(sourceHost)} ↗</button></div>`
+      : `<div class="article-source">${article.url ? "Source non prise en charge" : "Source indisponible"}</div>`;
     const originalButton = canOpenOriginal(article)
       ? '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
       : "";
     const content = article.content
-      ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts"></iframe>'
+      ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts" scrolling="no"></iframe>'
       : '<p class="missing-content">Le flux ne fournit pas de contenu pour cet article.</p>';
     return `<article class="reader-article">
       <header>${renderSourceBadge(article.source)}
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
+      ${sourceLink}
       <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div>
-      <div class="reader-actions"><button data-action="toggle-read" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readPending ? "Enregistrement…" : article.isRead ? "Marquer comme non lu" : "Marquer comme lu"}</button><button data-action="favorite" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoritePending ? "Enregistrement…" : article.isFavorite ? "★ Retirer des favoris" : "☆ Ajouter aux favoris"}</button>${originalButton}</div></header>
+      <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}</div></header>
       ${content}
     </article>`;
   }
@@ -458,14 +539,35 @@ export class InkRiverApp {
     </section></div>`;
   }
 
+  private renderArchiveConfirmation(): string {
+    if (
+      !this.selected ||
+      this.selected.id !== this.archiveConfirmationArticleId
+    ) {
+      return "";
+    }
+    const title = escapeHtml(this.selected.title ?? "Sans titre");
+    return `<div class="modal-backdrop archive-confirmation-backdrop" data-action="cancel-archive-backdrop">
+      <section class="confirmation-dialog archive-confirmation" role="dialog" aria-modal="true" aria-labelledby="archive-confirmation-title" aria-describedby="archive-confirmation-description">
+        <header><div class="confirmation-symbol" aria-hidden="true">${archiveIcon()}</div><button type="button" class="icon-button" data-action="cancel-archive" aria-label="Fermer">×</button></header>
+        <span class="eyebrow">Archivage</span>
+        <h2 id="archive-confirmation-title">Archiver cet article ?</h2>
+        <p class="confirmation-subject">« ${title} »</p>
+        <p id="archive-confirmation-description">L’article disparaîtra de la chronologie et des favoris. Il ne pourra pas être restauré depuis InkRiver.</p>
+        <footer class="confirmation-actions"><button type="button" data-action="cancel-archive">Annuler</button><button type="button" class="danger confirmation-danger" data-action="confirm-archive">${archiveIcon()}<span>Archiver</span></button></footer>
+      </section>
+    </div>`;
+  }
+
   render(): void {
     const timelineScrollTop =
       this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
     this.root.innerHTML = `<div class="shell">
-      <header class="topbar"><div class="brand"><span>IR</span><div><strong>InkRiver</strong><small>Medium + Substack</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button class="primary" data-action="refresh" ${this.refreshing ? "disabled" : ""}>${this.refreshing ? "Actualisation…" : "Actualiser"}</button></div></header>
+      <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice" role="status">${escapeHtml(this.notice)}</div>` : ""}</div>
       <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section>` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
+      ${this.renderArchiveConfirmation()}
     </div>`;
 
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
@@ -479,6 +581,9 @@ export class InkRiverApp {
       frame.srcdoc = buildArticleDocument(this.selected.content, nonce);
     }
     this.bindEvents();
+    this.root
+      .querySelector<HTMLElement>('.archive-confirmation [data-action="cancel-archive"]')
+      ?.focus();
   }
 
   private bindEvents(): void {
@@ -524,6 +629,37 @@ export class InkRiverApp {
     this.root.querySelector<HTMLElement>('[data-action="refresh"]')?.addEventListener("click", () => void this.refresh());
     this.root.querySelector<HTMLElement>('[data-action="toggle-read"]')?.addEventListener("click", () => void this.toggleReadState());
     this.root.querySelector<HTMLElement>('[data-action="favorite"]')?.addEventListener("click", () => void this.toggleFavorite());
+    this.root.querySelector<HTMLElement>('[data-action="archive-article"]')?.addEventListener("click", () => this.requestArchiveSelectedArticle());
+    this.root.querySelectorAll<HTMLElement>('[data-action="cancel-archive"]').forEach((element) => {
+      element.addEventListener("click", () => this.cancelArchiveSelectedArticle());
+    });
+    this.root.querySelector<HTMLElement>('[data-action="confirm-archive"]')?.addEventListener("click", () => void this.confirmArchiveSelectedArticle());
+    this.root.querySelector<HTMLElement>('[data-action="cancel-archive-backdrop"]')?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) this.cancelArchiveSelectedArticle();
+    });
+    const archiveDialog = this.root.querySelector<HTMLElement>(".archive-confirmation");
+    archiveDialog?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.cancelArchiveSelectedArticle();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        archiveDialog.querySelectorAll<HTMLElement>("button:not(:disabled)"),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && this.root.ownerDocument.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && this.root.ownerDocument.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    this.root.querySelector<HTMLElement>('[data-action="open-source"]')?.addEventListener("click", () => void this.openSelectedOriginal());
     this.root.querySelector<HTMLElement>('[data-action="open-original"]')?.addEventListener("click", () => void this.openSelectedOriginal());
     this.root.querySelector<HTMLFormElement>("#feed-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
