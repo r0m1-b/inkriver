@@ -938,6 +938,30 @@ describe("InkRiverApp", () => {
     expect(root.querySelector(".article-content")).not.toBeNull();
   });
 
+  it("resizes the article frame so the reader owns the complete scroll", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    expect(frame.getAttribute("scrolling")).toBe("no");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 1234.2 },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(frame.style.height).toBe("1235px");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: -1 },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(frame.style.height).toBe("1235px");
+  });
+
   it("keeps fragment links inside the article frame", async () => {
     const linkedDetail = {
       ...detail,
@@ -1058,6 +1082,9 @@ describe("view helpers", () => {
     expect(document).toContain("script-src 'nonce-test-nonce'");
     expect(document).toContain('<script nonce="test-nonce">');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
+    expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
     expect(document).toContain('document.addEventListener("click"');
+    expect(document).toContain("new ResizeObserver(reportArticleHeight)");
+    expect(document).toContain("html,body{overflow:hidden}");
   });
 });

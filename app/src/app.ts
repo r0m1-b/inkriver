@@ -13,6 +13,8 @@ type ConfirmAction = (message: string) => boolean;
 type ArticleView = "all" | "favorites";
 type MainView = "articles" | "feeds";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
+const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
+const MAX_ARTICLE_FRAME_HEIGHT = 10_000_000;
 
 function escapeHtml(value: string): string {
   return value
@@ -121,8 +123,8 @@ export function prepareArticleContent(content: string): string {
 
 export function buildArticleDocument(content: string, nonce: string): string {
   const preparedContent = prepareArticleContent(content);
-  const bridgeScript = `document.addEventListener("click",function(event){var target=event.target;var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
+  const bridgeScript = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"${ARTICLE_HEIGHT_MESSAGE}",height:height},"*");}document.addEventListener("click",function(event){var target=event.target;var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
 }
 
 function favoriteIcon(isFavorite: boolean): string {
@@ -169,15 +171,20 @@ export class InkRiverApp {
     this.root.ownerDocument.defaultView?.addEventListener("message", (event) => {
       const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
       if (!frame || event.source !== frame.contentWindow) return;
-      const message = event.data as { type?: unknown; href?: unknown } | null;
-      if (
-        !message ||
-        message.type !== ARTICLE_LINK_MESSAGE ||
-        typeof message.href !== "string"
-      ) {
+      const message = event.data as { type?: unknown; href?: unknown; height?: unknown } | null;
+      if (!message) {
         return;
       }
-      void this.openExternalUrl(message.href, this.selected?.url);
+      if (message.type === ARTICLE_HEIGHT_MESSAGE && typeof message.height === "number") {
+        const height = Math.ceil(message.height);
+        if (Number.isFinite(height) && height > 0 && height <= MAX_ARTICLE_FRAME_HEIGHT) {
+          frame.style.height = `${height}px`;
+        }
+        return;
+      }
+      if (message.type === ARTICLE_LINK_MESSAGE && typeof message.href === "string") {
+        void this.openExternalUrl(message.href, this.selected?.url);
+      }
     });
   }
 
@@ -489,7 +496,7 @@ export class InkRiverApp {
       ? '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
       : "";
     const content = article.content
-      ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts"></iframe>'
+      ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts" scrolling="no"></iframe>'
       : '<p class="missing-content">Le flux ne fournit pas de contenu pour cet article.</p>';
     return `<article class="reader-article">
       <header>${renderSourceBadge(article.source)}
