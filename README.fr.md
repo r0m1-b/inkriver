@@ -10,6 +10,8 @@ Le projet comprend un programme en ligne de commande et une interface Tauri 2
 pour Linux. Les deux utilisent le même cœur Rust et le même schéma SQLite. Une
 adaptation Android est prévue dans une étape ultérieure.
 
+Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
+
 ## Fonctionnalités actuelles
 
 - chargement de plusieurs flux depuis `feeds.toml` ;
@@ -26,7 +28,11 @@ adaptation Android est prévue dans une étape ultérieure.
 - commandes distinctes pour rafraîchir, lister, lire et modifier les états
   locaux des articles ;
 - interface Linux à deux panneaux avec gestion des abonnements ;
-- distinction entre contenu complet, extrait et contenu absent ;
+- distinction entre contenu fourni par le flux, extrait du Web, résumé et
+  contenu absent ;
+- archivage manuel et rétention automatique des articles devenus inutiles ;
+- extraction sécurisée des pages complètes pour les articles incomplets des
+  autres flux ;
 - ouverture sécurisée de l'article original pour les extraits.
 
 ## Prérequis sous Ubuntu

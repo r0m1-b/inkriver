@@ -10,6 +10,8 @@ The project includes a command-line application and a Tauri 2 desktop
 application for Linux. Both use the same Rust core and SQLite schema. Android
 support is planned for a later stage.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Current features
 
 - load multiple feeds from `feeds.toml`;
@@ -25,7 +27,9 @@ support is planned for a later stage.
 - read cached articles even when some feeds are unavailable;
 - use separate commands to refresh, list, read, and update article states;
 - use a two-pane Linux interface with subscription management;
-- distinguish full content, excerpts, and missing content;
+- distinguish feed-provided, extracted, excerpt, and missing content;
+- archive articles manually and automatically retain only relevant history;
+- safely extract complete pages for incomplete articles from other feeds;
 - safely open the original article when a feed only provides an excerpt.
 
 ## Ubuntu prerequisites
