@@ -174,6 +174,9 @@ pub struct RefreshReportDto {
     pub inserted_articles: usize,
     pub updated_articles: usize,
     pub auto_archived_articles: usize,
+    pub extracted_articles: usize,
+    pub extraction_failed_articles: usize,
+    pub extraction_skipped_articles: usize,
     pub errors: Vec<FeedRefreshErrorDto>,
 }
 
@@ -185,6 +188,9 @@ impl From<RefreshReport> for RefreshReportDto {
             inserted_articles: report.inserted_articles,
             updated_articles: report.updated_articles,
             auto_archived_articles: report.auto_archived_articles,
+            extracted_articles: report.extracted_articles,
+            extraction_failed_articles: report.extraction_failed_articles,
+            extraction_skipped_articles: report.extraction_skipped_articles,
             errors: report
                 .errors
                 .into_iter()
@@ -519,6 +525,27 @@ mod tests {
         assert_eq!(detail.content.as_deref(), Some("<p>Mars est orangée.</p>"));
     }
 
+    #[test]
+    fn extracted_content_kind_is_exposed_by_the_article_dto() {
+        let dto = ArticleDetailDto::from(StoredArticle {
+            article: Article {
+                id: "journal::article".to_string(),
+                feed_id: "journal".to_string(),
+                title: Some("Extracted article".to_string()),
+                author: None,
+                published_at: None,
+                url: Some("https://journal.example/article".to_string()),
+                content: Some("<p>Complete web content</p>".to_string()),
+                content_kind: ContentKind::Extracted,
+                source: Source::Other,
+            },
+            is_read: false,
+            is_favorite: false,
+        });
+
+        assert_eq!(dto.content_kind, "extracted");
+    }
+
     #[tokio::test]
     async fn missing_article_returns_structured_error() {
         let (_directory, storage) = test_storage().await;
@@ -623,6 +650,9 @@ mod tests {
             inserted_articles: 0,
             updated_articles: 0,
             auto_archived_articles: 2,
+            extracted_articles: 3,
+            extraction_failed_articles: 1,
+            extraction_skipped_articles: 4,
             errors: vec![FeedCollectionError {
                 feed_id: "space".to_string(),
                 feed_url: "https://space.example/feed".to_string(),
@@ -635,6 +665,9 @@ mod tests {
         assert_eq!(dto.errors[0].stage, "HTTP request");
         assert_eq!(dto.errors[0].message, "offline");
         assert_eq!(dto.auto_archived_articles, 2);
+        assert_eq!(dto.extracted_articles, 3);
+        assert_eq!(dto.extraction_failed_articles, 1);
+        assert_eq!(dto.extraction_skipped_articles, 4);
     }
 
     #[tokio::test]
@@ -762,10 +795,16 @@ mod tests {
             inserted_articles: 3,
             updated_articles: 2,
             auto_archived_articles: 4,
+            extracted_articles: 1,
+            extraction_failed_articles: 2,
+            extraction_skipped_articles: 3,
             errors: Vec::new(),
         })
         .unwrap();
         assert_eq!(refresh["autoArchivedArticles"], 4);
+        assert_eq!(refresh["extractedArticles"], 1);
+        assert_eq!(refresh["extractionFailedArticles"], 2);
+        assert_eq!(refresh["extractionSkippedArticles"], 3);
         assert!(refresh.get("auto_archived_articles").is_none());
     }
 }

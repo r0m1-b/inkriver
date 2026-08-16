@@ -11,6 +11,8 @@ use std::{error::Error, fmt};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub const ARTICLE_RETENTION_DAYS: i64 = 30;
+pub const EXTRACTION_RETRY_DAYS: i64 = 7;
+pub const MAX_EXTRACTION_ATTEMPTS_PER_REFRESH: usize = 20;
 
 /// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
@@ -104,6 +106,20 @@ pub struct ArticleSummary {
 pub struct UpsertStats {
     pub inserted: usize,
     pub updated: usize,
+}
+
+/// One visible article whose original page may provide a complete body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionCandidate {
+    pub article_id: String,
+    pub url: String,
+}
+
+/// Candidates due now and the number deliberately deferred to a later refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionSelection {
+    pub candidates: Vec<ExtractionCandidate>,
+    pub skipped: usize,
 }
 
 type StoredFeedRow = (
@@ -614,8 +630,15 @@ impl Storage {
                         author = COALESCE(excluded.author, articles.author),
                         published_at = COALESCE(excluded.published_at, articles.published_at),
                         url = COALESCE(excluded.url, articles.url),
-                        content = COALESCE(excluded.content, articles.content),
+                        content = CASE
+                            WHEN excluded.content_kind = 'full' AND excluded.content IS NOT NULL THEN excluded.content
+                            WHEN articles.content_kind IN ('full', 'extracted') THEN articles.content
+                            WHEN excluded.content IS NOT NULL THEN excluded.content
+                            ELSE articles.content
+                        END,
                         content_kind = CASE
+                            WHEN excluded.content_kind = 'full' AND excluded.content IS NOT NULL THEN excluded.content_kind
+                            WHEN articles.content_kind IN ('full', 'extracted') THEN articles.content_kind
                             WHEN excluded.content IS NOT NULL THEN excluded.content_kind
                             WHEN articles.content IS NULL THEN excluded.content_kind
                             ELSE articles.content_kind
@@ -649,6 +672,136 @@ impl Storage {
             .context("Impossible de valider l'enregistrement des articles")?;
 
         Ok(stats)
+    }
+
+    /// Selects the newest extraction candidates that are due for a network attempt.
+    ///
+    /// Articles in their retry cooldown and due articles beyond the per-refresh
+    /// limit are reported as skipped. Rows without an URL are not candidates.
+    pub async fn extraction_candidates(&self, now: DateTime<Utc>) -> Result<ExtractionSelection> {
+        type CandidateRow = (String, String);
+
+        let retry_cutoff = now - chrono::Duration::days(EXTRACTION_RETRY_DAYS);
+        let total: i64 = sqlx::query_scalar(
+            r#"
+                SELECT COUNT(*)
+                FROM articles
+                INNER JOIN feeds ON feeds.id = articles.feed_id
+                WHERE feeds.is_active = 1
+                  AND feeds.platform = 'other'
+                  AND articles.is_archived = 0
+                  AND articles.content_kind IN ('excerpt', 'missing')
+                  AND articles.url IS NOT NULL
+                  AND TRIM(articles.url) <> ''
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Impossible de compter les candidats à l'extraction")?;
+        let rows: Vec<CandidateRow> = sqlx::query_as(
+            r#"
+                SELECT articles.id, articles.url
+                FROM articles
+                INNER JOIN feeds ON feeds.id = articles.feed_id
+                WHERE feeds.is_active = 1
+                  AND feeds.platform = 'other'
+                  AND articles.is_archived = 0
+                  AND articles.content_kind IN ('excerpt', 'missing')
+                  AND articles.url IS NOT NULL
+                  AND TRIM(articles.url) <> ''
+                  AND (
+                    articles.extraction_attempted_at IS NULL
+                    OR articles.extraction_attempted_url IS NULL
+                    OR articles.extraction_attempted_url <> articles.url
+                    OR articles.extraction_attempted_at <= ?
+                  )
+                ORDER BY articles.published_at IS NULL ASC,
+                         articles.published_at DESC,
+                         articles.id ASC
+                LIMIT ?
+            "#,
+        )
+        .bind(retry_cutoff)
+        .bind(MAX_EXTRACTION_ATTEMPTS_PER_REFRESH as i64)
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de sélectionner les candidats à l'extraction")?;
+        let candidates = rows
+            .into_iter()
+            .map(|(article_id, url)| ExtractionCandidate { article_id, url })
+            .collect::<Vec<_>>();
+
+        Ok(ExtractionSelection {
+            skipped: (total as usize).saturating_sub(candidates.len()),
+            candidates,
+        })
+    }
+
+    /// Persists one successful extraction without touching local article state.
+    pub async fn record_extraction_success(
+        &self,
+        article_id: &str,
+        attempted_url: &str,
+        html: &str,
+        attempted_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+                UPDATE articles
+                SET content = ?,
+                    content_kind = 'extracted',
+                    extraction_attempted_at = ?,
+                    extraction_attempted_url = ?,
+                    extraction_attempt_count = extraction_attempt_count + 1,
+                    extraction_last_error = NULL
+                WHERE id = ?
+                  AND is_archived = 0
+                  AND content_kind IN ('excerpt', 'missing')
+            "#,
+        )
+        .bind(html)
+        .bind(attempted_at)
+        .bind(attempted_url)
+        .bind(article_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("Impossible d'enregistrer l'extraction de {article_id:?}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Memorizes one failed extraction while preserving the RSS fallback.
+    pub async fn record_extraction_failure(
+        &self,
+        article_id: &str,
+        attempted_url: &str,
+        error: &str,
+        attempted_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let error = error.chars().take(1_000).collect::<String>();
+        let result = sqlx::query(
+            r#"
+                UPDATE articles
+                SET extraction_attempted_at = ?,
+                    extraction_attempted_url = ?,
+                    extraction_attempt_count = extraction_attempt_count + 1,
+                    extraction_last_error = ?
+                WHERE id = ?
+                  AND is_archived = 0
+                  AND content_kind IN ('excerpt', 'missing')
+            "#,
+        )
+        .bind(attempted_at)
+        .bind(attempted_url)
+        .bind(error)
+        .bind(article_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| {
+            format!("Impossible d'enregistrer l'échec d'extraction de {article_id:?}")
+        })?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     /// Lists all retained articles from newest to oldest, with undated entries last.
@@ -958,7 +1111,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
 
         storage.close().await;
     }
@@ -1132,6 +1285,110 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state, (false, None, None));
+    }
+
+    #[tokio::test]
+    async fn extraction_migration_preserves_articles_and_local_state() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080001_initial_schema.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080002_article_content_kind.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608120001_feed_details.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608140001_article_archiving.sql"
+            )),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO feeds (id, platform, url) VALUES ('feed', 'other', 'https://example.com/feed')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+                INSERT INTO articles (
+                    id, feed_id, title, content, source, is_read, is_favorite,
+                    content_kind, is_archived, archived_at, archive_reason
+                ) VALUES (
+                    'legacy', 'feed', 'Legacy title', '<p>legacy excerpt</p>',
+                    'other', 1, 1, 'excerpt', 1, '2026-08-15T12:00:00Z', 'manual'
+                )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608160001_article_extraction.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        type ExtractionMigrationRow = (
+            String,
+            String,
+            bool,
+            bool,
+            bool,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        );
+        let row: ExtractionMigrationRow = sqlx::query_as(
+            r#"
+                    SELECT title, content_kind, is_read, is_favorite, is_archived,
+                           archived_at, archive_reason, extraction_attempted_at,
+                           extraction_last_error, extraction_attempt_count
+                    FROM articles WHERE id = 'legacy'
+                "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                "Legacy title".to_string(),
+                "excerpt".to_string(),
+                true,
+                true,
+                true,
+                Some(Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap()),
+                Some("manual".to_string()),
+                None,
+                None,
+                0,
+            )
+        );
+        sqlx::query(
+            "INSERT INTO articles (id, feed_id, source, content_kind) VALUES ('extracted', 'feed', 'other', 'extracted')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     /// Verifies a feed import persists every configured value as active.
@@ -1517,6 +1774,229 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.article.content_kind, ContentKind::Full);
+    }
+
+    #[tokio::test]
+    async fn upsert_preserves_extracted_content_until_a_full_body_arrives() {
+        let storage = storage_with_feed().await;
+        let mut extracted = article("astronomy::extracted", "astronomy", None);
+        extracted.content = Some("Extracted web body".to_string());
+        extracted.content_kind = ContentKind::Extracted;
+        storage.upsert_articles(&[extracted.clone()]).await.unwrap();
+
+        let excerpt = Article {
+            content: Some("Short RSS excerpt".to_string()),
+            content_kind: ContentKind::Excerpt,
+            ..extracted.clone()
+        };
+        storage.upsert_articles(&[excerpt]).await.unwrap();
+        let stored = storage.get_article(&extracted.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.article.content.as_deref(),
+            Some("Extracted web body")
+        );
+        assert_eq!(stored.article.content_kind, ContentKind::Extracted);
+
+        let full = Article {
+            content: Some("Publisher supplied full body".to_string()),
+            content_kind: ContentKind::Full,
+            ..extracted
+        };
+        storage.upsert_articles(&[full]).await.unwrap();
+        let stored = storage
+            .get_article("astronomy::extracted")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.article.content.as_deref(),
+            Some("Publisher supplied full body")
+        );
+        assert_eq!(stored.article.content_kind, ContentKind::Full);
+    }
+
+    #[tokio::test]
+    async fn extraction_candidates_respect_platform_state_kind_archive_retry_and_limit() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[
+                feed("other", Platform::Other, "https://other.example/feed"),
+                feed("medium", Platform::Medium, "https://medium.example/feed"),
+                feed("inactive", Platform::Other, "https://inactive.example/feed"),
+            ])
+            .await
+            .unwrap();
+        storage.set_feed_active("inactive", false).await.unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        let mut articles = Vec::new();
+        for index in 0..=MAX_EXTRACTION_ATTEMPTS_PER_REFRESH {
+            let mut candidate = article(
+                &format!("other::{index:02}"),
+                "other",
+                Some(now - chrono::Duration::minutes(index as i64)),
+            );
+            candidate.source = Source::Other;
+            if index == MAX_EXTRACTION_ATTEMPTS_PER_REFRESH {
+                candidate.content = None;
+                candidate.content_kind = ContentKind::Missing;
+            } else {
+                candidate.content_kind = ContentKind::Excerpt;
+            }
+            articles.push(candidate);
+        }
+        for (id, feed_id, source, kind) in [
+            (
+                "medium::article",
+                "medium",
+                Source::Medium,
+                ContentKind::Excerpt,
+            ),
+            (
+                "inactive::article",
+                "inactive",
+                Source::Other,
+                ContentKind::Missing,
+            ),
+            ("other::full", "other", Source::Other, ContentKind::Full),
+        ] {
+            let mut excluded = article(id, feed_id, Some(now));
+            excluded.source = source;
+            excluded.content_kind = kind;
+            articles.push(excluded);
+        }
+        let mut archived = article("other::archived", "other", Some(now));
+        archived.source = Source::Other;
+        archived.content_kind = ContentKind::Excerpt;
+        articles.push(archived);
+        let mut without_url = article("other::without-url", "other", Some(now));
+        without_url.source = Source::Other;
+        without_url.content_kind = ContentKind::Missing;
+        without_url.content = None;
+        without_url.url = None;
+        articles.push(without_url);
+        storage.upsert_articles(&articles).await.unwrap();
+        storage
+            .archive_article("other::archived", now)
+            .await
+            .unwrap();
+
+        let selection = storage.extraction_candidates(now).await.unwrap();
+        assert_eq!(
+            selection.candidates.len(),
+            MAX_EXTRACTION_ATTEMPTS_PER_REFRESH
+        );
+        assert_eq!(selection.candidates[0].article_id, "other::00");
+        assert_eq!(selection.candidates[19].article_id, "other::19");
+        assert_eq!(selection.skipped, 1);
+
+        storage
+            .record_extraction_failure(
+                "other::00",
+                "https://articles.example/other::00",
+                "temporary failure",
+                now,
+            )
+            .await
+            .unwrap();
+        let cooldown = storage.extraction_candidates(now).await.unwrap();
+        assert!(
+            !cooldown
+                .candidates
+                .iter()
+                .any(|candidate| candidate.article_id == "other::00")
+        );
+        assert_eq!(cooldown.skipped, 1);
+
+        sqlx::query("UPDATE articles SET url = ? WHERE id = 'other::00'")
+            .bind("https://articles.example/changed")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        let changed = storage.extraction_candidates(now).await.unwrap();
+        assert_eq!(changed.candidates[0].article_id, "other::00");
+
+        sqlx::query("UPDATE articles SET url = ? WHERE id = 'other::00'")
+            .bind("https://articles.example/other::00")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        let retried = storage
+            .extraction_candidates(now + chrono::Duration::days(EXTRACTION_RETRY_DAYS))
+            .await
+            .unwrap();
+        assert_eq!(retried.candidates[0].article_id, "other::00");
+    }
+
+    #[tokio::test]
+    async fn extraction_results_preserve_fallbacks_and_local_state() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[feed("other", Platform::Other, "https://other.example/feed")])
+            .await
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        let mut success = article("other::success", "other", Some(now));
+        success.source = Source::Other;
+        success.content_kind = ContentKind::Excerpt;
+        success.content = Some("RSS fallback".to_string());
+        let mut failure = success.clone();
+        failure.id = "other::failure".to_string();
+        failure.url = Some("https://articles.example/failure".to_string());
+        storage.upsert_articles(&[success, failure]).await.unwrap();
+        storage.set_read("other::success", true).await.unwrap();
+        storage.set_favorite("other::success", true).await.unwrap();
+
+        assert!(
+            storage
+                .record_extraction_success(
+                    "other::success",
+                    "https://articles.example/other::success",
+                    "<p>Complete extracted body</p>",
+                    now,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .record_extraction_failure(
+                    "other::failure",
+                    "https://articles.example/failure",
+                    &"x".repeat(1_500),
+                    now,
+                )
+                .await
+                .unwrap()
+        );
+
+        let success = storage
+            .get_article("other::success")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(success.article.content_kind, ContentKind::Extracted);
+        assert_eq!(
+            success.article.content.as_deref(),
+            Some("<p>Complete extracted body</p>")
+        );
+        assert!(success.is_read);
+        assert!(success.is_favorite);
+        let failure = storage
+            .get_article("other::failure")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failure.article.content_kind, ContentKind::Excerpt);
+        assert_eq!(failure.article.content.as_deref(), Some("RSS fallback"));
+        let attempt: (i64, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT extraction_attempt_count, extraction_last_error, extraction_attempted_at FROM articles WHERE id = 'other::failure'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(attempt.0, 1);
+        assert_eq!(attempt.1.unwrap().chars().count(), 1_000);
+        assert_eq!(attempt.2, Some(now));
     }
 
     /// Verifies an article batch reports inserted and updated rows independently.

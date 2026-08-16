@@ -226,7 +226,9 @@ La commande `refresh` :
 5. télécharge les flux ;
 6. insère ou met à jour les articles ;
 7. applique la même rétention de 30 jours que l'application ;
-8. affiche le nombre d'articles reçus, ajoutés, mis à jour et archivés
+8. tente d'extraire les pages complètes des articles éligibles hors Medium et
+   Substack ;
+9. affiche le nombre d'articles reçus, ajoutés, mis à jour, extraits et archivés
    automatiquement.
 
 Une erreur sur un flux est écrite sur la sortie d'erreur, mais elle n'efface pas
@@ -437,6 +439,37 @@ Les tests de collecte utilisent des contenus injectés et des fixtures locales.
 Les tests SQLite utilisent des bases en mémoire ou des fichiers temporaires :
 ils ne modifient pas `inkriver.db`.
 
+### Corpus local facultatif pour l'extraction
+
+L'extracteur de contenu principal possède des fixtures synthétiques committées
+et s'exécute donc avec la suite de tests ordinaire. Un corpus plus large de
+pages tierces complètes peut être conservé localement sous `tests/pages/` ; ce
+répertoire est ignoré par Git et n'est jamais lu par les tests ordinaires.
+
+Chaque page est décrite par le fichier local `tests/pages/description.json`.
+Exécuter son test de régression explicitement ignoré avec :
+
+```bash
+cargo test --test extraction_corpus -- --ignored
+```
+
+Seuls les documents HTML enregistrés sont nécessaires. Les répertoires de
+ressources `*_files` créés par le navigateur ne sont pas lus par l'extracteur.
+
+### Extraction automatique des pages d'articles
+
+Pendant une actualisation manuelle, InkRiver peut compléter les articles des
+flux `Other` dont l'entrée RSS ne contient qu'un extrait ou aucun corps. Medium,
+Substack, les entrées RSS complètes et les articles archivés ne sont jamais
+téléchargés ainsi. Une page acceptée est stockée avec
+`content_kind = extracted` ; un échec conserve intact le contenu RSS de repli.
+
+Les téléchargements sont limités à 20 tentatives par actualisation et quatre
+requêtes simultanées, avec un délai maximal de 10 secondes, un corps limité à
+2 Mio et cinq redirections HTTP(S) validées. Les destinations privées ou
+locales sont rejetées. Après un échec, la page n'est retentée qu'au bout de sept
+jours ; une modification de son URL la rend immédiatement éligible.
+
 Organisation principale :
 
 ```text
@@ -444,6 +477,9 @@ src/config.rs   lecture et validation de feeds.toml
 src/cli.rs      arguments, commandes, rendu et codes de sortie
 src/http.rs     téléchargement HTTP asynchrone
 src/feed.rs     conversion RSS/Atom vers le modèle commun
+src/content_extractor.rs  extraction hors ligne et nettoyage du contenu principal
+src/page_http.rs  téléchargement borné des pages sur le réseau public
+src/enrichment.rs  sélection, concurrence et persistance des extractions
 src/service.rs  collecte, déduplication et tri
 src/storage.rs  stockage SQLite et états locaux
 src/refresh.rs  orchestration import → collecte → stockage

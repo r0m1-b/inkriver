@@ -154,11 +154,14 @@ fn format_refresh_report(report: &RefreshReport) -> CommandOutput {
 
     CommandOutput {
         stdout: format!(
-            "Flux actifs : {}\nArticles reçus : {}\nNouveaux articles : {}\nArticles mis à jour : {}\nArticles supprimés automatiquement : {}\nFlux en erreur : {}\n",
+            "Flux actifs : {}\nArticles reçus : {}\nNouveaux articles : {}\nArticles mis à jour : {}\nArticles extraits : {}\nExtractions en échec : {}\nExtractions différées : {}\nArticles supprimés automatiquement : {}\nFlux en erreur : {}\n",
             report.active_feeds,
             report.collected_articles,
             report.inserted_articles,
             report.updated_articles,
+            report.extracted_articles,
+            report.extraction_failed_articles,
+            report.extraction_skipped_articles,
             report.auto_archived_articles,
             report.errors.len()
         ),
@@ -464,6 +467,9 @@ mod tests {
             inserted_articles: 2,
             updated_articles: 3,
             auto_archived_articles: 1,
+            extracted_articles: 2,
+            extraction_failed_articles: 1,
+            extraction_skipped_articles: 4,
             errors: vec![FeedCollectionError {
                 feed_id: "bread".to_string(),
                 feed_url: "https://feeds.example/bread".to_string(),
@@ -481,6 +487,9 @@ mod tests {
         assert!(output.stdout.contains("Articles reçus : 5"));
         assert!(output.stdout.contains("Nouveaux articles : 2"));
         assert!(output.stdout.contains("Articles mis à jour : 3"));
+        assert!(output.stdout.contains("Articles extraits : 2"));
+        assert!(output.stdout.contains("Extractions en échec : 1"));
+        assert!(output.stdout.contains("Extractions différées : 4"));
         assert!(
             output
                 .stdout
@@ -498,11 +507,15 @@ mod tests {
             inserted_articles: 2,
             updated_articles: 0,
             auto_archived_articles: 0,
+            extracted_articles: 0,
+            extraction_failed_articles: 1,
+            extraction_skipped_articles: 0,
             errors: Vec::new(),
         });
 
         assert_eq!(output.exit_code, 0);
         assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("Extractions en échec : 1"));
     }
 
     /// Verifies list works without configuration or network access.

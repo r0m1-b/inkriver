@@ -7,10 +7,11 @@ pub enum Source {
     Other,
 }
 
-/// Describes how much article content was supplied by its feed.
+/// Describes the origin and completeness of the stored article content.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum ContentKind {
     Full,
+    Extracted,
     Excerpt,
     Missing,
     Unknown,
@@ -21,6 +22,7 @@ impl ContentKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
+            Self::Extracted => "extracted",
             Self::Excerpt => "excerpt",
             Self::Missing => "missing",
             Self::Unknown => "unknown",
@@ -34,6 +36,7 @@ impl TryFrom<&str> for ContentKind {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "full" => Ok(Self::Full),
+            "extracted" => Ok(Self::Extracted),
             "excerpt" => Ok(Self::Excerpt),
             "missing" => Ok(Self::Missing),
             "unknown" => Ok(Self::Unknown),
@@ -112,6 +115,7 @@ mod tests {
     fn content_kinds_round_trip_through_storage_values() {
         for kind in [
             ContentKind::Full,
+            ContentKind::Extracted,
             ContentKind::Excerpt,
             ContentKind::Missing,
             ContentKind::Unknown,

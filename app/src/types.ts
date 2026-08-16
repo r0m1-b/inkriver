@@ -1,5 +1,5 @@
 export type Platform = "medium" | "substack" | "other";
-export type ContentKind = "full" | "excerpt" | "missing" | "unknown";
+export type ContentKind = "full" | "extracted" | "excerpt" | "missing" | "unknown";
 
 export interface ArticleSummary {
   id: string;
@@ -55,6 +55,9 @@ export interface RefreshReport {
   insertedArticles: number;
   updatedArticles: number;
   autoArchivedArticles: number;
+  extractedArticles: number;
+  extractionFailedArticles: number;
+  extractionSkippedArticles: number;
   errors: FeedRefreshError[];
 }
 

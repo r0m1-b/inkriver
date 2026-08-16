@@ -217,8 +217,10 @@ The `refresh` command:
 5. downloads the feeds;
 6. inserts or updates articles;
 7. applies the same 30-day retention rule as the application;
-8. reports how many articles were received, inserted, updated, and automatically
-   archived.
+8. attempts to extract complete pages for eligible non-Medium/non-Substack
+   articles;
+9. reports how many articles were received, inserted, updated, extracted, and
+   automatically archived.
 
 A feed error is written to standard error but does not erase cached articles.
 The remaining feeds continue to be processed.
@@ -422,6 +424,37 @@ npm run build
 Collection tests use injected content and local fixtures. SQLite tests use
 in-memory databases or temporary files and never modify `inkriver.db`.
 
+### Optional local extraction corpus
+
+The main-content extractor has committed synthetic fixtures and therefore runs
+with the regular test suite. A larger corpus of complete third-party pages can
+be kept locally under `tests/pages/`; this directory is ignored by Git and is
+never accessed by ordinary tests.
+
+Each page is described by the local `tests/pages/description.json`. Run its
+explicitly ignored regression test with:
+
+```bash
+cargo test --test extraction_corpus -- --ignored
+```
+
+Only the saved HTML documents are required. Browser-generated `*_files`
+resource directories are not read by the extractor.
+
+### Automatic article-page extraction
+
+During a manual refresh, InkRiver can complete articles from `Other` feeds when
+their RSS entry contains only an excerpt or no body. Medium, Substack, complete
+RSS entries, and archived articles are never fetched this way. A successful
+page is stored with `content_kind = extracted`; a failure leaves the RSS
+fallback untouched.
+
+Page downloads are limited to 20 attempts per refresh and four concurrent
+requests, with a 10-second timeout, a 2 MiB body limit, and at most five
+validated HTTP(S) redirects. Private or local network destinations are
+rejected. Failed pages enter a seven-day cooldown; changing an article URL
+makes it eligible immediately.
+
 Main project structure:
 
 ```text
@@ -429,6 +462,9 @@ src/config.rs   feeds.toml loading and validation
 src/cli.rs      arguments, commands, rendering, and exit codes
 src/http.rs     asynchronous HTTP downloads
 src/feed.rs     RSS/Atom conversion to the shared model
+src/content_extractor.rs  offline main-content extraction and sanitization
+src/page_http.rs  bounded and public-network-only article page downloads
+src/enrichment.rs  extraction selection, concurrency, and persistence
 src/service.rs  collection, deduplication, and sorting
 src/storage.rs  SQLite storage and local states
 src/refresh.rs  import → collection → storage orchestration

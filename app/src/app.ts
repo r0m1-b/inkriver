@@ -83,7 +83,10 @@ export function articleSourceHost(rawUrl: string | null): string | null {
 }
 
 export function canOpenOriginal(article: ArticleDetail): boolean {
-  return Boolean(articleSourceHost(article.url) && article.contentKind !== "full");
+  return Boolean(
+    articleSourceHost(article.url) &&
+      ["excerpt", "missing", "unknown"].includes(article.contentKind),
+  );
 }
 
 export function resolveExternalArticleUrl(rawUrl: string, articleUrl?: string | null): string {
@@ -305,7 +308,7 @@ export class InkRiverApp {
   }
 
   private refreshNotice(report: RefreshReport): string {
-    const result = `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s), ${report.autoArchivedArticles} ancien(s) supprimé(s) automatiquement`;
+    const result = `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s), ${report.extractedArticles} extrait(s), ${report.extractionFailedArticles} extraction(s) en échec, ${report.extractionSkippedArticles} différée(s), ${report.autoArchivedArticles} ancien(s) supprimé(s) automatiquement`;
     return report.errors.length === 0
       ? `Actualisation terminée : ${result}.`
       : `Actualisation partielle : ${result}, ${report.errors.length} flux en erreur. Consultez la page Abonnements.`;

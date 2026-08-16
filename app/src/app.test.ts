@@ -67,6 +67,9 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       insertedArticles: 0,
       updatedArticles: 1,
       autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
       errors: [],
     })),
     setArticleRead: vi.fn(async () => undefined),
@@ -651,6 +654,9 @@ describe("InkRiverApp", () => {
         insertedArticles: 0,
         updatedArticles: 1,
         autoArchivedArticles: 1,
+        extractedArticles: 2,
+        extractionFailedArticles: 1,
+        extractionSkippedArticles: 3,
         errors: [],
       })),
     });
@@ -666,6 +672,7 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[role="status"]')?.textContent).toContain(
       "1 ancien(s) supprimé(s) automatiquement",
     );
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("2 extrait(s)");
   });
 
   it("reports a partial refresh while retaining cached articles", async () => {
@@ -676,6 +683,9 @@ describe("InkRiverApp", () => {
         insertedArticles: 1,
         updatedArticles: 0,
         autoArchivedArticles: 2,
+        extractedArticles: 0,
+        extractionFailedArticles: 1,
+        extractionSkippedArticles: 2,
         errors: [{ feedId: "bread", feedUrl: "https://bread.example", stage: "HTTP request", message: "offline" }],
       })),
     });
@@ -733,6 +743,9 @@ describe("InkRiverApp", () => {
         insertedArticles: 0,
         updatedArticles: 0,
         autoArchivedArticles: 0,
+        extractedArticles: 0,
+        extractionFailedArticles: 0,
+        extractionSkippedArticles: 0,
         errors: [{
           feedId: feed.id,
           feedUrl: feed.url,
@@ -987,11 +1000,12 @@ describe("view helpers", () => {
     expect(detectPlatform("https://substack.com.example/feed")).toBe("other");
   });
 
-  it("shows original links for excerpts, missing and legacy unknown content", () => {
+  it("shows original links only for incomplete content", () => {
     expect(canOpenOriginal(detail)).toBe(true);
     expect(canOpenOriginal({ ...detail, contentKind: "missing" })).toBe(true);
     expect(canOpenOriginal({ ...detail, contentKind: "unknown" })).toBe(true);
     expect(canOpenOriginal({ ...detail, contentKind: "full" })).toBe(false);
+    expect(canOpenOriginal({ ...detail, contentKind: "extracted" })).toBe(false);
     expect(canOpenOriginal({ ...detail, url: null })).toBe(false);
     expect(canOpenOriginal({ ...detail, url: "mailto:author@example.com" })).toBe(false);
   });

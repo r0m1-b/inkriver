@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::enrichment;
 use crate::service::{self, CollectionReport, FeedCollectionError};
 use crate::storage::{FeedRefreshFailure, Storage, UpsertStats};
 use anyhow::Result;
@@ -14,6 +15,9 @@ pub struct RefreshReport {
     pub inserted_articles: usize,
     pub updated_articles: usize,
     pub auto_archived_articles: usize,
+    pub extracted_articles: usize,
+    pub extraction_failed_articles: usize,
+    pub extraction_skipped_articles: usize,
     pub errors: Vec<FeedCollectionError>,
 }
 
@@ -81,6 +85,7 @@ async fn store_collection(
         .record_feed_refreshes(&feeds, &failures, refreshed_at)
         .await?;
     let auto_archived_articles = storage.archive_expired_read_articles(refreshed_at).await?;
+    let extraction = enrichment::enrich_articles(storage, refreshed_at).await?;
 
     Ok(RefreshReport {
         active_feeds: config.feeds.len(),
@@ -88,6 +93,9 @@ async fn store_collection(
         inserted_articles: inserted,
         updated_articles: updated,
         auto_archived_articles,
+        extracted_articles: extraction.extracted,
+        extraction_failed_articles: extraction.failed,
+        extraction_skipped_articles: extraction.skipped,
         errors,
     })
 }
@@ -341,12 +349,14 @@ mod tests {
     async fn refresh_applies_retention_and_never_restores_the_tombstone() {
         let storage = Storage::open_in_memory().await.unwrap();
         let config = Config {
-            feeds: vec![feed("astronomy", Platform::Substack)],
+            feeds: vec![feed("astronomy", Platform::Other)],
         };
         storage.import_feeds(&config.feeds).await.unwrap();
         let old_article = Article {
             published_at: Some(Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap()),
-            ..article("astronomy::old", "astronomy", Source::Substack)
+            content: Some("Old RSS excerpt".to_string()),
+            content_kind: ContentKind::Excerpt,
+            ..article("astronomy::old", "astronomy", Source::Other)
         };
         storage
             .upsert_articles(std::slice::from_ref(&old_article))
@@ -365,6 +375,9 @@ mod tests {
         .unwrap();
         assert_eq!(first.updated_articles, 1);
         assert_eq!(first.auto_archived_articles, 1);
+        assert_eq!(first.extracted_articles, 0);
+        assert_eq!(first.extraction_failed_articles, 0);
+        assert_eq!(first.extraction_skipped_articles, 0);
         assert!(storage.list_articles().await.unwrap().is_empty());
 
         let second = refresh_with_collector(&storage, &config, || async {
