@@ -7,6 +7,7 @@ import {
   detectPlatform,
   errorMessage,
   prepareArticleContent,
+  resolveArticleImageUrl,
   resolveExternalArticleUrl,
 } from "./app";
 import type { InkRiverApi } from "./api";
@@ -1331,6 +1332,113 @@ describe("InkRiverApp", () => {
     expect(opener).not.toHaveBeenCalled();
   });
 
+  it("opens article images in a reader lightbox instead of the system browser", async () => {
+    const imageDetail = {
+      ...structuredClone(detail),
+      content: '<a href="https://photos.example/full"><img src="/mars.jpg" alt="Mars au crépuscule"></a>',
+    };
+    const api = fakeApi({ getArticle: vi.fn(async () => imageDetail) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    let frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "inkriver:article-image",
+          src: "/mars.jpg",
+          alt: "Mars au crépuscule",
+          imageId: "0",
+        },
+        source: frame.contentWindow,
+      }),
+    );
+
+    const lightbox = root.querySelector<HTMLElement>(".image-lightbox")!;
+    const dialog = lightbox.querySelector<HTMLElement>('[role="dialog"]')!;
+    const image = lightbox.querySelector<HTMLImageElement>(".image-lightbox-image")!;
+    const close = lightbox.querySelector<HTMLButtonElement>(
+      '[data-action="close-image-zoom"]',
+    )!;
+    expect(lightbox.classList).toContain("is-entering");
+    expect(dialog.getAttribute("aria-label")).toBe("Image agrandie : Mars au crépuscule");
+    expect(image.getAttribute("src")).toBe("https://space.example/mars.jpg");
+    expect(image.getAttribute("alt")).toBe("Mars au crépuscule");
+    expect(close.getAttribute("title")).toBe("Fermer l’image");
+    expect(document.activeElement).toBe(close);
+    expect(opener).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    try {
+      close.click();
+      expect(root.querySelector(".image-lightbox")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".image-lightbox")).toBeNull();
+
+      frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "inkriver:article-image", src: "/mars.jpg", imageId: "0" },
+          source: frame.contentWindow,
+        }),
+      );
+      root.querySelector<HTMLElement>(".image-lightbox")!.click();
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".image-lightbox")).toBeNull();
+
+      frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "inkriver:article-image", src: "/mars.jpg", imageId: "0" },
+          source: frame.contentWindow,
+        }),
+      );
+      root.querySelector<HTMLElement>(".image-lightbox")!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".image-lightbox")).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores unsupported image sources and closes the zoom when changing article", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+
+    let frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-image", src: "http://unsafe.example/mars.jpg", imageId: "0" },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(root.querySelector(".image-lightbox")).toBeNull();
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-image", src: "https://safe.example/mars.jpg", imageId: "0" },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(root.querySelector(".image-lightbox")).not.toBeNull();
+
+    root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(root.querySelector(".image-lightbox")).toBeNull();
+    expect(root.querySelector(".reader-article")?.textContent).toContain("Observer Vénus");
+  });
+
   it("rejects non-HTTP article links and reports opener failures", async () => {
     const linkedDetail = {
       ...detail,
@@ -1412,6 +1520,22 @@ describe("view helpers", () => {
     expect(() => resolveExternalArticleUrl("relative-without-base")).toThrow("Lien invalide");
   });
 
+  it("resolves only safe article image sources", () => {
+    expect(resolveArticleImageUrl("/images/mars.jpg", detail.url)).toBe(
+      "https://space.example/images/mars.jpg",
+    );
+    expect(resolveArticleImageUrl("data:image/png;base64,AAAA")).toBe(
+      "data:image/png;base64,AAAA",
+    );
+    expect(() => resolveArticleImageUrl("http://space.example/mars.jpg")).toThrow(
+      "HTTPS ou data:",
+    );
+    expect(() =>
+      resolveArticleImageUrl("https://user:secret@space.example/mars.jpg"),
+    ).toThrow("HTTPS ou data:");
+    expect(() => resolveArticleImageUrl("/mars.jpg")).toThrow("Image invalide");
+  });
+
   it("neutralizes external frame navigation while preserving fragment links", () => {
     const content = prepareArticleContent(
       '<a href="/story" target="_blank">Story</a><a href="#notes" target="_top">Notes</a>',
@@ -1427,6 +1551,21 @@ describe("view helpers", () => {
     expect(links[1]?.hasAttribute("target")).toBe(false);
   });
 
+  it("makes article images keyboard-accessible zoom controls", () => {
+    const content = prepareArticleContent(
+      '<a href="https://photos.example/full"><img src="/mars.jpg" alt="Mars"></a>',
+    );
+    const document = new DOMParser().parseFromString(content, "text/html");
+    const image = document.querySelector<HTMLImageElement>("img")!;
+    expect(image.dataset.zoomableImage).toBe("0");
+    expect(image.tabIndex).toBe(0);
+    expect(image.getAttribute("role")).toBe("button");
+    expect(image.getAttribute("aria-label")).toBe("Agrandir l’image : Mars");
+    expect(document.querySelector("a")?.dataset.externalHref).toBe(
+      "https://photos.example/full",
+    );
+  });
+
   it("builds a nonce-protected iframe bridge for links", () => {
     const document = buildArticleDocument(
       '<a href="https://example.com/read">Read</a>',
@@ -1435,8 +1574,14 @@ describe("view helpers", () => {
     expect(document).toContain("script-src 'nonce-test-nonce'");
     expect(document).toContain('<script nonce="test-nonce">');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
+    expect(document).toContain('window.parent.postMessage({type:"inkriver:article-image"');
+    expect(document).toContain('message.type!=="inkriver:article-image-focus"');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
     expect(document).toContain('document.addEventListener("click"');
+    expect(document).toContain('document.addEventListener("keydown"');
+    expect(document.indexOf('closest("img[data-zoomable-image]")')).toBeLessThan(
+      document.indexOf('closest("a[data-external-href],a[data-internal-fragment]")'),
+    );
     expect(document).toContain("new ResizeObserver(reportArticleHeight)");
     expect(document).toContain("html,body{overflow:hidden}");
   });

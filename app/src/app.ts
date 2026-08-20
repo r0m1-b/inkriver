@@ -14,9 +14,12 @@ type ArticleView = "all" | "favorites";
 type MainView = "articles" | "feeds";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
+const ARTICLE_IMAGE_MESSAGE = "inkriver:article-image";
+const ARTICLE_IMAGE_FOCUS_MESSAGE = "inkriver:article-image-focus";
 const MAX_ARTICLE_FRAME_HEIGHT = 10_000_000;
 const NOTICE_TIMEOUT_MS = 8_000;
 const NOTICE_FADE_MS = 180;
+const IMAGE_ZOOM_FADE_MS = 180;
 const TOP_BUTTON_SHOW_RATIO = 1;
 const TOP_BUTTON_HIDE_RATIO = 0.75;
 
@@ -108,8 +111,35 @@ export function resolveExternalArticleUrl(rawUrl: string, articleUrl?: string | 
   return url.toString();
 }
 
+export function resolveArticleImageUrl(
+  rawUrl: string,
+  articleUrl?: string | null,
+): string {
+  const value = rawUrl.trim();
+  if (/^data:image\/[a-z0-9.+-]+[;,]/i.test(value)) return value;
+  let url: URL;
+  try {
+    url = articleUrl ? new URL(value, articleUrl) : new URL(value);
+  } catch {
+    throw new Error(`Image invalide : ${rawUrl}`);
+  }
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new Error("Seules les images HTTPS ou data: peuvent être agrandies.");
+  }
+  return url.toString();
+}
+
 export function prepareArticleContent(content: string): string {
   const document = new DOMParser().parseFromString(content, "text/html");
+  document.querySelectorAll<HTMLImageElement>("img[src]").forEach((image, index) => {
+    image.dataset.zoomableImage = String(index);
+    image.tabIndex = 0;
+    image.setAttribute("role", "button");
+    image.setAttribute(
+      "aria-label",
+      image.alt ? `Agrandir l’image : ${image.alt}` : "Agrandir l’image",
+    );
+  });
   document.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((link) => {
     const href = link.getAttribute("href");
     link.removeAttribute("target");
@@ -127,8 +157,8 @@ export function prepareArticleContent(content: string): string {
 
 export function buildArticleDocument(content: string, nonce: string): string {
   const preparedContent = prepareArticleContent(content);
-  const bridgeScript = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"${ARTICLE_HEIGHT_MESSAGE}",height:height},"*");}document.addEventListener("click",function(event){var target=event.target;var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
+  const bridgeScript = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"${ARTICLE_HEIGHT_MESSAGE}",height:height},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"${ARTICLE_IMAGE_MESSAGE}",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}document.addEventListener("click",function(event){var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);window.addEventListener("message",function(event){var message=event.data;if(!message||message.type!=="${ARTICLE_IMAGE_FOCUS_MESSAGE}"||typeof message.imageId!=="string")return;var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();});window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #a84d2f;outline-offset:3px}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
 }
 
 function favoriteIcon(isFavorite: boolean): string {
@@ -173,6 +203,10 @@ export class InkRiverApp {
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
   private archiveReturnFocusToFooter = false;
+  private zoomedImage: { url: string; alt: string; imageId: string } | null = null;
+  private imageZoomAppearing = false;
+  private imageZoomDismissing = false;
+  private imageZoomDismissTimer: ReturnType<typeof setTimeout> | null = null;
   private error: string | null = null;
   private notice: string | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -193,7 +227,14 @@ export class InkRiverApp {
     this.root.ownerDocument.defaultView?.addEventListener("message", (event) => {
       const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
       if (!frame || event.source !== frame.contentWindow) return;
-      const message = event.data as { type?: unknown; href?: unknown; height?: unknown } | null;
+      const message = event.data as {
+        type?: unknown;
+        href?: unknown;
+        height?: unknown;
+        src?: unknown;
+        alt?: unknown;
+        imageId?: unknown;
+      } | null;
       if (!message) {
         return;
       }
@@ -206,6 +247,18 @@ export class InkRiverApp {
       }
       if (message.type === ARTICLE_LINK_MESSAGE && typeof message.href === "string") {
         void this.openExternalUrl(message.href, this.selected?.url);
+        return;
+      }
+      if (
+        message.type === ARTICLE_IMAGE_MESSAGE &&
+        typeof message.src === "string" &&
+        typeof message.imageId === "string"
+      ) {
+        this.openArticleImage(
+          message.src,
+          typeof message.alt === "string" ? message.alt : "",
+          message.imageId,
+        );
       }
     });
   }
@@ -227,6 +280,7 @@ export class InkRiverApp {
 
   private async selectArticle(articleId: string): Promise<void> {
     if (this.selected?.id === articleId) return;
+    this.discardImageZoom();
     this.error = null;
     try {
       this.selected = await this.api.getArticle(articleId);
@@ -392,6 +446,53 @@ export class InkRiverApp {
       this.clearNotice();
       this.render();
     }, NOTICE_FADE_MS);
+  }
+
+  private discardImageZoom(): void {
+    if (this.imageZoomDismissTimer !== null) {
+      clearTimeout(this.imageZoomDismissTimer);
+      this.imageZoomDismissTimer = null;
+    }
+    this.zoomedImage = null;
+    this.imageZoomAppearing = false;
+    this.imageZoomDismissing = false;
+  }
+
+  private openArticleImage(rawUrl: string, alt: string, imageId: string): void {
+    let url: string;
+    try {
+      url = resolveArticleImageUrl(rawUrl, this.selected?.url);
+    } catch {
+      return;
+    }
+    this.discardImageZoom();
+    this.zoomedImage = { url, alt, imageId };
+    this.imageZoomAppearing = true;
+    this.render();
+  }
+
+  private closeImageZoom(): void {
+    if (!this.zoomedImage || this.imageZoomDismissing) return;
+    this.imageZoomDismissing = true;
+    this.render();
+    this.imageZoomDismissTimer = setTimeout(() => {
+      const imageId = this.zoomedImage?.imageId;
+      this.discardImageZoom();
+      this.render();
+      if (imageId !== undefined) this.restoreArticleImageFocus(imageId);
+    }, IMAGE_ZOOM_FADE_MS);
+  }
+
+  private restoreArticleImageFocus(imageId: string): void {
+    const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
+    if (!frame) return;
+    const restore = () =>
+      frame.contentWindow?.postMessage(
+        { type: ARTICLE_IMAGE_FOCUS_MESSAGE, imageId },
+        "*",
+      );
+    restore();
+    frame.addEventListener("load", restore, { once: true });
   }
 
   private updateReaderTopButton(reader: HTMLElement): void {
@@ -688,6 +789,19 @@ export class InkRiverApp {
     return `<button type="button" class="reader-top-button" data-action="reader-top" title="Revenir en haut" aria-label="Revenir en haut" aria-hidden="true" tabindex="-1">${topIcon()}</button>`;
   }
 
+  private renderImageZoom(): string {
+    if (!this.selected || !this.zoomedImage) return "";
+    const label = this.zoomedImage.alt
+      ? `Image agrandie : ${this.zoomedImage.alt}`
+      : "Image agrandie";
+    return `<div class="image-lightbox${this.imageZoomDismissing ? " is-leaving" : this.imageZoomAppearing ? " is-entering" : ""}" data-action="close-image-backdrop">
+      <section class="image-lightbox-content" role="dialog" aria-label="${escapeHtml(label)}">
+        <img class="image-lightbox-image" src="${escapeHtml(this.zoomedImage.url)}" alt="${escapeHtml(this.zoomedImage.alt)}">
+        <button type="button" class="image-lightbox-close" data-action="close-image-zoom" title="Fermer l’image" aria-label="Fermer l’image">×</button>
+      </section>
+    </div>`;
+  }
+
   private renderFeedManagement(): string {
     const feeds = this.feeds.length
       ? this.feeds
@@ -752,11 +866,12 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="status">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderReader()}</section>${this.renderReaderTopButton()}` : this.renderFeedManagement()}</main>
+      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
     this.noticeAppearing = false;
+    this.imageZoomAppearing = false;
 
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     if (timeline && timelineScrollTop !== undefined) {
@@ -776,6 +891,11 @@ export class InkRiverApp {
     this.root
       .querySelector<HTMLElement>('.archive-confirmation [data-action="cancel-archive"]')
       ?.focus();
+    if (!this.imageZoomDismissing) {
+      this.root
+        .querySelector<HTMLElement>('[data-action="close-image-zoom"]')
+        ?.focus();
+    }
   }
 
   private bindEvents(): void {
@@ -811,6 +931,18 @@ export class InkRiverApp {
     this.root
       .querySelector<HTMLElement>('[data-action="reader-top"]')
       ?.addEventListener("click", () => this.scrollReaderToTop());
+    this.root
+      .querySelector<HTMLElement>('[data-action="close-image-zoom"]')
+      ?.addEventListener("click", () => this.closeImageZoom());
+    const imageLightbox = this.root.querySelector<HTMLElement>(".image-lightbox");
+    imageLightbox?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) this.closeImageZoom();
+    });
+    imageLightbox?.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.closeImageZoom();
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="article-view"]').forEach((element) => {
       element.addEventListener("click", () =>
         this.showArticleView(element.dataset.articleView as ArticleView),
@@ -834,6 +966,7 @@ export class InkRiverApp {
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="subscriptions"]').forEach((element) => {
       element.addEventListener("click", () => {
+        this.discardImageZoom();
         this.mainView = "feeds";
         this.render();
       });

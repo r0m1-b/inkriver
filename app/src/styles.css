@@ -123,6 +123,20 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .reader-footer-button:hover { color: var(--ink); }
 .reader-footer-button.favorite.active { color: #c28b28; }
 .reader-footer-button svg { width: 22px; height: 22px; pointer-events: none; }
+.image-lightbox { position: absolute; z-index: 9; inset: 0 0 0 370px; display: grid; place-items: center; padding: 28px; background: rgb(20 18 16 / 72%); }
+.image-lightbox.is-entering { animation: image-lightbox-in 180ms ease-out both; }
+.image-lightbox.is-leaving { pointer-events: none; animation: image-lightbox-out 180ms ease-in both; }
+.image-lightbox-content { position: relative; display: grid; place-items: center; width: fit-content; max-width: 80%; max-height: 85%; }
+.image-lightbox-image { display: block; max-width: 100%; max-height: calc((100vh - 68px) * .85); object-fit: contain; border-radius: 8px; box-shadow: 0 18px 60px rgb(0 0 0 / 42%); }
+.image-lightbox-close { position: absolute; top: 10px; right: 10px; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; color: #fff; border-color: rgb(255 255 255 / 35%); border-radius: 50%; background: rgb(20 18 16 / 55%); font-size: 24px; line-height: 1; backdrop-filter: blur(5px); }
+.image-lightbox-close:hover { color: #fff; border-color: rgb(255 255 255 / 60%); background: rgb(20 18 16 / 78%); }
+@keyframes image-lightbox-in { from { opacity: 0; } }
+@keyframes image-lightbox-out { to { opacity: 0; } }
+.image-lightbox.is-entering .image-lightbox-content { animation: image-lightbox-scale-in 180ms ease-out both; }
+.image-lightbox.is-leaving .image-lightbox-content { animation: image-lightbox-scale-out 180ms ease-in both; }
+@keyframes image-lightbox-scale-in { from { transform: scale(.97); } }
+@keyframes image-lightbox-scale-out { to { transform: scale(.97); } }
+@media (prefers-reduced-motion: reduce) { .image-lightbox, .image-lightbox-content { animation: none !important; } }
 
 .feed-management { grid-column: 1 / -1; min-width: 0; overflow-y: auto; padding: 34px clamp(24px, 5vw, 72px) 64px; background: var(--paper); }
 .feed-management > header { display: flex; align-items: start; justify-content: space-between; gap: 24px; max-width: 1180px; margin: 0 auto 28px; }
