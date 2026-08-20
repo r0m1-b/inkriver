@@ -17,6 +17,8 @@ const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
 const MAX_ARTICLE_FRAME_HEIGHT = 10_000_000;
 const NOTICE_TIMEOUT_MS = 8_000;
 const NOTICE_FADE_MS = 180;
+const TOP_BUTTON_SHOW_RATIO = 1;
+const TOP_BUTTON_HIDE_RATIO = 0.75;
 
 function escapeHtml(value: string): string {
   return value
@@ -145,6 +147,10 @@ function refreshIcon(): string {
 
 function archiveIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v12H4v-12Zm-1-3h18v3H3v-3Zm6 7h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function topIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6-6 6 6M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
 export class InkRiverApp {
@@ -374,6 +380,40 @@ export class InkRiverApp {
     }, NOTICE_FADE_MS);
   }
 
+  private updateReaderTopButton(reader: HTMLElement): void {
+    const button = this.root.querySelector<HTMLButtonElement>(
+      '[data-action="reader-top"]',
+    );
+    if (!button) return;
+    const isVisible = button.classList.contains("visible");
+    const thresholdRatio = isVisible
+      ? TOP_BUTTON_HIDE_RATIO
+      : TOP_BUTTON_SHOW_RATIO;
+    const shouldBeVisible =
+      reader.clientHeight > 0 &&
+      reader.scrollTop > reader.clientHeight * thresholdRatio;
+    if (isVisible === shouldBeVisible) return;
+    button.classList.toggle("visible", shouldBeVisible);
+    button.setAttribute("aria-hidden", String(!shouldBeVisible));
+    button.tabIndex = shouldBeVisible ? 0 : -1;
+    if (!shouldBeVisible && this.root.ownerDocument.activeElement === button) {
+      button.blur();
+    }
+  }
+
+  private scrollReaderToTop(): void {
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    const button = this.root.querySelector<HTMLButtonElement>(
+      '[data-action="reader-top"]',
+    );
+    if (!reader || !button) return;
+    button.blur();
+    const reduceMotion =
+      this.root.ownerDocument.defaultView
+        ?.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    reader.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  }
+
   private async refresh(): Promise<void> {
     this.refreshing = true;
     this.error = null;
@@ -592,6 +632,11 @@ export class InkRiverApp {
     </article>`;
   }
 
+  private renderReaderTopButton(): string {
+    if (!this.selected) return "";
+    return `<button type="button" class="reader-top-button" data-action="reader-top" title="Revenir en haut" aria-label="Revenir en haut" aria-hidden="true" tabindex="-1">${topIcon()}</button>`;
+  }
+
   private renderFeedManagement(): string {
     const feeds = this.feeds.length
       ? this.feeds
@@ -648,7 +693,7 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="status">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section>` : this.renderFeedManagement()}</main>
+      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section>${this.renderReaderTopButton()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
@@ -694,6 +739,15 @@ export class InkRiverApp {
       this.noticeFocused = false;
       this.resumeNoticeTimer();
     });
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    reader?.addEventListener(
+      "scroll",
+      () => this.updateReaderTopButton(reader),
+      { passive: true },
+    );
+    this.root
+      .querySelector<HTMLElement>('[data-action="reader-top"]')
+      ?.addEventListener("click", () => this.scrollReaderToTop());
     this.root.querySelectorAll<HTMLElement>('[data-action="article-view"]').forEach((element) => {
       element.addEventListener("click", () =>
         this.showArticleView(element.dataset.articleView as ArticleView),

@@ -1076,6 +1076,95 @@ describe("InkRiverApp", () => {
     expect(frame.style.height).toBe("1235px");
   });
 
+  it("shows the Top button after one viewport and hides it below three quarters", async () => {
+    const { root } = await mounted();
+    expect(root.querySelector('[data-action="reader-top"]')).toBeNull();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    const button = root.querySelector<HTMLButtonElement>('[data-action="reader-top"]')!;
+    Object.defineProperty(reader, "clientHeight", { configurable: true, value: 600 });
+
+    expect(button.getAttribute("title")).toBe("Revenir en haut");
+    expect(button.getAttribute("aria-label")).toBe("Revenir en haut");
+    expect(button.getAttribute("aria-hidden")).toBe("true");
+    expect(button.tabIndex).toBe(-1);
+    expect(button.querySelector("svg")).not.toBeNull();
+
+    reader.scrollTop = 600;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).not.toContain("visible");
+
+    reader.scrollTop = 601;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).toContain("visible");
+    expect(button.getAttribute("aria-hidden")).toBe("false");
+    expect(button.tabIndex).toBe(0);
+
+    reader.scrollTop = 451;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).toContain("visible");
+
+    reader.scrollTop = 450;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).not.toContain("visible");
+    expect(button.getAttribute("aria-hidden")).toBe("true");
+    expect(button.tabIndex).toBe(-1);
+  });
+
+  it("scrolls the reader smoothly to the top and respects reduced motion", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    const button = root.querySelector<HTMLButtonElement>('[data-action="reader-top"]')!;
+    const scrollTo = vi.fn();
+    Object.defineProperty(reader, "scrollTo", { configurable: true, value: scrollTo });
+
+    button.click();
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "smooth" });
+
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((media: string) => ({ matches: true, media }) as MediaQueryList),
+    });
+    try {
+      button.click();
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "auto" });
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("starts with the Top button hidden when another article is opened", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    Object.defineProperty(reader, "clientHeight", { configurable: true, value: 600 });
+    reader.scrollTop = 700;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(root.querySelector(".reader-top-button")?.classList).toContain("visible");
+
+    root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(root.querySelector(".reader-top-button")?.classList).not.toContain("visible");
+    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(0);
+  });
+
   it("keeps fragment links inside the article frame", async () => {
     const linkedDetail = {
       ...detail,
