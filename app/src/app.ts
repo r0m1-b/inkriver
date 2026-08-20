@@ -162,6 +162,7 @@ export class InkRiverApp {
   private feeds: Feed[] = [];
   private selected: ArticleDetail | null = null;
   private articleView: ArticleView = "all";
+  private unreadOnly = false;
   private mainView: MainView = "articles";
   private loading = true;
   private refreshing = false;
@@ -255,6 +256,14 @@ export class InkRiverApp {
   private showArticleView(view: ArticleView): void {
     if (this.articleView === view) return;
     this.articleView = view;
+    this.render();
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    if (timeline) timeline.scrollTop = 0;
+    this.scrollSelectedArticleIntoView();
+  }
+
+  private toggleUnreadFilter(): void {
+    this.unreadOnly = !this.unreadOnly;
     this.render();
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     if (timeline) timeline.scrollTop = 0;
@@ -575,10 +584,16 @@ export class InkRiverApp {
     if (this.articles.length === 0) {
       return '<div class="state" data-testid="empty">Aucun article enregistré.<button class="text-button" data-action="add-subscription">Ajouter un abonnement</button></div>';
     }
-    const visibleArticles = this.articleView === "favorites"
+    let visibleArticles = this.articleView === "favorites"
       ? this.articles.filter((article) => article.isFavorite)
       : this.articles;
+    if (this.unreadOnly) {
+      visibleArticles = visibleArticles.filter((article) => !article.isRead);
+    }
     if (visibleArticles.length === 0) {
+      if (this.unreadOnly) {
+        return '<div class="state" data-testid="unread-empty"><strong>Aucun article non lu.</strong><span>Désactivez le filtre pour retrouver les articles lus.</span></div>';
+      }
       return '<div class="state" data-testid="favorites-empty"><strong>Aucun article favori.</strong><span>Utilisez l’étoile pour retrouver un article ici.</span></div>';
     }
     return visibleArticles
@@ -605,10 +620,18 @@ export class InkRiverApp {
 
   private renderArticleViews(): string {
     const favoriteCount = this.articles.filter((article) => article.isFavorite).length;
-    return `<nav class="timeline-tabs" aria-label="Vues des articles" role="tablist">
-      <button type="button" class="timeline-tab ${this.articleView === "all" ? "active" : ""}" data-action="article-view" data-article-view="all" role="tab" aria-selected="${this.articleView === "all"}">Tous</button>
-      <button type="button" class="timeline-tab ${this.articleView === "favorites" ? "active" : ""}" data-action="article-view" data-article-view="favorites" role="tab" aria-selected="${this.articleView === "favorites"}">Favoris <span class="tab-count">${favoriteCount}</span></button>
-    </nav>`;
+    const unreadCount = this.articles.filter(
+      (article) =>
+        !article.isRead &&
+        (this.articleView === "all" || article.isFavorite),
+    ).length;
+    return `<div class="timeline-tabs">
+      <nav class="timeline-view-tabs" aria-label="Vues des articles" role="tablist">
+        <button type="button" class="timeline-tab ${this.articleView === "all" ? "active" : ""}" data-action="article-view" data-article-view="all" role="tab" aria-selected="${this.articleView === "all"}">Tous</button>
+        <button type="button" class="timeline-tab ${this.articleView === "favorites" ? "active" : ""}" data-action="article-view" data-article-view="favorites" role="tab" aria-selected="${this.articleView === "favorites"}">Favoris <span class="tab-count">${favoriteCount}</span></button>
+      </nav>
+      <button type="button" class="timeline-filter ${this.unreadOnly ? "active" : ""}" data-action="toggle-unread-filter" title="${this.unreadOnly ? "Afficher aussi les articles lus" : "Afficher seulement les articles non lus"}" aria-label="${this.unreadOnly ? "Afficher aussi les articles lus" : "Afficher seulement les articles non lus"}" aria-pressed="${this.unreadOnly}">${readIcon(false)}<span>Non lus</span><span class="tab-count">${unreadCount}</span></button>
+    </div>`;
   }
 
   private renderReader(): string {
@@ -793,6 +816,9 @@ export class InkRiverApp {
         this.showArticleView(element.dataset.articleView as ArticleView),
       );
     });
+    this.root
+      .querySelector<HTMLElement>('[data-action="toggle-unread-filter"]')
+      ?.addEventListener("click", () => this.toggleUnreadFilter());
     this.root.querySelectorAll<HTMLElement>('[data-action="select-article"]').forEach((element) => {
       element.addEventListener("click", () => void this.selectArticle(element.dataset.articleId!));
     });
