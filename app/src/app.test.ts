@@ -87,6 +87,10 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
 async function mounted(
   api = fakeApi(),
   opener = vi.fn(async () => undefined),
@@ -615,6 +619,14 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
     expect(root.querySelector(".reader-placeholder")).not.toBeNull();
     expect(root.querySelector('[role="status"]')?.textContent).toContain("Article archivé");
+
+    const dismiss = root.querySelector<HTMLButtonElement>('[data-action="dismiss-notice"]')!;
+    expect(dismiss.getAttribute("aria-label")).toBe("Fermer la notification");
+    expect(dismiss.getAttribute("title")).toBe("Fermer la notification");
+    dismiss.click();
+    expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    expect(root.querySelector('[role="status"]')).toBeNull();
   });
 
   it("keeps the selected article visible when archiving fails", async () => {
@@ -695,6 +707,108 @@ describe("InkRiverApp", () => {
     expect(root.textContent).toContain("Actualisation partielle");
     expect(root.textContent).toContain("2 ancien(s) supprimé(s) automatiquement");
     expect(root.textContent).toContain("Observer Mars au crépuscule");
+  });
+
+  it("automatically hides a success notice after eight seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+
+      expect(root.querySelector('[role="status"]')?.textContent).toContain(
+        "Actualisation terminée",
+      );
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-entering");
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(179);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses the notice timeout while it is hovered", async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      const banner = root.querySelector<HTMLElement>(".banner.notice")!;
+      banner.dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+
+      banner.dispatchEvent(new MouseEvent("mouseleave"));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses the notice timeout while its close button has focus", async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+
+      const dismiss = root.querySelector<HTMLButtonElement>('[data-action="dismiss-notice"]')!;
+      dismiss.focus();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+
+      dismiss.blur();
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps error banners visible", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi({
+        refreshFeeds: vi.fn(async () =>
+          Promise.reject({ code: "refresh", message: "Actualisation impossible" }),
+        ),
+      });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        "Actualisation impossible",
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        "Actualisation impossible",
+      );
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("renders subscription metadata and the persisted detailed error", async () => {

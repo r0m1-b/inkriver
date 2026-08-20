@@ -15,6 +15,8 @@ type MainView = "articles" | "feeds";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
 const MAX_ARTICLE_FRAME_HEIGHT = 10_000_000;
+const NOTICE_TIMEOUT_MS = 8_000;
+const NOTICE_FADE_MS = 180;
 
 function escapeHtml(value: string): string {
   return value
@@ -161,6 +163,14 @@ export class InkRiverApp {
   private archiveConfirmationArticleId: string | null = null;
   private error: string | null = null;
   private notice: string | null = null;
+  private noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  private noticeTimerStartedAt = 0;
+  private noticeRemainingMs = NOTICE_TIMEOUT_MS;
+  private noticeHovered = false;
+  private noticeFocused = false;
+  private noticeAppearing = false;
+  private noticeDismissing = false;
+  private noticeDismissTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -291,10 +301,83 @@ export class InkRiverApp {
     if (article) await this.setArticleReadState(articleId, !article.isRead);
   }
 
+  private cancelNoticeTimer(): void {
+    if (this.noticeTimer === null) return;
+    clearTimeout(this.noticeTimer);
+    this.noticeTimer = null;
+  }
+
+  private cancelNoticeDismissTimer(): void {
+    if (this.noticeDismissTimer === null) return;
+    clearTimeout(this.noticeDismissTimer);
+    this.noticeDismissTimer = null;
+  }
+
+  private clearNotice(): void {
+    this.cancelNoticeTimer();
+    this.cancelNoticeDismissTimer();
+    this.notice = null;
+    this.noticeRemainingMs = NOTICE_TIMEOUT_MS;
+    this.noticeHovered = false;
+    this.noticeFocused = false;
+    this.noticeAppearing = false;
+    this.noticeDismissing = false;
+  }
+
+  private showNotice(message: string): void {
+    this.clearNotice();
+    this.notice = message;
+    this.noticeAppearing = true;
+    this.resumeNoticeTimer();
+  }
+
+  private pauseNoticeTimer(): void {
+    if (this.noticeTimer === null) return;
+    clearTimeout(this.noticeTimer);
+    this.noticeTimer = null;
+    this.noticeRemainingMs = Math.max(
+      0,
+      this.noticeRemainingMs - (Date.now() - this.noticeTimerStartedAt),
+    );
+  }
+
+  private resumeNoticeTimer(): void {
+    if (
+      !this.notice ||
+      this.noticeTimer !== null ||
+      this.noticeHovered ||
+      this.noticeFocused ||
+      this.noticeDismissing
+    ) return;
+    if (this.noticeRemainingMs <= 0) {
+      this.dismissNotice();
+      return;
+    }
+    this.noticeTimerStartedAt = Date.now();
+    this.noticeTimer = setTimeout(() => {
+      this.noticeTimer = null;
+      this.noticeRemainingMs = 0;
+      this.dismissNotice();
+    }, this.noticeRemainingMs);
+  }
+
+  private dismissNotice(): void {
+    if (!this.notice || this.noticeDismissing) return;
+    this.cancelNoticeTimer();
+    this.noticeHovered = false;
+    this.noticeFocused = false;
+    this.noticeDismissing = true;
+    this.render();
+    this.noticeDismissTimer = setTimeout(() => {
+      this.clearNotice();
+      this.render();
+    }, NOTICE_FADE_MS);
+  }
+
   private async refresh(): Promise<void> {
     this.refreshing = true;
     this.error = null;
-    this.notice = null;
+    this.clearNotice();
     this.render();
     try {
       const report = await this.api.refreshFeeds();
@@ -302,7 +385,7 @@ export class InkRiverApp {
         this.api.listArticles(),
         this.api.listFeeds(),
       ]);
-      this.notice = this.refreshNotice(report);
+      this.showNotice(this.refreshNotice(report));
       if (this.selected) {
         this.selected = await this.api.getArticle(this.selected.id).catch(() => null);
       }
@@ -329,7 +412,7 @@ export class InkRiverApp {
     try {
       await this.api.addFeed(url, platform);
       this.feeds = await this.api.listFeeds();
-      this.notice = "Abonnement ajouté. Utilisez Actualiser pour télécharger ses articles.";
+      this.showNotice("Abonnement ajouté. Utilisez Actualiser pour télécharger ses articles.");
       this.addSubscriptionOpen = false;
       this.mainView = "feeds";
       form.reset();
@@ -360,7 +443,7 @@ export class InkRiverApp {
 
     this.deletingFeedId = feedId;
     this.error = null;
-    this.notice = null;
+    this.clearNotice();
     this.render();
     try {
       const result = await this.api.deleteFeed(feedId);
@@ -372,7 +455,7 @@ export class InkRiverApp {
         this.api.listArticles(),
       ]);
       const label = result.deletedArticles > 1 ? "articles supprimés" : "article supprimé";
-      this.notice = `Abonnement supprimé avec ${result.deletedArticles} ${label}.`;
+      this.showNotice(`Abonnement supprimé avec ${result.deletedArticles} ${label}.`);
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
@@ -422,13 +505,13 @@ export class InkRiverApp {
     this.archiveConfirmationArticleId = null;
     this.archivingArticleId = article.id;
     this.error = null;
-    this.notice = null;
+    this.clearNotice();
     this.render();
     try {
       await this.api.archiveArticle(article.id);
       this.articles = this.articles.filter((candidate) => candidate.id !== article.id);
       this.selected = null;
-      this.notice = "Article archivé.";
+      this.showNotice("Article archivé.");
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
@@ -564,11 +647,12 @@ export class InkRiverApp {
       this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
-      <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice" role="status">${escapeHtml(this.notice)}</div>` : ""}</div>
+      <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="status">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
       <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section>` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
+    this.noticeAppearing = false;
 
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     if (timeline && timelineScrollTop !== undefined) {
@@ -587,6 +671,29 @@ export class InkRiverApp {
   }
 
   private bindEvents(): void {
+    const noticeBanner = this.root.querySelector<HTMLElement>(".banner.notice");
+    this.root
+      .querySelector<HTMLElement>('[data-action="dismiss-notice"]')
+      ?.addEventListener("click", () => this.dismissNotice());
+    noticeBanner?.addEventListener("mouseenter", () => {
+      this.noticeHovered = true;
+      this.pauseNoticeTimer();
+    });
+    noticeBanner?.addEventListener("mouseleave", () => {
+      this.noticeHovered = false;
+      this.resumeNoticeTimer();
+    });
+    noticeBanner?.addEventListener("focusin", () => {
+      this.noticeFocused = true;
+      this.pauseNoticeTimer();
+    });
+    noticeBanner?.addEventListener("focusout", (event) => {
+      const nextTarget = event.relatedTarget;
+      const view = this.root.ownerDocument.defaultView;
+      if (view && nextTarget instanceof view.Node && noticeBanner.contains(nextTarget)) return;
+      this.noticeFocused = false;
+      this.resumeNoticeTimer();
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="article-view"]').forEach((element) => {
       element.addEventListener("click", () =>
         this.showArticleView(element.dataset.articleView as ArticleView),
