@@ -560,6 +560,76 @@ describe("InkRiverApp", () => {
     );
   });
 
+  it("renders favorite, archive and source actions at the end of the article", async () => {
+    const { root, opener } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const footer = root.querySelector<HTMLElement>(".reader-footer")!;
+    const favorite = footer.querySelector<HTMLButtonElement>('[data-action="favorite"]')!;
+    const archive = footer.querySelector<HTMLButtonElement>(
+      '[data-action="archive-article"]',
+    )!;
+    const source = footer.querySelector<HTMLButtonElement>('[data-action="open-source"]')!;
+    expect(footer.getAttribute("aria-label")).toBe("Actions de fin d’article");
+    expect(footer.querySelectorAll("button")).toHaveLength(3);
+    expect(favorite.getAttribute("title")).toBe("Ajouter aux favoris");
+    expect(archive.getAttribute("title")).toBe("Archiver l’article");
+    expect(source.getAttribute("title")).toBe(
+      "Ouvrir le lien : https://space.example/mars",
+    );
+    expect(source.querySelector("svg")).not.toBeNull();
+
+    source.click();
+    await flush();
+    expect(opener).toHaveBeenCalledWith("https://space.example/mars");
+    expect(root.querySelector(".reader-article")).not.toBeNull();
+  });
+
+  it("disables the footer source action when the article URL is unsupported", async () => {
+    const unsupportedDetail = { ...structuredClone(detail), url: "mailto:reader@example.com" };
+    const api = fakeApi({ getArticle: vi.fn(async () => unsupportedDetail) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const source = root.querySelector<HTMLButtonElement>(
+      '.reader-footer [data-action="open-source"]',
+    )!;
+    expect(source.disabled).toBe(true);
+    expect(source.getAttribute("title")).toBe("Lien source indisponible");
+    source.click();
+    expect(opener).not.toHaveBeenCalled();
+  });
+
+  it("preserves the reading position when using footer actions", async () => {
+    const { root, api } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    let reader = root.querySelector<HTMLElement>(".reader")!;
+    root.querySelector<HTMLIFrameElement>(".article-content")!.style.height = "2400px";
+    reader.scrollTop = 900;
+    root.querySelector<HTMLElement>('.reader-footer [data-action="favorite"]')!.click();
+    await flush();
+
+    reader = root.querySelector<HTMLElement>(".reader")!;
+    expect(api.setArticleFavorite).toHaveBeenCalledWith("space::mars", true);
+    expect(reader.scrollTop).toBe(900);
+    expect(root.querySelectorAll('[data-action="favorite"][aria-pressed="true"]')).toHaveLength(2);
+
+    reader.scrollTop = 900;
+    root.querySelector<HTMLElement>(
+      '.reader-footer [data-action="archive-article"]',
+    )!.click();
+    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
+    root.querySelector<HTMLElement>(
+      '.archive-confirmation [data-action="cancel-archive"]',
+    )!.click();
+    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
+    expect(document.activeElement?.closest(".reader-footer")).not.toBeNull();
+  });
+
   it("opens an accessible archive dialog and honors cancellation", async () => {
     const confirmer = vi.fn(() => true);
     const mountedApp = await mounted(fakeApi(), undefined, confirmer);
@@ -998,7 +1068,12 @@ describe("InkRiverApp", () => {
     missing.root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
     expect(missing.root.querySelector(".article-source")?.textContent).toContain("Source indisponible");
-    expect(missing.root.querySelector('[data-action="open-source"]')).toBeNull();
+    expect(missing.root.querySelector('.article-source [data-action="open-source"]')).toBeNull();
+    expect(
+      missing.root.querySelector<HTMLButtonElement>(
+        '.reader-footer [data-action="open-source"]',
+      )?.disabled,
+    ).toBe(true);
     expect(missing.root.querySelector('[data-action="open-original"]')).toBeNull();
     expect(missing.opener).not.toHaveBeenCalled();
 
@@ -1009,7 +1084,12 @@ describe("InkRiverApp", () => {
     invalid.root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
     expect(invalid.root.querySelector(".article-source")?.textContent).toContain("Source non prise en charge");
-    expect(invalid.root.querySelector('[data-action="open-source"]')).toBeNull();
+    expect(invalid.root.querySelector('.article-source [data-action="open-source"]')).toBeNull();
+    expect(
+      invalid.root.querySelector<HTMLButtonElement>(
+        '.reader-footer [data-action="open-source"]',
+      )?.disabled,
+    ).toBe(true);
     expect(invalid.root.querySelector('[data-action="open-original"]')).toBeNull();
     expect(invalid.opener).not.toHaveBeenCalled();
   });

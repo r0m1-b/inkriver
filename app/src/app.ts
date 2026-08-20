@@ -153,6 +153,10 @@ function topIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6-6 6 6M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function externalLinkIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5M19 5l-9 9M18 13v6H5V6h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
 export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
@@ -167,6 +171,7 @@ export class InkRiverApp {
   private deletingFeedId: string | null = null;
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
+  private archiveReturnFocusToFooter = false;
   private error: string | null = null;
   private notice: string | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -517,8 +522,9 @@ export class InkRiverApp {
     if (this.selected?.url) await this.openExternalUrl(this.selected.url);
   }
 
-  private requestArchiveSelectedArticle(): void {
+  private requestArchiveSelectedArticle(returnFocusToFooter = false): void {
     if (!this.selected) return;
+    this.archiveReturnFocusToFooter = returnFocusToFooter;
     this.archiveConfirmationArticleId = this.selected.id;
     this.render();
   }
@@ -527,7 +533,11 @@ export class InkRiverApp {
     this.archiveConfirmationArticleId = null;
     this.render();
     this.root
-      .querySelector<HTMLElement>('[data-action="archive-article"]')
+      .querySelector<HTMLElement>(
+        this.archiveReturnFocusToFooter
+          ? '.reader-footer [data-action="archive-article"]'
+          : '.reader-actions [data-action="archive-article"]',
+      )
       ?.focus();
   }
 
@@ -629,7 +639,25 @@ export class InkRiverApp {
       <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div>
       <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}</div></header>
       ${content}
+      ${this.renderReaderFooter(article, favoritePending, archivePending)}
     </article>`;
+  }
+
+  private renderReaderFooter(
+    article: ArticleDetail,
+    favoritePending: boolean,
+    archivePending: boolean,
+  ): string {
+    const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
+    const sourceAvailable = articleSourceHost(article.url) !== null && article.url !== null;
+    const sourceAction = sourceAvailable
+      ? `Ouvrir le lien : ${article.url}`
+      : "Lien source indisponible";
+    return `<footer class="reader-footer" aria-label="Actions de fin d’article">
+      <button type="button" class="reader-footer-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
+      <button type="button" class="reader-footer-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>
+      <button type="button" class="reader-footer-button" data-action="open-source" title="${escapeHtml(sourceAction)}" aria-label="${escapeHtml(sourceAction)}" ${sourceAvailable ? "" : "disabled"}>${externalLinkIcon()}</button>
+    </footer>`;
   }
 
   private renderReaderTopButton(): string {
@@ -690,10 +718,18 @@ export class InkRiverApp {
   render(): void {
     const timelineScrollTop =
       this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
+    const previousReader = this.root.querySelector<HTMLElement>(".reader");
+    const preserveReaderPosition =
+      previousReader?.dataset.readerArticleId !== undefined &&
+      previousReader.dataset.readerArticleId === this.selected?.id;
+    const readerScrollTop = preserveReaderPosition ? previousReader.scrollTop : 0;
+    const articleFrameHeight = preserveReaderPosition
+      ? this.root.querySelector<HTMLIFrameElement>(".article-content")?.style.height
+      : undefined;
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="status">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader">${this.renderReader()}</section>${this.renderReaderTopButton()}` : this.renderFeedManagement()}</main>
+      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderReader()}</section>${this.renderReaderTopButton()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
@@ -706,10 +742,14 @@ export class InkRiverApp {
 
     const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
     if (frame && this.selected?.content) {
+      if (articleFrameHeight) frame.style.height = articleFrameHeight;
       const nonce = globalThis.crypto.randomUUID();
       frame.srcdoc = buildArticleDocument(this.selected.content, nonce);
     }
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    if (reader && preserveReaderPosition) reader.scrollTop = readerScrollTop;
     this.bindEvents();
+    if (reader) this.updateReaderTopButton(reader);
     this.root
       .querySelector<HTMLElement>('.archive-confirmation [data-action="cancel-archive"]')
       ?.focus();
@@ -789,8 +829,14 @@ export class InkRiverApp {
     });
     this.root.querySelector<HTMLElement>('[data-action="refresh"]')?.addEventListener("click", () => void this.refresh());
     this.root.querySelector<HTMLElement>('[data-action="toggle-read"]')?.addEventListener("click", () => void this.toggleReadState());
-    this.root.querySelector<HTMLElement>('[data-action="favorite"]')?.addEventListener("click", () => void this.toggleFavorite());
-    this.root.querySelector<HTMLElement>('[data-action="archive-article"]')?.addEventListener("click", () => this.requestArchiveSelectedArticle());
+    this.root.querySelectorAll<HTMLElement>('[data-action="favorite"]').forEach((element) => {
+      element.addEventListener("click", () => void this.toggleFavorite());
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="archive-article"]').forEach((element) => {
+      element.addEventListener("click", () =>
+        this.requestArchiveSelectedArticle(element.closest(".reader-footer") !== null),
+      );
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="cancel-archive"]').forEach((element) => {
       element.addEventListener("click", () => this.cancelArchiveSelectedArticle());
     });
@@ -820,7 +866,9 @@ export class InkRiverApp {
         first.focus();
       }
     });
-    this.root.querySelector<HTMLElement>('[data-action="open-source"]')?.addEventListener("click", () => void this.openSelectedOriginal());
+    this.root.querySelectorAll<HTMLElement>('[data-action="open-source"]').forEach((element) => {
+      element.addEventListener("click", () => void this.openSelectedOriginal());
+    });
     this.root.querySelector<HTMLElement>('[data-action="open-original"]')?.addEventListener("click", () => void this.openSelectedOriginal());
     this.root.querySelector<HTMLFormElement>("#feed-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
