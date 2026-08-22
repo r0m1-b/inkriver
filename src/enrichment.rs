@@ -25,6 +25,20 @@ pub async fn enrich_articles(storage: &Storage, now: DateTime<Utc>) -> Result<Ex
     .await
 }
 
+/// Downloads and extracts due article pages belonging to one subscription.
+pub async fn enrich_feed_articles(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    feed_id: &str,
+) -> Result<ExtractionReport> {
+    enrich_feed_articles_with_loader(storage, now, feed_id, |url| async move {
+        download_article_page(&url)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
 async fn enrich_articles_with_loader<F, Fut>(
     storage: &Storage,
     now: DateTime<Utc>,
@@ -34,7 +48,44 @@ where
     F: Fn(String) -> Fut + Clone,
     Fut: Future<Output = Result<DownloadedPage, String>>,
 {
-    let selection = storage.extraction_candidates(now).await?;
+    enrich_articles_from_selection(
+        storage,
+        now,
+        storage.extraction_candidates(now).await?,
+        loader,
+    )
+    .await
+}
+
+async fn enrich_feed_articles_with_loader<F, Fut>(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    feed_id: &str,
+    loader: F,
+) -> Result<ExtractionReport>
+where
+    F: Fn(String) -> Fut + Clone,
+    Fut: Future<Output = Result<DownloadedPage, String>>,
+{
+    enrich_articles_from_selection(
+        storage,
+        now,
+        storage.extraction_candidates_for_feed(now, feed_id).await?,
+        loader,
+    )
+    .await
+}
+
+async fn enrich_articles_from_selection<F, Fut>(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    selection: crate::storage::ExtractionSelection,
+    loader: F,
+) -> Result<ExtractionReport>
+where
+    F: Fn(String) -> Fut + Clone,
+    Fut: Future<Output = Result<DownloadedPage, String>>,
+{
     let mut report = ExtractionReport {
         skipped: selection.skipped,
         ..ExtractionReport::default()
@@ -294,5 +345,69 @@ mod tests {
 
         assert_eq!(report, ExtractionReport::default());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn feed_extraction_never_downloads_candidates_from_other_subscriptions() {
+        let storage = storage_with_other_feed().await;
+        storage
+            .import_feeds(&[
+                FeedConfig {
+                    id: "journal".to_string(),
+                    platform: Platform::Other,
+                    url: "https://journal.example/feed".to_string(),
+                },
+                FeedConfig {
+                    id: "second-journal".to_string(),
+                    platform: Platform::Other,
+                    url: "https://second.example/feed".to_string(),
+                },
+            ])
+            .await
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        let second = Article {
+            feed_id: "second-journal".to_string(),
+            id: "second-article".to_string(),
+            url: Some("https://second.example/article".to_string()),
+            ..article("journal-article", now)
+        };
+        storage
+            .upsert_articles(&[article("journal-article", now), second])
+            .await
+            .unwrap();
+        let downloaded_urls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_urls = Arc::clone(&downloaded_urls);
+
+        let report = enrich_feed_articles_with_loader(&storage, now, "journal", move |url| {
+            let observed_urls = Arc::clone(&observed_urls);
+            async move {
+                observed_urls.lock().unwrap().push(url.clone());
+                Ok(DownloadedPage {
+                    html: readable_page(),
+                    final_url: url,
+                })
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.extracted, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            downloaded_urls.lock().unwrap().as_slice(),
+            ["https://journal.example/journal-article"]
+        );
+        assert_eq!(
+            storage
+                .get_article("second-article")
+                .await
+                .unwrap()
+                .unwrap()
+                .article
+                .content_kind,
+            ContentKind::Excerpt
+        );
     }
 }

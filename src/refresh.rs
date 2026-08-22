@@ -32,7 +32,7 @@ pub struct RefreshReport {
 pub async fn refresh(storage: &Storage, config: &Config) -> Result<RefreshReport> {
     storage.import_feeds(&config.feeds).await?;
     let report = service::collect_articles(config).await;
-    store_collection(storage, config, report).await
+    store_collection(storage, config, report, None).await
 }
 
 /// Refreshes only subscriptions currently active in SQLite.
@@ -43,7 +43,16 @@ pub async fn refresh_active(storage: &Storage) -> Result<RefreshReport> {
         feeds: storage.active_feed_config().await?,
     };
     let report = service::collect_articles(&config).await;
-    store_collection(storage, &config, report).await
+    store_collection(storage, &config, report, None).await
+}
+
+/// Refreshes one active SQLite subscription without touching other feeds.
+pub async fn refresh_feed(storage: &Storage, feed_id: &str) -> Result<RefreshReport> {
+    let config = Config {
+        feeds: vec![storage.active_feed_config_for(feed_id).await?],
+    };
+    let report = service::collect_articles(&config).await;
+    store_collection(storage, &config, report, Some(feed_id)).await
 }
 
 #[cfg(test)]
@@ -57,13 +66,30 @@ where
     Fut: Future<Output = CollectionReport>,
 {
     storage.import_feeds(&config.feeds).await?;
-    store_collection(storage, config, collect().await).await
+    store_collection(storage, config, collect().await, None).await
+}
+
+#[cfg(test)]
+async fn refresh_feed_with_collector<F, Fut>(
+    storage: &Storage,
+    feed_id: &str,
+    collect: F,
+) -> Result<RefreshReport>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = CollectionReport>,
+{
+    let config = Config {
+        feeds: vec![storage.active_feed_config_for(feed_id).await?],
+    };
+    store_collection(storage, &config, collect().await, Some(feed_id)).await
 }
 
 async fn store_collection(
     storage: &Storage,
     config: &Config,
     report: CollectionReport,
+    maintenance_feed_id: Option<&str>,
 ) -> Result<RefreshReport> {
     let CollectionReport {
         feeds,
@@ -84,8 +110,19 @@ async fn store_collection(
     storage
         .record_feed_refreshes(&feeds, &failures, refreshed_at)
         .await?;
-    let auto_archived_articles = storage.archive_expired_read_articles(refreshed_at).await?;
-    let extraction = enrichment::enrich_articles(storage, refreshed_at).await?;
+    let (auto_archived_articles, extraction) = if let Some(feed_id) = maintenance_feed_id {
+        (
+            storage
+                .archive_expired_read_articles_for_feed(refreshed_at, feed_id)
+                .await?,
+            enrichment::enrich_feed_articles(storage, refreshed_at, feed_id).await?,
+        )
+    } else {
+        (
+            storage.archive_expired_read_articles(refreshed_at).await?,
+            enrichment::enrich_articles(storage, refreshed_at).await?,
+        )
+    };
 
     Ok(RefreshReport {
         active_feeds: config.feeds.len(),
@@ -331,6 +368,7 @@ mod tests {
                 articles: vec![article("astronomy::mars", "astronomy", Source::Substack)],
                 errors: Vec::new(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -393,5 +431,122 @@ mod tests {
         assert_eq!(second.updated_articles, 0);
         assert_eq!(second.auto_archived_articles, 0);
         assert!(storage.list_articles().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_rejects_missing_and_inactive_subscriptions_without_collecting() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[feed("astronomy", Platform::Substack)])
+            .await
+            .unwrap();
+        storage.set_feed_active("astronomy", false).await.unwrap();
+
+        let inactive = refresh_feed(&storage, "astronomy").await.unwrap_err();
+        assert!(matches!(
+            inactive.downcast_ref::<crate::storage::SubscriptionError>(),
+            Some(crate::storage::SubscriptionError::Inactive(id)) if id == "astronomy"
+        ));
+        let missing = refresh_feed(&storage, "missing").await.unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref::<crate::storage::SubscriptionError>(),
+            Some(crate::storage::SubscriptionError::NotFound(id)) if id == "missing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_stores_only_its_collection_and_scopes_retention() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let config = Config {
+            feeds: vec![
+                feed("astronomy", Platform::Substack),
+                feed("bread", Platform::Medium),
+            ],
+        };
+        storage.import_feeds(&config.feeds).await.unwrap();
+        let old_date = Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap();
+        let astronomy_old = Article {
+            published_at: Some(old_date),
+            ..article("astronomy::old", "astronomy", Source::Substack)
+        };
+        let bread_old = Article {
+            published_at: Some(old_date),
+            ..article("bread::old", "bread", Source::Medium)
+        };
+        storage
+            .upsert_articles(&[astronomy_old.clone(), bread_old.clone()])
+            .await
+            .unwrap();
+        storage.set_read(&astronomy_old.id, true).await.unwrap();
+        storage.set_read(&bread_old.id, true).await.unwrap();
+
+        let report = refresh_feed_with_collector(&storage, "astronomy", || async {
+            CollectionReport {
+                feeds: vec![FeedMetadata {
+                    id: "astronomy".to_string(),
+                    title: "Night sky notes".to_string(),
+                    description: "Practical astronomy".to_string(),
+                    author: Some("Claire".to_string()),
+                }],
+                articles: vec![article("astronomy::new", "astronomy", Source::Substack)],
+                errors: Vec::new(),
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.active_feeds, 1);
+        assert_eq!(report.inserted_articles, 1);
+        assert_eq!(report.auto_archived_articles, 1);
+        let visible = storage.list_articles().await.unwrap();
+        assert!(visible.iter().any(|item| item.article.id == "bread::old"));
+        assert!(
+            visible
+                .iter()
+                .any(|item| item.article.id == "astronomy::new")
+        );
+        assert!(
+            visible
+                .iter()
+                .all(|item| item.article.id != "astronomy::old")
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_persists_then_clears_its_feed_error() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[feed("astronomy", Platform::Substack)])
+            .await
+            .unwrap();
+
+        let failed = refresh_feed_with_collector(&storage, "astronomy", || async {
+            CollectionReport {
+                feeds: Vec::new(),
+                articles: Vec::new(),
+                errors: vec![collection_error("astronomy")],
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(failed.errors.len(), 1);
+        assert!(storage.list_feeds().await.unwrap()[0].last_error.is_some());
+
+        let recovered = refresh_feed_with_collector(&storage, "astronomy", || async {
+            CollectionReport {
+                feeds: vec![FeedMetadata {
+                    id: "astronomy".to_string(),
+                    title: "Night sky notes".to_string(),
+                    description: "Practical astronomy".to_string(),
+                    author: Some("Claire".to_string()),
+                }],
+                articles: Vec::new(),
+                errors: Vec::new(),
+            }
+        })
+        .await
+        .unwrap();
+        assert!(recovered.errors.is_empty());
+        assert!(storage.list_feeds().await.unwrap()[0].last_error.is_none());
     }
 }

@@ -6,11 +6,13 @@ use inkriver::storage::{
 use serde::Serialize;
 use std::path::Path;
 use tauri::{Manager, State};
+use tokio::sync::{Mutex, MutexGuard};
 
 const DATABASE_FILE_NAME: &str = "inkriver.db";
 
 pub struct AppState {
     storage: Storage,
+    refresh_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -222,8 +224,48 @@ fn subscription_error(error: SubscriptionError) -> ApiError {
         SubscriptionError::NotFound(id) => {
             ApiError::new("feed_not_found", format!("Abonnement introuvable : {id}"))
         }
+        SubscriptionError::Inactive(id) => ApiError::new(
+            "feed_inactive",
+            format!("Réactivez l’abonnement avant de l’actualiser : {id}"),
+        ),
         SubscriptionError::Database(message) => ApiError::new("storage", message),
     }
+}
+
+fn refresh_error(error: anyhow::Error) -> ApiError {
+    if let Some(error) = error.downcast_ref::<SubscriptionError>() {
+        return match error {
+            SubscriptionError::NotFound(id) => {
+                ApiError::new("feed_not_found", format!("Abonnement introuvable : {id}"))
+            }
+            SubscriptionError::Inactive(id) => ApiError::new(
+                "feed_inactive",
+                format!("Réactivez l’abonnement avant de l’actualiser : {id}"),
+            ),
+            SubscriptionError::Database(message) => ApiError::new("storage", message),
+            SubscriptionError::InvalidUrl(error) => ApiError::new("invalid_url", error.to_string()),
+            SubscriptionError::DuplicateActiveUrl(url) => {
+                ApiError::new("duplicate_feed", format!("Ce flux est déjà actif : {url}"))
+            }
+        };
+    }
+    ApiError::storage(error)
+}
+
+fn acquire_refresh_lock(lock: &Mutex<()>) -> Result<MutexGuard<'_, ()>, ApiError> {
+    lock.try_lock().map_err(|_| {
+        ApiError::new(
+            "refresh_in_progress",
+            "Une actualisation est déjà en cours.",
+        )
+    })
+}
+
+async fn refresh_feed_from(storage: &Storage, feed_id: &str) -> Result<RefreshReportDto, ApiError> {
+    refresh::refresh_feed(storage, feed_id)
+        .await
+        .map(Into::into)
+        .map_err(refresh_error)
 }
 
 async fn list_articles_from(storage: &Storage) -> Result<Vec<ArticleSummaryDto>, ApiError> {
@@ -363,10 +405,20 @@ async fn get_article(
 
 #[tauri::command]
 async fn refresh_feeds(state: State<'_, AppState>) -> Result<RefreshReportDto, ApiError> {
+    let _guard = acquire_refresh_lock(&state.refresh_lock)?;
     refresh::refresh_active(&state.storage)
         .await
         .map(Into::into)
         .map_err(ApiError::storage)
+}
+
+#[tauri::command]
+async fn refresh_feed(
+    state: State<'_, AppState>,
+    feed_id: String,
+) -> Result<RefreshReportDto, ApiError> {
+    let _guard = acquire_refresh_lock(&state.refresh_lock)?;
+    refresh_feed_from(&state.storage, &feed_id).await
 }
 
 #[tauri::command]
@@ -437,13 +489,17 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let storage = open_storage(&app_data_dir.join(DATABASE_FILE_NAME))?;
-            app.manage(AppState { storage });
+            app.manage(AppState {
+                storage,
+                refresh_lock: Mutex::new(()),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_articles,
             get_article,
             refresh_feeds,
+            refresh_feed,
             set_article_read,
             set_article_favorite,
             archive_article,
@@ -806,5 +862,51 @@ mod tests {
         assert_eq!(refresh["extractionFailedArticles"], 2);
         assert_eq!(refresh["extractionSkippedArticles"], 3);
         assert!(refresh.get("auto_archived_articles").is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_lock_rejects_a_second_concurrent_operation() {
+        let lock = Mutex::new(());
+        let first = acquire_refresh_lock(&lock).unwrap();
+        let error = acquire_refresh_lock(&lock).unwrap_err();
+        assert_eq!(error.code, "refresh_in_progress");
+        drop(first);
+        assert!(acquire_refresh_lock(&lock).is_ok());
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_maps_missing_and_inactive_feed_errors() {
+        let (_directory, storage) = test_storage().await;
+        assert_eq!(
+            refresh_feed_from(&storage, "missing")
+                .await
+                .unwrap_err()
+                .code,
+            "feed_not_found"
+        );
+        storage
+            .import_feeds(&[FeedConfig {
+                id: "space".to_string(),
+                platform: Platform::Substack,
+                url: "https://space.substack.com/feed".to_string(),
+            }])
+            .await
+            .unwrap();
+        storage.set_feed_active("space", false).await.unwrap();
+        assert_eq!(
+            refresh_feed_from(&storage, "space").await.unwrap_err().code,
+            "feed_inactive"
+        );
+    }
+
+    #[test]
+    fn inactive_subscription_maps_to_a_structured_error() {
+        assert_eq!(
+            subscription_error(SubscriptionError::Inactive("space".to_string())),
+            ApiError::new(
+                "feed_inactive",
+                "Réactivez l’abonnement avant de l’actualiser : space"
+            )
+        );
     }
 }

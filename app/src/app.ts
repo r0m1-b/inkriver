@@ -12,6 +12,7 @@ type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmAction = (message: string) => boolean;
 type ArticleView = "all" | "favorites";
 type MainView = "articles" | "feeds";
+type NoticeKind = "success" | "error";
 export type ArticleTextSize = "small" | "medium" | "large";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
@@ -246,6 +247,7 @@ export class InkRiverApp {
   private mainView: MainView = "articles";
   private loading = true;
   private refreshing = false;
+  private refreshingFeedId: string | null = null;
   private readonly updatingReadArticleIds = new Set<string>();
   private readonly updatingFavoriteArticleIds = new Set<string>();
   private addSubscriptionOpen = false;
@@ -259,6 +261,7 @@ export class InkRiverApp {
   private imageZoomDismissTimer: ReturnType<typeof setTimeout> | null = null;
   private error: string | null = null;
   private notice: string | null = null;
+  private noticeKind: NoticeKind = "success";
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   private noticeTimerStartedAt = 0;
   private noticeRemainingMs = NOTICE_TIMEOUT_MS;
@@ -532,6 +535,7 @@ export class InkRiverApp {
     this.cancelNoticeTimer();
     this.cancelNoticeDismissTimer();
     this.notice = null;
+    this.noticeKind = "success";
     this.noticeRemainingMs = NOTICE_TIMEOUT_MS;
     this.noticeHovered = false;
     this.noticeFocused = false;
@@ -539,9 +543,10 @@ export class InkRiverApp {
     this.noticeDismissing = false;
   }
 
-  private showNotice(message: string): void {
+  private showNotice(message: string, kind: NoticeKind = "success"): void {
     this.clearNotice();
     this.notice = message;
+    this.noticeKind = kind;
     this.noticeAppearing = true;
     this.resumeNoticeTimer();
   }
@@ -672,6 +677,7 @@ export class InkRiverApp {
 
   private async refresh(): Promise<void> {
     this.refreshing = true;
+    this.refreshingFeedId = null;
     this.error = null;
     this.clearNotice();
     this.render();
@@ -693,8 +699,53 @@ export class InkRiverApp {
     }
   }
 
+  private async refreshFeed(feedId: string): Promise<void> {
+    const feed = this.feeds.find((candidate) => candidate.id === feedId);
+    if (!feed || !feed.isActive || this.refreshing) return;
+    const feedName = feed.title ?? feed.url;
+    this.refreshing = true;
+    this.refreshingFeedId = feedId;
+    this.error = null;
+    this.clearNotice();
+    this.render();
+    try {
+      const report = await this.api.refreshFeed(feedId);
+      [this.articles, this.feeds] = await Promise.all([
+        this.api.listArticles(),
+        this.api.listFeeds(),
+      ]);
+      if (this.selected) {
+        this.selected = await this.api.getArticle(this.selected.id).catch(() => null);
+      }
+      const collectionError = report.errors[0];
+      if (collectionError) {
+        this.showNotice(
+          `Échec de l’actualisation de « ${feedName} » — ${collectionError.stage} : ${collectionError.message}`,
+          "error",
+        );
+      } else {
+        this.showNotice(
+          `« ${feedName} » actualisé : ${this.refreshResult(report)}.`,
+        );
+      }
+    } catch (error) {
+      this.showNotice(
+        `Impossible d’actualiser « ${feedName} » : ${errorMessage(error)}`,
+        "error",
+      );
+    } finally {
+      this.refreshing = false;
+      this.refreshingFeedId = null;
+      this.render();
+    }
+  }
+
+  private refreshResult(report: RefreshReport): string {
+    return `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s), ${report.extractedArticles} extrait(s), ${report.extractionFailedArticles} extraction(s) en échec, ${report.extractionSkippedArticles} différée(s), ${report.autoArchivedArticles} ancien(s) supprimé(s) automatiquement`;
+  }
+
   private refreshNotice(report: RefreshReport): string {
-    const result = `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s), ${report.extractedArticles} extrait(s), ${report.extractionFailedArticles} extraction(s) en échec, ${report.extractionSkippedArticles} différée(s), ${report.autoArchivedArticles} ancien(s) supprimé(s) automatiquement`;
+    const result = this.refreshResult(report);
     return report.errors.length === 0
       ? `Actualisation terminée : ${result}.`
       : `Actualisation partielle : ${result}, ${report.errors.length} flux en erreur. Consultez la page Abonnements.`;
@@ -708,7 +759,7 @@ export class InkRiverApp {
     try {
       await this.api.addFeed(url, platform);
       this.feeds = await this.api.listFeeds();
-      this.showNotice("Abonnement ajouté. Utilisez Actualiser pour télécharger ses articles.");
+      this.showNotice("Abonnement ajouté. Utilisez le bouton d’actualisation de sa carte pour télécharger ses articles.");
       this.addSubscriptionOpen = false;
       this.mainView = "feeds";
       form.reset();
@@ -965,7 +1016,7 @@ export class InkRiverApp {
                 <div><dt>Dernière actualisation réussie</dt><dd>${displayDateTime(feed.lastSuccessAt)}</dd></div>
               </dl>
               ${feed.lastError ? `<section class="feed-error" aria-label="Dernière erreur"><strong>Dernière erreur · ${escapeHtml(feed.lastError.stage)}</strong><time>${displayDateTime(feed.lastError.occurredAt)}</time><p>${escapeHtml(feed.lastError.message)}</p></section>` : ""}
-              <footer class="feed-actions"><button data-action="toggle-feed" data-feed-id="${escapeHtml(feed.id)}" data-next-active="${!feed.isActive}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${feed.isActive ? "Désactiver" : "Réactiver"}</button><button class="danger" data-action="delete-feed" data-feed-id="${escapeHtml(feed.id)}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${this.deletingFeedId === feed.id ? "Suppression…" : "Supprimer"}</button></footer>
+              <footer class="feed-actions"><button type="button" class="feed-refresh-button" data-action="refresh-feed" data-feed-id="${escapeHtml(feed.id)}" title="${feed.isActive ? "Actualiser ce flux" : "Réactivez ce flux pour l’actualiser"}" aria-label="${feed.isActive ? "Actualiser ce flux" : "Réactivez ce flux pour l’actualiser"}" aria-busy="${this.refreshingFeedId === feed.id}" ${!feed.isActive || this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${refreshIcon()}</button><button data-action="toggle-feed" data-feed-id="${escapeHtml(feed.id)}" data-next-active="${!feed.isActive}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${feed.isActive ? "Désactiver" : "Réactiver"}</button><button class="danger" data-action="delete-feed" data-feed-id="${escapeHtml(feed.id)}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${this.deletingFeedId === feed.id ? "Suppression…" : "Supprimer"}</button></footer>
             </article>`,
           )
           .join("")
@@ -1004,6 +1055,8 @@ export class InkRiverApp {
   render(): void {
     const timelineScrollTop =
       this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
+    const feedManagementScrollTop =
+      this.root.querySelector<HTMLElement>(".feed-management")?.scrollTop;
     const previousReader = this.root.querySelector<HTMLElement>(".reader");
     const preserveReaderPosition =
       previousReader?.dataset.readerArticleId !== undefined &&
@@ -1014,7 +1067,7 @@ export class InkRiverApp {
       : undefined;
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
-      <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="status">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
+      <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="${this.noticeKind === "error" ? "alert" : "status"}">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
       <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
@@ -1025,6 +1078,11 @@ export class InkRiverApp {
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     if (timeline && timelineScrollTop !== undefined) {
       timeline.scrollTop = timelineScrollTop;
+    }
+    const feedManagement =
+      this.root.querySelector<HTMLElement>(".feed-management");
+    if (feedManagement && feedManagementScrollTop !== undefined) {
+      feedManagement.scrollTop = feedManagementScrollTop;
     }
 
     const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
@@ -1146,6 +1204,9 @@ export class InkRiverApp {
       this.render();
     });
     this.root.querySelector<HTMLElement>('[data-action="refresh"]')?.addEventListener("click", () => void this.refresh());
+    this.root.querySelectorAll<HTMLElement>('[data-action="refresh-feed"]').forEach((element) => {
+      element.addEventListener("click", () => void this.refreshFeed(element.dataset.feedId!));
+    });
     this.root.querySelector<HTMLElement>('[data-action="toggle-read"]')?.addEventListener("click", () => void this.toggleReadState());
     this.root.querySelectorAll<HTMLElement>('[data-action="favorite"]').forEach((element) => {
       element.addEventListener("click", () => void this.toggleFavorite());

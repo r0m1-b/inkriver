@@ -63,6 +63,7 @@ pub enum SubscriptionError {
     InvalidUrl(FeedUrlError),
     DuplicateActiveUrl(String),
     NotFound(String),
+    Inactive(String),
     Database(String),
 }
 
@@ -72,6 +73,7 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidUrl(error) => error.fmt(formatter),
             Self::DuplicateActiveUrl(url) => write!(formatter, "Feed URL is already active: {url}"),
             Self::NotFound(id) => write!(formatter, "Feed not found: {id}"),
+            Self::Inactive(id) => write!(formatter, "Feed is inactive: {id}"),
             Self::Database(message) => write!(formatter, "SQLite subscription error: {message}"),
         }
     }
@@ -517,6 +519,28 @@ impl Storage {
             .collect()
     }
 
+    /// Returns one active subscription in the configuration shape used by collection.
+    pub async fn active_feed_config_for(
+        &self,
+        feed_id: &str,
+    ) -> std::result::Result<FeedConfig, SubscriptionError> {
+        let feed = self
+            .list_feeds()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+            .into_iter()
+            .find(|feed| feed.id == feed_id)
+            .ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
+        if !feed.is_active {
+            return Err(SubscriptionError::Inactive(feed_id.to_string()));
+        }
+        Ok(FeedConfig {
+            id: feed.id,
+            platform: feed.platform,
+            url: feed.url,
+        })
+    }
+
     /// Persists metadata and the latest success or failure for each attempted feed.
     ///
     /// A successful result clears the previous error. A failed result retains the
@@ -679,6 +703,23 @@ impl Storage {
     /// Articles in their retry cooldown and due articles beyond the per-refresh
     /// limit are reported as skipped. Rows without an URL are not candidates.
     pub async fn extraction_candidates(&self, now: DateTime<Utc>) -> Result<ExtractionSelection> {
+        self.extraction_candidates_scoped(now, None).await
+    }
+
+    /// Selects due extraction candidates belonging to one active feed.
+    pub async fn extraction_candidates_for_feed(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: &str,
+    ) -> Result<ExtractionSelection> {
+        self.extraction_candidates_scoped(now, Some(feed_id)).await
+    }
+
+    async fn extraction_candidates_scoped(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: Option<&str>,
+    ) -> Result<ExtractionSelection> {
         type CandidateRow = (String, String);
 
         let retry_cutoff = now - chrono::Duration::days(EXTRACTION_RETRY_DAYS);
@@ -693,8 +734,11 @@ impl Storage {
                   AND articles.content_kind IN ('excerpt', 'missing')
                   AND articles.url IS NOT NULL
                   AND TRIM(articles.url) <> ''
+                  AND (? IS NULL OR articles.feed_id = ?)
             "#,
         )
+        .bind(feed_id)
+        .bind(feed_id)
         .fetch_one(&self.pool)
         .await
         .context("Impossible de compter les candidats à l'extraction")?;
@@ -709,6 +753,7 @@ impl Storage {
                   AND articles.content_kind IN ('excerpt', 'missing')
                   AND articles.url IS NOT NULL
                   AND TRIM(articles.url) <> ''
+                  AND (? IS NULL OR articles.feed_id = ?)
                   AND (
                     articles.extraction_attempted_at IS NULL
                     OR articles.extraction_attempted_url IS NULL
@@ -721,6 +766,8 @@ impl Storage {
                 LIMIT ?
             "#,
         )
+        .bind(feed_id)
+        .bind(feed_id)
         .bind(retry_cutoff)
         .bind(MAX_EXTRACTION_ATTEMPTS_PER_REFRESH as i64)
         .fetch_all(&self.pool)
@@ -974,6 +1021,24 @@ impl Storage {
 
     /// Archives old read articles that are not favorites and releases their bodies.
     pub async fn archive_expired_read_articles(&self, now: DateTime<Utc>) -> Result<usize> {
+        self.archive_expired_read_articles_scoped(now, None).await
+    }
+
+    /// Archives expired read articles belonging to one subscription only.
+    pub async fn archive_expired_read_articles_for_feed(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: &str,
+    ) -> Result<usize> {
+        self.archive_expired_read_articles_scoped(now, Some(feed_id))
+            .await
+    }
+
+    async fn archive_expired_read_articles_scoped(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: Option<&str>,
+    ) -> Result<usize> {
         let cutoff = now - chrono::Duration::days(ARTICLE_RETENTION_DAYS);
         let result = sqlx::query(
             r#"
@@ -988,10 +1053,13 @@ impl Storage {
                   AND is_favorite = 0
                   AND published_at IS NOT NULL
                   AND published_at < ?
+                  AND (? IS NULL OR feed_id = ?)
             "#,
         )
         .bind(now)
         .bind(cutoff)
+        .bind(feed_id)
+        .bind(feed_id)
         .execute(&self.pool)
         .await
         .context("Impossible d'archiver les anciens articles lus")?;

@@ -35,8 +35,11 @@ button.danger:hover { color: #fff; border-color: #9b2f27; background: #9b2f27; }
 .refresh-button { display: grid; place-items: center; width: 42px; height: 42px; padding: 9px; border-radius: 50%; }
 .refresh-button svg { width: 22px; height: 22px; pointer-events: none; }
 .refresh-button[aria-busy="true"] svg { animation: refresh-spin .8s linear infinite; }
+.feed-refresh-button { display: grid; place-items: center; width: 38px; height: 38px; padding: 8px; border-radius: 50%; }
+.feed-refresh-button svg { width: 20px; height: 20px; pointer-events: none; }
+.feed-refresh-button[aria-busy="true"] svg { animation: refresh-spin .8s linear infinite; }
 @keyframes refresh-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .refresh-button[aria-busy="true"] svg { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .refresh-button[aria-busy="true"] svg, .feed-refresh-button[aria-busy="true"] svg { animation: none; } }
 .main-navigation { display: flex; align-self: stretch; gap: 4px; }
 .main-navigation button { align-self: center; color: var(--muted); border-color: transparent; background: transparent; font-weight: 700; }
 .main-navigation button:hover { color: var(--ink); background: var(--wash); }
@@ -45,9 +48,10 @@ button.danger:hover { color: #fff; border-color: #9b2f27; background: #9b2f27; }
 .banner { padding: 11px 14px 11px 18px; border: 1px solid; border-radius: 11px; box-shadow: 0 10px 28px rgb(41 38 33 / 16%); font-size: 14px; pointer-events: auto; }
 .banner.error { color: #812c25; background: #f8dfda; border-color: #e9b8af; }
 .banner.notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #455d33; background: #e7efdd; border-color: #c9d8b5; }
+.banner.notice.error-notice { color: #812c25; background: #f8dfda; border-color: #e9b8af; }
 .banner.notice.is-entering { animation: notice-fade-in 180ms ease-out both; }
 .banner.notice.is-leaving { pointer-events: none; animation: notice-fade-out 180ms ease-in both; }
-.banner.notice [role="status"] { flex: 1; }
+.banner.notice > span { flex: 1; }
 .banner-dismiss { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; padding: 0; color: inherit; border-color: transparent; background: transparent; font-size: 21px; line-height: 1; }
 .banner-dismiss:hover { color: #2f4521; border-color: transparent; background: rgb(69 93 51 / 10%); }
 .banners:empty { display: none; }

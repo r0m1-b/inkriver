@@ -117,7 +117,12 @@ its URL, author, description, latest publication, last successful refresh, and
 most recent detailed error. This status is stored in SQLite and remains visible
 after restarting InkRiver. Disabling and deleting actions are available on this
 page; **Add subscription** opens a separate dialog containing only the add form.
-Use **Refresh** to download articles and update these details.
+Use the top **Refresh** action to update every active subscription, or the
+circular refresh action on an active subscription card to update that feed
+only. A newly added subscription is not downloaded automatically. Individual
+refresh errors appear briefly in a red notification and remain available in
+the corresponding card with their complete details. Disabled feeds must be
+reactivated before they can be refreshed.
 
 Opening an unread article automatically marks it as read. The reading panel
 shows the current state and lets you explicitly mark the article as read or
@@ -136,9 +141,12 @@ interface. InkRiver keeps a small database tombstone so a later refresh cannot
 recreate it, but removes the stored article body.
 
 On application startup and after every refresh, InkRiver applies a fixed
-30-day retention rule. It automatically archives only articles that are read,
-not favorites, have a publication date, and are strictly older than 30 days.
-Unread, favorite, undated, and exactly 30-day-old articles are preserved.
+30-day retention rule. A refresh of one subscription limits this maintenance,
+including article-page extraction, to that subscription; a global refresh
+processes every active feed. The rule automatically archives only articles
+that are read, not favorites, have a publication date, and are strictly older
+than 30 days. Unread, favorite, undated, and exactly 30-day-old articles are
+preserved.
 
 HTTP(S) links contained in an article open in the system browser instead of
 navigating inside InkRiver. Relative links are resolved from the article URL.

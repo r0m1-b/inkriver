@@ -12,6 +12,7 @@ export interface InkRiverApi {
   listArticles(): Promise<ArticleSummary[]>;
   getArticle(articleId: string): Promise<ArticleDetail>;
   refreshFeeds(): Promise<RefreshReport>;
+  refreshFeed(feedId: string): Promise<RefreshReport>;
   setArticleRead(articleId: string, isRead: boolean): Promise<void>;
   setArticleFavorite(articleId: string, isFavorite: boolean): Promise<void>;
   archiveArticle(articleId: string): Promise<void>;
@@ -25,6 +26,7 @@ export const tauriApi: InkRiverApi = {
   listArticles: () => invoke("list_articles"),
   getArticle: (articleId) => invoke("get_article", { articleId }),
   refreshFeeds: () => invoke("refresh_feeds"),
+  refreshFeed: (feedId) => invoke("refresh_feed", { feedId }),
   setArticleRead: (articleId, isRead) =>
     invoke("set_article_read", { articleId, isRead }),
   setArticleFavorite: (articleId, isFavorite) =>

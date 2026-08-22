@@ -122,8 +122,12 @@ actualisation réussie et sa dernière erreur détaillée. Cet état est conserv
 dans SQLite et reste visible après un redémarrage d'InkRiver. Les actions de
 désactivation et de suppression se trouvent sur cette page ; **Ajouter un
 abonnement** ouvre une fenêtre séparée contenant uniquement le formulaire
-d'ajout. Utiliser **Actualiser** pour télécharger les articles et mettre à jour
-ces informations.
+d'ajout. L'action **Actualiser** de l'en-tête met à jour tous les abonnements
+actifs ; l'action circulaire de chaque carte active ne rafraîchit que ce flux.
+Un abonnement nouvellement ajouté n'est jamais téléchargé automatiquement. Les
+erreurs individuelles apparaissent brièvement dans une notification rouge et
+restent consultables en détail dans la carte correspondante. Un flux désactivé
+doit être réactivé avant son actualisation.
 
 L'ouverture d'un article non lu le marque automatiquement comme lu. Le panneau
 de lecture affiche son état courant et permet de le marquer explicitement comme
@@ -144,10 +148,12 @@ base afin qu'un rafraîchissement ultérieur ne recrée pas l'article, mais effa
 son corps enregistré.
 
 Au démarrage de l'application et après chaque rafraîchissement, InkRiver applique
-une rétention fixe de 30 jours. Seuls les articles lus, non favoris, possédant une
-date de publication et strictement plus vieux que 30 jours sont archivés
-automatiquement. Les articles non lus, favoris, sans date ou vieux d'exactement
-30 jours sont conservés.
+une rétention fixe de 30 jours. L'actualisation d'un abonnement limite cette
+maintenance, y compris l'extraction des pages d'articles, à cet abonnement ;
+l'actualisation globale traite tous les flux actifs. Seuls les articles lus, non
+favoris, possédant une date de publication et strictement plus vieux que 30 jours
+sont archivés automatiquement. Les articles non lus, favoris, sans date ou vieux
+d'exactement 30 jours sont conservés.
 
 Les liens HTTP(S) contenus dans un article s'ouvrent dans le navigateur système
 au lieu de naviguer dans InkRiver. Les liens relatifs sont résolus depuis l'URL

@@ -79,6 +79,17 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       extractionSkippedArticles: 0,
       errors: [],
     })),
+    refreshFeed: vi.fn(async (): Promise<RefreshReport> => ({
+      activeFeeds: 1,
+      collectedArticles: 1,
+      insertedArticles: 1,
+      updatedArticles: 0,
+      autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
+      errors: [],
+    })),
     setArticleRead: vi.fn(async () => undefined),
     setArticleFavorite: vi.fn(async () => undefined),
     archiveArticle: vi.fn(async () => undefined),
@@ -1115,9 +1126,202 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.addFeed).toHaveBeenCalledWith("https://notes.medium.com/feed", "medium");
     expect(api.refreshFeeds).not.toHaveBeenCalled();
+    expect(api.refreshFeed).not.toHaveBeenCalled();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(
+      "bouton d’actualisation de sa carte",
+    );
     root.querySelector<HTMLElement>('[data-action="toggle-feed"]')!.click();
     await flush();
     expect(api.setFeedActive).toHaveBeenCalledWith("stable-feed-id", false);
+  });
+
+  it("renders an accessible per-feed refresh button and disables it for inactive feeds", async () => {
+    const inactiveFeed: Feed = {
+      ...structuredClone(feed),
+      id: "inactive-feed",
+      url: "https://inactive.example/feed",
+      isActive: false,
+    };
+    const api = fakeApi({
+      listFeeds: vi.fn(async () => [structuredClone(feed), inactiveFeed]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    const activeButton = root.querySelector<HTMLButtonElement>(
+      '[data-feed-card-id="stable-feed-id"] [data-action="refresh-feed"]',
+    )!;
+    const inactiveButton = root.querySelector<HTMLButtonElement>(
+      '[data-feed-card-id="inactive-feed"] [data-action="refresh-feed"]',
+    )!;
+    expect(activeButton.title).toBe("Actualiser ce flux");
+    expect(activeButton.getAttribute("aria-label")).toBe("Actualiser ce flux");
+    expect(activeButton.textContent?.trim()).toBe("");
+    expect(activeButton.disabled).toBe(false);
+    expect(inactiveButton.disabled).toBe(true);
+    expect(inactiveButton.title).toContain("Réactivez");
+  });
+
+  it("refreshes one feed, reloads the cache and remains on subscription management", async () => {
+    const refreshedFeed: Feed = {
+      ...structuredClone(feed),
+      lastSuccessAt: "2026-08-22T12:00:00Z",
+    };
+    const listFeeds = vi
+      .fn<InkRiverApi["listFeeds"]>()
+      .mockResolvedValueOnce([structuredClone(feed)])
+      .mockResolvedValueOnce([refreshedFeed]);
+    const listArticles = vi
+      .fn<InkRiverApi["listArticles"]>()
+      .mockResolvedValueOnce([structuredClone(summary)])
+      .mockResolvedValueOnce([structuredClone(summary), structuredClone(secondSummary)]);
+    const api = fakeApi({ listFeeds, listArticles });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>('[data-action="refresh-feed"]')!.click();
+    await flush();
+
+    expect(api.refreshFeed).toHaveBeenCalledWith(feed.id);
+    expect(api.refreshFeeds).not.toHaveBeenCalled();
+    expect(listFeeds).toHaveBeenCalledTimes(2);
+    expect(listArticles).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(
+      "« Carnet du ciel » actualisé : 1 nouveau(x)",
+    );
+  });
+
+  it("spins only the selected feed button and blocks every refresh while it runs", async () => {
+    let finishRefresh!: (report: RefreshReport) => void;
+    const refreshFeed = vi.fn<InkRiverApi["refreshFeed"]>(
+      () => new Promise((resolve) => { finishRefresh = resolve; }),
+    );
+    const secondFeed: Feed = {
+      ...structuredClone(feed),
+      id: "second-feed",
+      url: "https://second.example/feed",
+    };
+    const api = fakeApi({
+      refreshFeed,
+      listFeeds: vi.fn(async () => [structuredClone(feed), secondFeed]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>(
+      '[data-feed-card-id="stable-feed-id"] [data-action="refresh-feed"]',
+    )!.click();
+    await flushMicrotasks();
+
+    const buttons = Array.from(
+      root.querySelectorAll<HTMLButtonElement>('[data-action="refresh-feed"]'),
+    );
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(buttons[0]?.getAttribute("aria-busy")).toBe("true");
+    expect(buttons[1]?.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.disabled).toBe(true);
+
+    finishRefresh({
+      activeFeeds: 1,
+      collectedArticles: 0,
+      insertedArticles: 0,
+      updatedArticles: 0,
+      autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
+      errors: [],
+    });
+    await flush();
+    expect(root.querySelector('[data-action="refresh-feed"]')?.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("preserves subscription scrolling throughout a targeted refresh", async () => {
+    let finishRefresh!: (report: RefreshReport) => void;
+    const api = fakeApi({
+      refreshFeed: vi.fn(
+        () => new Promise<RefreshReport>((resolve) => { finishRefresh = resolve; }),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>(".feed-management")!.scrollTop = 640;
+
+    root.querySelector<HTMLElement>('[data-action="refresh-feed"]')!.click();
+    await flushMicrotasks();
+    expect(root.querySelector<HTMLElement>(".feed-management")?.scrollTop).toBe(640);
+
+    finishRefresh({
+      activeFeeds: 1,
+      collectedArticles: 1,
+      insertedArticles: 0,
+      updatedArticles: 1,
+      autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
+      errors: [],
+    });
+    await flush();
+    expect(root.querySelector<HTMLElement>(".feed-management")?.scrollTop).toBe(640);
+  });
+
+  it("shows a dismissible detailed error toast and persists the error on the feed card", async () => {
+    vi.useFakeTimers();
+    try {
+      const failedFeed: Feed = {
+        ...structuredClone(feed),
+        lastError: {
+          stage: "HTTP request",
+          message: "Connexion refusée",
+          occurredAt: "2026-08-22T12:00:00Z",
+        },
+      };
+      const listFeeds = vi
+        .fn<InkRiverApi["listFeeds"]>()
+        .mockResolvedValueOnce([structuredClone(feed)])
+        .mockResolvedValueOnce([failedFeed]);
+      const api = fakeApi({
+        listFeeds,
+        refreshFeed: vi.fn(async () => ({
+          activeFeeds: 1,
+          collectedArticles: 0,
+          insertedArticles: 0,
+          updatedArticles: 0,
+          autoArchivedArticles: 0,
+          extractedArticles: 0,
+          extractionFailedArticles: 0,
+          extractionSkippedArticles: 0,
+          errors: [{
+            feedId: feed.id,
+            feedUrl: feed.url,
+            stage: "HTTP request",
+            message: "Connexion refusée",
+          }],
+        })),
+      });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+      root.querySelector<HTMLElement>('[data-action="refresh-feed"]')!.click();
+      await flushMicrotasks();
+
+      const toast = root.querySelector<HTMLElement>(".banner.error-notice");
+      expect(toast?.querySelector('[role="alert"]')?.textContent).toContain(
+        "HTTP request : Connexion refusée",
+      );
+      expect(root.querySelector(".feed-error")?.textContent).toContain("Connexion refusée");
+      expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+      expect(root.querySelector('[data-action="dismiss-notice"]')).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(root.querySelector(".banner.error-notice")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".banner.error-notice")).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("cancels feed deletion without changing cached data", async () => {
