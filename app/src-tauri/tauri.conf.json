@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "InkRiver",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "io.github.r0m1-b.inkriver",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -11,7 +11,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; frame-src 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'sha256-X9uP4ATgOR+t0SnpN8j14L1YqawxW54jpnjiw5UzjEQ='; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; frame-src 'self'"
     },
     "windows": [
       {

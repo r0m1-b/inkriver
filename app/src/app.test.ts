@@ -1,5 +1,9 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import tauriConfig from "../src-tauri/tauri.conf.json";
 import {
+  ARTICLE_BRIDGE_CSP_HASH,
+  ARTICLE_BRIDGE_SCRIPT,
   InkRiverApp,
   articleSourceHost,
   buildArticleDocument,
@@ -2028,14 +2032,21 @@ describe("view helpers", () => {
     );
   });
 
-  it("builds a nonce-protected iframe bridge for links and text sizing", () => {
+  it("builds a hash-protected iframe bridge for links and text sizing", () => {
     const document = buildArticleDocument(
       '<a href="https://example.com/read">Read</a>',
-      "test-nonce",
       "small",
     );
-    expect(document).toContain("script-src 'nonce-test-nonce'");
-    expect(document).toContain('<script nonce="test-nonce">');
+    const computedHash = `sha256-${createHash("sha256")
+      .update(ARTICLE_BRIDGE_SCRIPT, "utf8")
+      .digest("base64")}`;
+    expect(computedHash).toBe(ARTICLE_BRIDGE_CSP_HASH);
+    expect(document).toContain(`script-src '${ARTICLE_BRIDGE_CSP_HASH}'`);
+    expect(document).toContain(`<script>${ARTICLE_BRIDGE_SCRIPT}</script>`);
+    expect(document).not.toContain("nonce=");
+    expect(tauriConfig.app.security.csp).toContain(
+      `script-src 'self' '${ARTICLE_BRIDGE_CSP_HASH}'`,
+    );
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-image"');
     expect(document).toContain('message.type==="inkriver:article-image-focus"');

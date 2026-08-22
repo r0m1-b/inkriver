@@ -2,6 +2,18 @@
 
 All notable changes to InkRiver are documented in this file.
 
+## [0.3.1] - 2026-08-22
+
+### Fixed
+
+- Restored complete article sizing, image zoom, link handling, and text-size
+  controls in packaged Linux applications.
+
+### Security
+
+- The isolated article frame bridge is authorized by its exact SHA-256 CSP
+  hash instead of enabling arbitrary inline scripts.
+
 ## [0.3.0] - 2026-08-22
 
 ### Added
@@ -56,6 +68,7 @@ All notable changes to InkRiver are documented in this file.
   subscription management, read and favorite states, detailed feed errors, and
   external links opened in the system browser.
 
+[0.3.1]: https://github.com/r0m1-b/inkriver/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/r0m1-b/inkriver/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/r0m1-b/inkriver/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/r0m1-b/inkriver/releases/tag/v0.1.0
