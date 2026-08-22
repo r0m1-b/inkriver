@@ -134,8 +134,10 @@ with the cached website logo of another RSS feed. A generic RSS icon remains
 the fallback when no usable website logo is available. The brand vectors come
 from Simple Icons v16.21.0; Medium and Substack retain ownership of their
 respective trademarks.
-The **All** and **Favorites** tabs above the timeline provide an immediate,
-offline view of starred articles while keeping the same reading panel.
+The mutually exclusive **All**, **Favorites**, and **Unread** tabs above the
+timeline display respectively every article, every starred article regardless
+of read state, or every unread article. Filtering remains entirely offline and
+keeps the same reading panel.
 
 The reading panel also provides an archive icon. After mandatory confirmation,
 the article disappears from every list and cannot be restored from the current

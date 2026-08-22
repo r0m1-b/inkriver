@@ -199,62 +199,61 @@ describe("InkRiverApp", () => {
     expect(root.querySelector("[data-article-row-id]")).toBeNull();
   });
 
-  it("toggles the unread-only filter without calling the backend", async () => {
+  it("switches exclusively between all, favorites, and unread without calling the backend", async () => {
     const api = fakeApi({
       listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
     });
     const { root } = await mounted(api);
     const timeline = root.querySelector<HTMLElement>(".timeline")!;
-    let filter = root.querySelector<HTMLButtonElement>(
-      '[data-action="toggle-unread-filter"]',
-    )!;
+    const activeViews = () =>
+      Array.from(root.querySelectorAll('[data-action="article-view"]'))
+        .filter((button) => button.getAttribute("aria-selected") === "true")
+        .map((button) => (button as HTMLElement).dataset.articleView);
 
-    expect(filter.getAttribute("aria-pressed")).toBe("false");
-    expect(filter.getAttribute("title")).toBe("Afficher seulement les articles non lus");
-    expect(filter.textContent).toContain("Non lus");
-    expect(filter.textContent).toContain("1");
+    expect(activeViews()).toEqual(["all"]);
+    expect(root.querySelector('[data-article-view="unread"]')?.textContent).toContain("1");
     expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
     expect(root.querySelector('[data-article-row-id="space::venus"]')).not.toBeNull();
 
     timeline.scrollTop = 320;
-    filter.click();
-    filter = root.querySelector<HTMLButtonElement>(
-      '[data-action="toggle-unread-filter"]',
-    )!;
-    expect(filter.getAttribute("aria-pressed")).toBe("true");
-    expect(filter.getAttribute("title")).toBe("Afficher aussi les articles lus");
+    root.querySelector<HTMLElement>('[data-article-view="unread"]')!.click();
+    expect(activeViews()).toEqual(["unread"]);
     expect(root.querySelector<HTMLElement>(".timeline")?.scrollTop).toBe(0);
     expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
     expect(root.querySelector('[data-article-row-id="space::venus"]')).toBeNull();
 
-    filter.click();
+    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+    expect(activeViews()).toEqual(["favorites"]);
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::venus"]')).not.toBeNull();
+
+    root.querySelector<HTMLElement>('[data-article-view="all"]')!.click();
+    expect(activeViews()).toEqual(["all"]);
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
     expect(root.querySelector('[data-article-row-id="space::venus"]')).not.toBeNull();
     expect(api.listArticles).toHaveBeenCalledOnce();
     expect(api.refreshFeeds).not.toHaveBeenCalled();
   });
 
-  it("combines the unread filter with the favorites view", async () => {
+  it("renders an explicit empty state when no article is unread", async () => {
     const api = fakeApi({
-      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      listArticles: vi.fn(async () => [structuredClone(secondSummary)]),
     });
     const { root } = await mounted(api);
 
-    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
-    expect(root.textContent).toContain("Observer Vénus à l'aube");
-    expect(
-      root.querySelector('[data-action="toggle-unread-filter"]')?.textContent,
-    ).toContain("0");
-
-    root.querySelector<HTMLElement>('[data-action="toggle-unread-filter"]')!.click();
+    root.querySelector<HTMLElement>('[data-article-view="unread"]')!.click();
     expect(root.querySelector('[data-testid="unread-empty"]')?.textContent).toContain(
       "Aucun article non lu",
+    );
+    expect(root.querySelector('[data-testid="unread-empty"]')?.textContent).toContain(
+      "Sélectionnez « Tous »",
     );
     expect(root.querySelector("[data-article-row-id]")).toBeNull();
   });
 
   it("keeps an opened article visible when it leaves the unread list", async () => {
     const { root, api } = await mounted();
-    root.querySelector<HTMLElement>('[data-action="toggle-unread-filter"]')!.click();
+    root.querySelector<HTMLElement>('[data-article-view="unread"]')!.click();
     root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
     await flush();
 
@@ -265,7 +264,7 @@ describe("InkRiverApp", () => {
       "Observer Mars au crépuscule",
     );
     expect(
-      root.querySelector('[data-action="toggle-unread-filter"]')?.getAttribute("aria-pressed"),
+      root.querySelector('[data-article-view="unread"]')?.getAttribute("aria-selected"),
     ).toBe("true");
   });
 

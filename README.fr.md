@@ -140,8 +140,10 @@ au logo mis en cache du site pour les autres flux RSS. Une icône RSS génériqu
 reste affichée lorsqu'aucun logo exploitable n'est disponible. Les vecteurs de
 marque proviennent de Simple Icons v16.21.0 ; Medium et Substack restent
 propriétaires de leurs marques respectives.
-Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
-immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
+Les onglets mutuellement exclusifs **Tous**, **Favoris** et **Non lus** au-dessus
+de la chronologie affichent respectivement tous les articles, tous les favoris
+quel que soit leur état de lecture, ou tous les articles non lus. Le filtrage
+reste entièrement hors ligne et conserve le même panneau de lecture.
 
 Le panneau de lecture propose aussi une icône d'archivage. Après une confirmation
 obligatoire, l'article disparaît de toutes les listes et ne peut pas être restauré
