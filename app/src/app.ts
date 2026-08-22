@@ -929,7 +929,6 @@ export class InkRiverApp {
     const state = this.textSizeControlState();
     return `<div class="text-size-controls" role="group" aria-label="Taille du texte de l’article">
       <button type="button" class="text-size-button" data-action="decrease-text-size" title="${state.decreaseLabel}" aria-label="${state.decreaseLabel}" ${state.canDecrease ? "" : "disabled"}>${textZoomIcon("minus")}</button>
-      <!-- <span class="text-size-label" data-text-size-label${announceChanges ? ' aria-live="polite"' : ""}>${state.label}</span>  -->
       <button type="button" class="text-size-button" data-action="increase-text-size" title="${state.increaseLabel}" aria-label="${state.increaseLabel}" ${state.canIncrease ? "" : "disabled"}>${textZoomIcon("plus")}</button>
     </div>`;
   }
