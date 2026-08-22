@@ -472,7 +472,7 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.getArticle).toHaveBeenCalledWith("space::mars");
     expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", true);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+
     const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
     expect(readButton.textContent?.trim()).toBe("");
     expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
@@ -497,7 +497,10 @@ describe("InkRiverApp", () => {
     await flush();
 
     expect(api.setArticleRead).not.toHaveBeenCalled();
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+  
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme non lu");
   });
 
   it("marks the selected article unread and read again in both panels", async () => {
@@ -508,7 +511,10 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
     await flush();
     expect(api.setArticleRead).toHaveBeenNthCalledWith(2, "space::mars", false);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
     expect(root.querySelector('[data-action="toggle-read"]')?.getAttribute("title")).toBe(
       "Marquer comme lu",
     );
@@ -518,7 +524,7 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
     await flush();
     expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+  
     expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
   });
 
@@ -540,13 +546,18 @@ describe("InkRiverApp", () => {
       '[data-article-row-id="space::mars"] [data-action="timeline-read"]',
     )!.click();
     await flush();
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
 
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
+    
     root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
     await flush();
     expect(getArticle).toHaveBeenCalledTimes(1);
     expect(api.setArticleRead).toHaveBeenCalledTimes(2);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+  
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
 
     root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
     await flush();
@@ -555,7 +566,6 @@ describe("InkRiverApp", () => {
 
     expect(getArticle).toHaveBeenCalledTimes(3);
     expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
   });
 
   it("disables the read action while its update is pending", async () => {
@@ -582,7 +592,10 @@ describe("InkRiverApp", () => {
 
     finishUpdate!();
     await flush();
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
   });
 
   it("keeps the previous read state when the explicit update fails", async () => {
@@ -604,7 +617,9 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[role="alert"]')?.textContent).toContain(
       "État de lecture non enregistré",
     );
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme non lu");
     expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
   });
 
