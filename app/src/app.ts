@@ -12,16 +12,53 @@ type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmAction = (message: string) => boolean;
 type ArticleView = "all" | "favorites";
 type MainView = "articles" | "feeds";
+export type ArticleTextSize = "small" | "medium" | "large";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
 const ARTICLE_IMAGE_MESSAGE = "inkriver:article-image";
 const ARTICLE_IMAGE_FOCUS_MESSAGE = "inkriver:article-image-focus";
+const ARTICLE_TEXT_SIZE_MESSAGE = "inkriver:article-text-size";
+const ARTICLE_TEXT_SIZE_STORAGE_KEY = "inkriver.articleTextSize";
+const ARTICLE_TEXT_SIZES: readonly ArticleTextSize[] = ["small", "medium", "large"];
+const ARTICLE_TEXT_SIZE_CONFIG: Record<ArticleTextSize, { label: string; pixels: number }> = {
+  small: { label: "Petit", pixels: 16 },
+  medium: { label: "Moyen", pixels: 18 },
+  large: { label: "Grand", pixels: 22 },
+};
 const MAX_ARTICLE_FRAME_HEIGHT = 10_000_000;
 const NOTICE_TIMEOUT_MS = 8_000;
 const NOTICE_FADE_MS = 180;
 const IMAGE_ZOOM_FADE_MS = 180;
 const TOP_BUTTON_SHOW_RATIO = 1;
 const TOP_BUTTON_HIDE_RATIO = 0.75;
+
+type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
+
+function isArticleTextSize(value: unknown): value is ArticleTextSize {
+  return ARTICLE_TEXT_SIZES.includes(value as ArticleTextSize);
+}
+
+export function readArticleTextSize(
+  storage: Pick<PreferenceStorage, "getItem"> | null,
+): ArticleTextSize {
+  try {
+    const value = storage?.getItem(ARTICLE_TEXT_SIZE_STORAGE_KEY);
+    return isArticleTextSize(value) ? value : "medium";
+  } catch {
+    return "medium";
+  }
+}
+
+export function writeArticleTextSize(
+  storage: Pick<PreferenceStorage, "setItem"> | null,
+  size: ArticleTextSize,
+): void {
+  try {
+    storage?.setItem(ARTICLE_TEXT_SIZE_STORAGE_KEY, size);
+  } catch {
+    // The preference remains available for the current application session.
+  }
+}
 
 function escapeHtml(value: string): string {
   return value
@@ -155,10 +192,15 @@ export function prepareArticleContent(content: string): string {
   return document.body.innerHTML;
 }
 
-export function buildArticleDocument(content: string, nonce: string): string {
+export function buildArticleDocument(
+  content: string,
+  nonce: string,
+  textSize: ArticleTextSize = "medium",
+): string {
   const preparedContent = prepareArticleContent(content);
-  const bridgeScript = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"${ARTICLE_HEIGHT_MESSAGE}",height:height},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"${ARTICLE_IMAGE_MESSAGE}",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}document.addEventListener("click",function(event){var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);window.addEventListener("message",function(event){var message=event.data;if(!message||message.type!=="${ARTICLE_IMAGE_FOCUS_MESSAGE}"||typeof message.imageId!=="string")return;var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();});window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font:18px/1.75 Georgia,serif;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #a84d2f;outline-offset:3px}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
+  const bridgeScript = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"${ARTICLE_HEIGHT_MESSAGE}",height:height},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"${ARTICLE_IMAGE_MESSAGE}",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}document.addEventListener("click",function(event){var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"${ARTICLE_LINK_MESSAGE}",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);window.addEventListener("message",function(event){var message=event.data;if(!message)return;if(message.type==="${ARTICLE_IMAGE_FOCUS_MESSAGE}"&&typeof message.imageId==="string"){var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();return;}if(message.type==="${ARTICLE_TEXT_SIZE_MESSAGE}"&&[16,18,22].includes(message.fontSize)){document.documentElement.style.setProperty("--article-font-size",message.fontSize+"px");reportArticleHeight();}});window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
+  const fontSize = ARTICLE_TEXT_SIZE_CONFIG[textSize].pixels;
+  return `<!doctype html><html style="--article-font-size:${fontSize}px"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font-family:Georgia,serif;font-size:var(--article-font-size);line-height:1.75;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #a84d2f;outline-offset:3px}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script nonce="${nonce}">${bridgeScript}</script></head><body>${preparedContent}</body></html>`;
 }
 
 function favoriteIcon(isFavorite: boolean): string {
@@ -187,12 +229,20 @@ function externalLinkIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5M19 5l-9 9M18 13v6H5V6h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function textZoomIcon(sign: "plus" | "minus"): string {
+  const signPath = sign === "plus" ? "M10.5 7v5M8 9.5h5" : "M8 9.5h5";
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m14.5 14.5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="${signPath}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
+}
+
 export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
   private selected: ArticleDetail | null = null;
   private articleView: ArticleView = "all";
   private unreadOnly = false;
+  private articleTextSize: ArticleTextSize = "medium";
+  private pendingTextSizeProgress: number | null = null;
+  private readonly preferenceStorage: PreferenceStorage | null;
   private mainView: MainView = "articles";
   private loading = true;
   private refreshing = false;
@@ -224,6 +274,14 @@ export class InkRiverApp {
     private readonly openOriginal: OpenOriginal,
     private readonly confirmAction: ConfirmAction,
   ) {
+    let preferenceStorage: PreferenceStorage | null = null;
+    try {
+      preferenceStorage = this.root.ownerDocument.defaultView?.localStorage ?? null;
+    } catch {
+      // Access can be denied for restricted WebView origins.
+    }
+    this.preferenceStorage = preferenceStorage;
+    this.articleTextSize = readArticleTextSize(this.preferenceStorage);
     this.root.ownerDocument.defaultView?.addEventListener("message", (event) => {
       const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
       if (!frame || event.source !== frame.contentWindow) return;
@@ -242,6 +300,7 @@ export class InkRiverApp {
         const height = Math.ceil(message.height);
         if (Number.isFinite(height) && height > 0 && height <= MAX_ARTICLE_FRAME_HEIGHT) {
           frame.style.height = `${height}px`;
+          this.restoreTextSizeProgress();
         }
         return;
       }
@@ -281,6 +340,7 @@ export class InkRiverApp {
   private async selectArticle(articleId: string): Promise<void> {
     if (this.selected?.id === articleId) return;
     this.discardImageZoom();
+    this.pendingTextSizeProgress = null;
     this.error = null;
     try {
       this.selected = await this.api.getArticle(articleId);
@@ -322,6 +382,87 @@ export class InkRiverApp {
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     if (timeline) timeline.scrollTop = 0;
     this.scrollSelectedArticleIntoView();
+  }
+
+  private textSizeControlState(): {
+    label: string;
+    canDecrease: boolean;
+    canIncrease: boolean;
+    decreaseLabel: string;
+    increaseLabel: string;
+  } {
+    const index = ARTICLE_TEXT_SIZES.indexOf(this.articleTextSize);
+    const previous = ARTICLE_TEXT_SIZES[index - 1];
+    const next = ARTICLE_TEXT_SIZES[index + 1];
+    return {
+      label: ARTICLE_TEXT_SIZE_CONFIG[this.articleTextSize].label,
+      canDecrease: previous !== undefined,
+      canIncrease: next !== undefined,
+      decreaseLabel: previous
+        ? `Réduire le texte : ${ARTICLE_TEXT_SIZE_CONFIG[previous].label}`
+        : "Taille de texte minimale",
+      increaseLabel: next
+        ? `Agrandir le texte : ${ARTICLE_TEXT_SIZE_CONFIG[next].label}`
+        : "Taille de texte maximale",
+    };
+  }
+
+  private changeArticleTextSize(offset: -1 | 1): void {
+    const currentIndex = ARTICLE_TEXT_SIZES.indexOf(this.articleTextSize);
+    const nextSize = ARTICLE_TEXT_SIZES[currentIndex + offset];
+    if (!nextSize) return;
+
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    const maxScroll = reader
+      ? Math.max(0, reader.scrollHeight - reader.clientHeight)
+      : 0;
+    this.pendingTextSizeProgress = reader && maxScroll > 0
+      ? Math.min(1, Math.max(0, reader.scrollTop / maxScroll))
+      : 0;
+    this.articleTextSize = nextSize;
+    writeArticleTextSize(this.preferenceStorage, nextSize);
+    this.syncTextSizeControls();
+
+    const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
+    if (!frame?.contentWindow) {
+      this.pendingTextSizeProgress = null;
+      return;
+    }
+    frame.contentWindow.postMessage(
+      {
+        type: ARTICLE_TEXT_SIZE_MESSAGE,
+        fontSize: ARTICLE_TEXT_SIZE_CONFIG[nextSize].pixels,
+      },
+      "*",
+    );
+  }
+
+  private syncTextSizeControls(): void {
+    const state = this.textSizeControlState();
+    this.root.querySelectorAll<HTMLElement>("[data-text-size-label]").forEach((label) => {
+      label.textContent = state.label;
+    });
+    this.root.querySelectorAll<HTMLButtonElement>('[data-action="decrease-text-size"]').forEach((button) => {
+      button.disabled = !state.canDecrease;
+      button.title = state.decreaseLabel;
+      button.setAttribute("aria-label", state.decreaseLabel);
+    });
+    this.root.querySelectorAll<HTMLButtonElement>('[data-action="increase-text-size"]').forEach((button) => {
+      button.disabled = !state.canIncrease;
+      button.title = state.increaseLabel;
+      button.setAttribute("aria-label", state.increaseLabel);
+    });
+  }
+
+  private restoreTextSizeProgress(): void {
+    if (this.pendingTextSizeProgress === null) return;
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    if (reader) {
+      const maxScroll = Math.max(0, reader.scrollHeight - reader.clientHeight);
+      reader.scrollTop = this.pendingTextSizeProgress * maxScroll;
+      this.updateReaderTopButton(reader);
+    }
+    this.pendingTextSizeProgress = null;
   }
 
   private async setArticleFavoriteState(articleId: string, isFavorite: boolean): Promise<void> {
@@ -761,7 +902,7 @@ export class InkRiverApp {
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
       ${sourceLink}
       <!-- <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div> -->
-      <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}</div></header>
+      <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}${this.renderTextSizeControls(true)}</div></header>
       ${content}
       ${this.renderReaderFooter(article, favoritePending, archivePending)}
     </article>`;
@@ -782,6 +923,15 @@ export class InkRiverApp {
       <button type="button" class="reader-footer-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>
       <button type="button" class="reader-footer-button" data-action="open-source" title="${escapeHtml(sourceAction)}" aria-label="${escapeHtml(sourceAction)}" ${sourceAvailable ? "" : "disabled"}>${externalLinkIcon()}</button>
     </footer>`;
+  }
+
+  private renderTextSizeControls(announceChanges: boolean): string {
+    const state = this.textSizeControlState();
+    return `<div class="text-size-controls" role="group" aria-label="Taille du texte de l’article">
+      <button type="button" class="text-size-button" data-action="decrease-text-size" title="${state.decreaseLabel}" aria-label="${state.decreaseLabel}" ${state.canDecrease ? "" : "disabled"}>${textZoomIcon("minus")}</button>
+      <!-- <span class="text-size-label" data-text-size-label${announceChanges ? ' aria-live="polite"' : ""}>${state.label}</span>  -->
+      <button type="button" class="text-size-button" data-action="increase-text-size" title="${state.increaseLabel}" aria-label="${state.increaseLabel}" ${state.canIncrease ? "" : "disabled"}>${textZoomIcon("plus")}</button>
+    </div>`;
   }
 
   private renderReaderTopButton(): string {
@@ -882,7 +1032,11 @@ export class InkRiverApp {
     if (frame && this.selected?.content) {
       if (articleFrameHeight) frame.style.height = articleFrameHeight;
       const nonce = globalThis.crypto.randomUUID();
-      frame.srcdoc = buildArticleDocument(this.selected.content, nonce);
+      frame.srcdoc = buildArticleDocument(
+        this.selected.content,
+        nonce,
+        this.articleTextSize,
+      );
     }
     const reader = this.root.querySelector<HTMLElement>(".reader");
     if (reader && preserveReaderPosition) reader.scrollTop = readerScrollTop;
@@ -931,6 +1085,12 @@ export class InkRiverApp {
     this.root
       .querySelector<HTMLElement>('[data-action="reader-top"]')
       ?.addEventListener("click", () => this.scrollReaderToTop());
+    this.root.querySelectorAll<HTMLElement>('[data-action="decrease-text-size"]').forEach((element) => {
+      element.addEventListener("click", () => this.changeArticleTextSize(-1));
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="increase-text-size"]').forEach((element) => {
+      element.addEventListener("click", () => this.changeArticleTextSize(1));
+    });
     this.root
       .querySelector<HTMLElement>('[data-action="close-image-zoom"]')
       ?.addEventListener("click", () => this.closeImageZoom());

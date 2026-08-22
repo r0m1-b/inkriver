@@ -106,7 +106,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .article-source-link:hover { color: var(--accent-dark); border-color: transparent; background: transparent; }
 .read-state { margin-top: 18px; color: var(--muted); font-size: 13px; }
 .read-state strong { color: var(--ink); }
-.reader-actions { display: flex; gap: 10px; margin-top: 24px; }
+.reader-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 24px; }
 .reader-icon-button { display: grid; place-items: center; width: 42px; height: 42px; padding: 9px; color: var(--muted); }
 .reader-icon-button svg { width: 22px; height: 22px; pointer-events: none; }
 .reader-icon-button.favorite.active { color: #c28b28; }
@@ -123,6 +123,12 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .reader-footer-button:hover { color: var(--ink); }
 .reader-footer-button.favorite.active { color: #c28b28; }
 .reader-footer-button svg { width: 22px; height: 22px; pointer-events: none; }
+.text-size-controls { display: inline-flex; align-items: center; gap: 5px; margin-left: 4px; padding-left: 12px; border-left: 1px solid var(--line); }
+.text-size-button { display: grid; place-items: center; width: 44px; height: 44px; padding: 10px; color: var(--muted);  border-radius: 10%; }
+.text-size-button:hover { color: var(--ink); background: var(--wash); }
+.text-size-button:disabled { cursor: not-allowed; }
+.text-size-button svg { width: 21px; height: 21px; pointer-events: none; }
+.text-size-label { min-width: 48px; color: var(--muted); font-size: 12px; font-weight: 700; text-align: center; }
 .image-lightbox { position: absolute; z-index: 9; inset: 0 0 0 370px; display: grid; place-items: center; padding: 28px; background: rgb(20 18 16 / 72%); }
 .image-lightbox.is-entering { animation: image-lightbox-in 180ms ease-out both; }
 .image-lightbox.is-leaving { pointer-events: none; animation: image-lightbox-out 180ms ease-in both; }

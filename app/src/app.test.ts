@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   InkRiverApp,
   articleSourceHost,
@@ -7,8 +7,10 @@ import {
   detectPlatform,
   errorMessage,
   prepareArticleContent,
+  readArticleTextSize,
   resolveArticleImageUrl,
   resolveExternalArticleUrl,
+  writeArticleTextSize,
 } from "./app";
 import type { InkRiverApi } from "./api";
 import type { ArticleDetail, ArticleSummary, Feed, RefreshReport } from "./types";
@@ -57,6 +59,10 @@ const feed: Feed = {
   lastSuccessAt: "2026-08-08T12:05:00Z",
   lastError: null,
 };
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
   return {
@@ -658,7 +664,7 @@ describe("InkRiverApp", () => {
     )!;
     const source = footer.querySelector<HTMLButtonElement>('[data-action="open-source"]')!;
     expect(footer.getAttribute("aria-label")).toBe("Actions de fin d’article");
-    expect(footer.querySelectorAll("button")).toHaveLength(3);
+    expect(footer.querySelectorAll(":scope > button")).toHaveLength(3);
     expect(favorite.getAttribute("title")).toBe("Ajouter aux favoris");
     expect(archive.getAttribute("title")).toBe("Archiver l’article");
     expect(source.getAttribute("title")).toBe(
@@ -714,6 +720,66 @@ describe("InkRiverApp", () => {
     )!.click();
     expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
     expect(document.activeElement?.closest(".reader-footer")).not.toBeNull();
+  });
+
+  it("persists the text size across articles and application instances", async () => {
+    const firstApi = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    let mountedApp = await mounted(firstApi);
+    mountedApp.root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+    mountedApp.root.querySelector<HTMLButtonElement>(
+      '[data-action="increase-text-size"]',
+    )!.click();
+
+    mountedApp.root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(
+      mountedApp.root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc,
+    ).toContain('style="--article-font-size:22px"');
+
+    mountedApp = await mounted();
+    mountedApp.root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+    expect(
+      mountedApp.root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc,
+    ).toContain('style="--article-font-size:22px"');
+  });
+
+  it("restores relative reading progress after text reflow", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    Object.defineProperty(reader, "clientHeight", { configurable: true, value: 500 });
+    Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 2500 });
+    reader.scrollTop = 1000;
+
+    root.querySelector<HTMLButtonElement>('[data-action="increase-text-size"]')!.click();
+    Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 3500 });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 3000 },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(frame.style.height).toBe("3000px");
+    expect(reader.scrollTop).toBe(1500);
+
+    Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 4500 });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 4000 },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(reader.scrollTop).toBe(1500);
   });
 
   it("opens an accessible archive dialog and honors cancellation", async () => {
@@ -1551,6 +1617,28 @@ describe("view helpers", () => {
     expect(() => resolveArticleImageUrl("/mars.jpg")).toThrow("Image invalide");
   });
 
+  it("reads and writes text-size preferences with a safe fallback", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        values.set(key, value);
+      }),
+    };
+    expect(readArticleTextSize(storage)).toBe("medium");
+    writeArticleTextSize(storage, "large");
+    expect(readArticleTextSize(storage)).toBe("large");
+
+    values.set("inkriver.articleTextSize", "enormous");
+    expect(readArticleTextSize(storage)).toBe("medium");
+    expect(readArticleTextSize({ getItem: () => { throw new Error("denied"); } })).toBe(
+      "medium",
+    );
+    expect(() =>
+      writeArticleTextSize({ setItem: () => { throw new Error("denied"); } }, "small"),
+    ).not.toThrow();
+  });
+
   it("neutralizes external frame navigation while preserving fragment links", () => {
     const content = prepareArticleContent(
       '<a href="/story" target="_blank">Story</a><a href="#notes" target="_top">Notes</a>',
@@ -1581,16 +1669,21 @@ describe("view helpers", () => {
     );
   });
 
-  it("builds a nonce-protected iframe bridge for links", () => {
+  it("builds a nonce-protected iframe bridge for links and text sizing", () => {
     const document = buildArticleDocument(
       '<a href="https://example.com/read">Read</a>',
       "test-nonce",
+      "small",
     );
     expect(document).toContain("script-src 'nonce-test-nonce'");
     expect(document).toContain('<script nonce="test-nonce">');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-image"');
-    expect(document).toContain('message.type!=="inkriver:article-image-focus"');
+    expect(document).toContain('message.type==="inkriver:article-image-focus"');
+    expect(document).toContain('message.type==="inkriver:article-text-size"');
+    expect(document).toContain("[16,18,22].includes(message.fontSize)");
+    expect(document).toContain('style="--article-font-size:16px"');
+    expect(document).toContain("font-size:var(--article-font-size)");
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
     expect(document).toContain('document.addEventListener("click"');
     expect(document).toContain('document.addEventListener("keydown"');
