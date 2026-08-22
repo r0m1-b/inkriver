@@ -1,6 +1,6 @@
 [package]
 name = "inkriver-app"
-version = "0.3.0"
+version = "0.3.1"
 description = "InkRiver, a unified Medium and Substack reader"
 authors = ["InkRiver contributors"]
 edition = "2024"
