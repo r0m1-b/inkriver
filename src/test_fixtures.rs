@@ -24,6 +24,11 @@ pub(crate) fn mock_feeds() -> Vec<Feed> {
 fn parse_mock_feed(xml: &str, id: &str, source: crate::article::Source) -> Feed {
     let raw_feed = parser::parse(xml.as_bytes()).expect("the mock RSS feed must be valid");
 
+    let declared_icon_url = raw_feed
+        .icon
+        .clone()
+        .or(raw_feed.logo.clone())
+        .map(|image| image.uri);
     Feed::new(
         id.to_string(),
         raw_feed
@@ -44,6 +49,7 @@ fn parse_mock_feed(xml: &str, id: &str, source: crate::article::Source) -> Feed 
         source,
         raw_feed.entries,
     )
+    .with_declared_icon_url(declared_icon_url)
 }
 
 const SUBSTACK_ASTRONOMY_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>

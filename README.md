@@ -117,16 +117,23 @@ its URL, author, description, latest publication, last successful refresh, and
 most recent detailed error. This status is stored in SQLite and remains visible
 after restarting InkRiver. Disabling and deleting actions are available on this
 page; **Add subscription** opens a separate dialog containing only the add form.
-Use **Refresh** to download articles and update these details.
+Use the top **Refresh** action to update every active subscription, or the
+circular refresh action on an active subscription card to update that feed
+only. A newly added subscription is not downloaded automatically. Individual
+refresh errors appear briefly in a red notification and remain available in
+the corresponding card with their complete details. Disabled feeds must be
+reactivated before they can be refreshed.
 
 Opening an unread article automatically marks it as read. The reading panel
 shows the current state and lets you explicitly mark the article as read or
 unread; the change is stored in SQLite and immediately reflected in the
 timeline. Each timeline row also provides always-visible star and envelope
 buttons to change favorite and read states without opening the article.
-Source badges pair the Medium or Substack brand mark—or a generic RSS icon—with
-their text label. The brand vectors come from Simple Icons v16.21.0; Medium and
-Substack retain ownership of their respective trademarks.
+Source badges pair their text label with the Medium or Substack brand mark, or
+with the cached website logo of another RSS feed. A generic RSS icon remains
+the fallback when no usable website logo is available. The brand vectors come
+from Simple Icons v16.21.0; Medium and Substack retain ownership of their
+respective trademarks.
 The **All** and **Favorites** tabs above the timeline provide an immediate,
 offline view of starred articles while keeping the same reading panel.
 
@@ -136,9 +143,12 @@ interface. InkRiver keeps a small database tombstone so a later refresh cannot
 recreate it, but removes the stored article body.
 
 On application startup and after every refresh, InkRiver applies a fixed
-30-day retention rule. It automatically archives only articles that are read,
-not favorites, have a publication date, and are strictly older than 30 days.
-Unread, favorite, undated, and exactly 30-day-old articles are preserved.
+30-day retention rule. A refresh of one subscription limits this maintenance,
+including article-page extraction, to that subscription; a global refresh
+processes every active feed. The rule automatically archives only articles
+that are read, not favorites, have a publication date, and are strictly older
+than 30 days. Unread, favorite, undated, and exactly 30-day-old articles are
+preserved.
 
 HTTP(S) links contained in an article open in the system browser instead of
 navigating inside InkRiver. Relative links are resolved from the article URL.
@@ -459,6 +469,21 @@ validated HTTP(S) redirects. Private or local network destinations are
 rejected. Failed pages enter a seven-day cooldown; changing an article URL
 makes it eligible immediately.
 
+### Website logo discovery
+
+After an `Other` feed refreshes successfully, InkRiver looks first for an icon
+declared by RSS, Atom, or JSON Feed, then for icon links in the feed website,
+and finally for `/favicon.ico`. Medium and Substack always keep their official
+marks. Logo lookup never runs at application startup or inside the WebView.
+
+Downloads use the same public-network and redirect protections as article-page
+extraction. Images are limited to 512 KiB, validated, and normalized to a
+transparent 64 × 64 PNG before being cached in SQLite. A successful logo stays
+available offline and is not fetched again while the feed website remains the
+same. A failed lookup is retried after seven days; a changed website or declared
+icon is eligible immediately. Any failure is silent and the generic RSS icon
+remains visible.
+
 Main project structure:
 
 ```text
@@ -469,6 +494,7 @@ src/feed.rs     RSS/Atom conversion to the shared model
 src/content_extractor.rs  offline main-content extraction and sanitization
 src/page_http.rs  bounded and public-network-only article page downloads
 src/enrichment.rs  extraction selection, concurrency, and persistence
+src/feed_logo.rs  safe website-logo discovery and normalization
 src/service.rs  collection, deduplication, and sorting
 src/storage.rs  SQLite storage and local states
 src/refresh.rs  import → collection → storage orchestration

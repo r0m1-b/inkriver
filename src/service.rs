@@ -92,9 +92,16 @@ fn build_feed_from_data(
 
     let link = raw_feed
         .links
-        .first()
+        .iter()
+        .find(|link| {
+            link.rel
+                .as_deref()
+                .is_none_or(|relation| relation.eq_ignore_ascii_case("alternate"))
+        })
+        .or_else(|| raw_feed.links.first())
         .map(|link| link.href.clone())
         .ok_or_else(|| "This RSS feed has no link".to_string())?;
+    let declared_icon_url = raw_feed.icon.or(raw_feed.logo).map(|image| image.uri);
 
     let description = raw_feed
         .description
@@ -113,7 +120,8 @@ fn build_feed_from_data(
         author,
         source,
         raw_feed.entries,
-    ))
+    )
+    .with_declared_icon_url(declared_icon_url))
 }
 
 /// Loads and parses one configured feed with an injected content loader.
@@ -265,6 +273,39 @@ mod tests {
           <updated>2026-08-12T10:00:00Z</updated>
         </feed>"#;
 
+    const RSS_WITH_IMAGE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Workshop notes</title>
+            <link>https://workshop.example/</link>
+            <description>Practical workshop notes.</description>
+            <image>
+              <url>https://workshop.example/assets/logo.png</url>
+              <title>Workshop notes</title>
+              <link>https://workshop.example/</link>
+            </image>
+          </channel>
+        </rss>"#;
+
+    const ATOM_WITH_RELATIVE_ICON: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <title>Garden journal</title>
+          <link rel="self" href="feed.xml" />
+          <link rel="alternate" href="../garden/" />
+          <icon>../assets/garden.svg</icon>
+          <id>https://garden.example/feed.xml</id>
+          <updated>2026-08-22T10:00:00Z</updated>
+        </feed>"#;
+
+    const JSON_FEED_WITH_ICON: &str = r#"{
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": "Independent web notes",
+        "home_page_url": "https://notes.example/",
+        "feed_url": "https://notes.example/feed.json",
+        "icon": "https://notes.example/icon.png",
+        "items": []
+    }"#;
+
     const RSS_WITHOUT_TITLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <rss version="2.0">
           <channel>
@@ -343,6 +384,40 @@ mod tests {
 
         assert_eq!(feed.author.as_deref(), Some("Claire du Ciel"));
         assert_eq!(feed.description, "Une lettre pratique sur l'astronomie.");
+    }
+
+    /// Verifies RSS, Atom, and JSON Feed expose their website and declared icon.
+    #[test]
+    fn feed_formats_keep_primary_site_and_declared_icon() {
+        let rss = parser::parse(RSS_WITH_IMAGE.as_bytes()).unwrap();
+        let rss = build_feed_from_data(rss, "rss", Platform::Other).unwrap();
+        assert_eq!(rss.link, "https://workshop.example/");
+        assert_eq!(
+            rss.declared_icon_url.as_deref(),
+            Some("https://workshop.example/assets/logo.png")
+        );
+
+        let config = FeedConfig {
+            id: "atom".to_string(),
+            platform: Platform::Other,
+            url: "https://garden.example/feeds/feed.xml".to_string(),
+        };
+        let atom =
+            load_feed_with_content_loader(&config, |_| Ok(ATOM_WITH_RELATIVE_ICON.to_string()))
+                .unwrap();
+        assert_eq!(atom.link, "https://garden.example/garden/");
+        assert_eq!(
+            atom.declared_icon_url.as_deref(),
+            Some("https://garden.example/assets/garden.svg")
+        );
+
+        let json = parser::parse(JSON_FEED_WITH_ICON.as_bytes()).unwrap();
+        let json = build_feed_from_data(json, "json", Platform::Other).unwrap();
+        assert_eq!(json.link, "https://notes.example/");
+        assert_eq!(
+            json.declared_icon_url.as_deref(),
+            Some("https://notes.example/icon.png")
+        );
     }
 
     /// Verifies the complete loading pipeline from injected RSS content.
@@ -631,15 +706,18 @@ mod tests {
         };
         let source_feed = &mock_feeds()[0];
         let duplicate_entry = source_feed.entries[0].clone();
-        let mut feed = Some(Feed::new(
-            "astronomy".to_string(),
-            source_feed.title.clone(),
-            source_feed.link.clone(),
-            source_feed.description.clone(),
-            source_feed.author.clone(),
-            source_feed.source,
-            vec![duplicate_entry.clone(), duplicate_entry],
-        ));
+        let mut feed = Some(
+            Feed::new(
+                "astronomy".to_string(),
+                source_feed.title.clone(),
+                source_feed.link.clone(),
+                source_feed.description.clone(),
+                source_feed.author.clone(),
+                source_feed.source,
+                vec![duplicate_entry.clone(), duplicate_entry],
+            )
+            .with_declared_icon_url(source_feed.declared_icon_url.clone()),
+        );
 
         let report = collect_articles_with_loader(&config, |_feed_config| {
             std::future::ready(feed.take().ok_or_else(|| FeedLoadError {

@@ -13,6 +13,8 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub const ARTICLE_RETENTION_DAYS: i64 = 30;
 pub const EXTRACTION_RETRY_DAYS: i64 = 7;
 pub const MAX_EXTRACTION_ATTEMPTS_PER_REFRESH: usize = 20;
+pub const LOGO_RETRY_DAYS: i64 = 7;
+pub const MAX_LOGO_ATTEMPTS_PER_REFRESH: usize = 20;
 
 /// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
@@ -32,6 +34,7 @@ pub struct StoredFeed {
     pub last_published_at: Option<DateTime<Utc>>,
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_error: Option<StoredFeedError>,
+    pub logo_png: Option<Vec<u8>>,
 }
 
 /// Describes the most recent failed refresh retained for a subscription.
@@ -63,6 +66,7 @@ pub enum SubscriptionError {
     InvalidUrl(FeedUrlError),
     DuplicateActiveUrl(String),
     NotFound(String),
+    Inactive(String),
     Database(String),
 }
 
@@ -72,6 +76,7 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidUrl(error) => error.fmt(formatter),
             Self::DuplicateActiveUrl(url) => write!(formatter, "Feed URL is already active: {url}"),
             Self::NotFound(id) => write!(formatter, "Feed not found: {id}"),
+            Self::Inactive(id) => write!(formatter, "Feed is inactive: {id}"),
             Self::Database(message) => write!(formatter, "SQLite subscription error: {message}"),
         }
     }
@@ -122,6 +127,28 @@ pub struct ExtractionSelection {
     pub skipped: usize,
 }
 
+/// One successfully refreshed feed whose website logo is due for discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedLogoCandidate {
+    pub feed_id: String,
+    pub site_url: String,
+    pub declared_icon_url: Option<String>,
+}
+
+fn same_site_domain(left: &str, right: &str) -> bool {
+    let parsed = reqwest::Url::parse(left)
+        .ok()
+        .zip(reqwest::Url::parse(right).ok());
+    parsed
+        .and_then(|(left, right)| {
+            Some(
+                left.host_str()?.eq_ignore_ascii_case(right.host_str()?)
+                    && left.port_or_known_default() == right.port_or_known_default(),
+            )
+        })
+        .unwrap_or(left == right)
+}
+
 type StoredFeedRow = (
     String,
     String,
@@ -135,6 +162,7 @@ type StoredFeedRow = (
     Option<String>,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
+    Option<Vec<u8>>,
 );
 
 fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
@@ -151,6 +179,7 @@ fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
         last_error_message,
         last_error_at,
         last_published_at,
+        logo_png,
     ) = row;
     let platform = Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
     let last_error = match (last_error_stage, last_error_message, last_error_at) {
@@ -173,6 +202,7 @@ fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
         last_published_at,
         last_success_at,
         last_error,
+        logo_png,
     })
 }
 
@@ -327,7 +357,8 @@ impl Storage {
                        ) AS author,
                        feeds.last_success_at, feeds.last_error_stage,
                        feeds.last_error_message, feeds.last_error_at,
-                       MAX(articles.published_at) AS last_published_at
+                       MAX(articles.published_at) AS last_published_at,
+                       feeds.logo_png
                 FROM feeds
                 LEFT JOIN articles ON articles.feed_id = feeds.id
                 GROUP BY feeds.id
@@ -408,6 +439,7 @@ impl Storage {
             last_published_at: None,
             last_success_at: None,
             last_error: None,
+            logo_png: None,
         })
     }
 
@@ -517,6 +549,28 @@ impl Storage {
             .collect()
     }
 
+    /// Returns one active subscription in the configuration shape used by collection.
+    pub async fn active_feed_config_for(
+        &self,
+        feed_id: &str,
+    ) -> std::result::Result<FeedConfig, SubscriptionError> {
+        let feed = self
+            .list_feeds()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+            .into_iter()
+            .find(|feed| feed.id == feed_id)
+            .ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
+        if !feed.is_active {
+            return Err(SubscriptionError::Inactive(feed_id.to_string()));
+        }
+        Ok(FeedConfig {
+            id: feed.id,
+            platform: feed.platform,
+            url: feed.url,
+        })
+    }
+
     /// Persists metadata and the latest success or failure for each attempted feed.
     ///
     /// A successful result clears the previous error. A failed result retains the
@@ -539,10 +593,29 @@ impl Storage {
                 .author
                 .as_ref()
                 .filter(|author| !author.trim().is_empty());
+            let previous_site: Option<String> =
+                sqlx::query_scalar("SELECT site_url FROM feeds WHERE id = ?")
+                    .bind(&feed.id)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .with_context(|| {
+                        format!("Impossible de charger le site du flux {:?}", feed.id)
+                    })?
+                    .flatten();
+            let site_changed = previous_site
+                .as_deref()
+                .is_some_and(|site| !same_site_domain(site, &feed.site_url));
             sqlx::query(
                 r#"
                     UPDATE feeds
                     SET title = ?, description = ?, author = ?, last_success_at = ?,
+                        logo_png = CASE WHEN ? THEN NULL ELSE logo_png END,
+                        logo_site_url = CASE WHEN ? THEN NULL ELSE logo_site_url END,
+                        logo_attempted_at = CASE WHEN ? THEN NULL ELSE logo_attempted_at END,
+                        logo_attempted_site_url = CASE WHEN ? THEN NULL ELSE logo_attempted_site_url END,
+                        logo_attempted_declared_url = CASE WHEN ? THEN NULL ELSE logo_attempted_declared_url END,
+                        logo_last_error = CASE WHEN ? THEN NULL ELSE logo_last_error END,
+                        site_url = ?, declared_icon_url = ?,
                         last_error_stage = NULL, last_error_message = NULL,
                         last_error_at = NULL
                     WHERE id = ?
@@ -552,6 +625,14 @@ impl Storage {
             .bind(description)
             .bind(author)
             .bind(refreshed_at)
+            .bind(site_changed)
+            .bind(site_changed)
+            .bind(site_changed)
+            .bind(site_changed)
+            .bind(site_changed)
+            .bind(site_changed)
+            .bind(&feed.site_url)
+            .bind(&feed.declared_icon_url)
             .bind(&feed.id)
             .execute(&mut *transaction)
             .await
@@ -584,6 +665,138 @@ impl Storage {
             .commit()
             .await
             .context("Impossible de valider les états de rafraîchissement des flux")
+    }
+
+    /// Selects logo discoveries due for the feeds that refreshed successfully.
+    pub async fn feed_logo_candidates(
+        &self,
+        successful_feed_ids: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<FeedLogoCandidate>> {
+        type LogoRow = (
+            String,
+            String,
+            Option<String>,
+            Option<Vec<u8>>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<String>,
+        );
+        let successful = successful_feed_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let retry_cutoff = now - chrono::Duration::days(LOGO_RETRY_DAYS);
+        let rows: Vec<LogoRow> = sqlx::query_as(
+            r#"
+                SELECT id, site_url, declared_icon_url, logo_png, logo_site_url,
+                       logo_attempted_at, logo_attempted_site_url,
+                       logo_attempted_declared_url
+                FROM feeds
+                WHERE is_active = 1
+                  AND platform = 'other'
+                  AND site_url IS NOT NULL
+                  AND TRIM(site_url) <> ''
+                ORDER BY last_success_at DESC, id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de sélectionner les logos de flux")?;
+
+        Ok(rows
+            .into_iter()
+            .filter(|(id, ..)| successful.contains(id))
+            .filter(
+                |(
+                    _,
+                    site_url,
+                    declared_icon_url,
+                    logo_png,
+                    logo_site_url,
+                    attempted_at,
+                    attempted_site_url,
+                    attempted_declared_url,
+                )| {
+                    if logo_png.is_some() {
+                        return logo_site_url
+                            .as_deref()
+                            .is_none_or(|logo_site| !same_site_domain(logo_site, site_url));
+                    }
+                    attempted_at.is_none()
+                        || attempted_site_url.as_deref().is_none_or(|attempted_site| {
+                            !same_site_domain(attempted_site, site_url)
+                        })
+                        || attempted_declared_url != declared_icon_url
+                        || attempted_at.is_some_and(|attempted| attempted <= retry_cutoff)
+                },
+            )
+            .take(MAX_LOGO_ATTEMPTS_PER_REFRESH)
+            .map(
+                |(feed_id, site_url, declared_icon_url, ..)| FeedLogoCandidate {
+                    feed_id,
+                    site_url,
+                    declared_icon_url,
+                },
+            )
+            .collect())
+    }
+
+    /// Stores a normalized feed logo only if the feed still targets the same site.
+    pub async fn record_feed_logo_success(
+        &self,
+        candidate: &FeedLogoCandidate,
+        png: &[u8],
+        attempted_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+                UPDATE feeds
+                SET logo_png = ?, logo_site_url = ?, logo_attempted_at = ?,
+                    logo_attempted_site_url = ?, logo_attempted_declared_url = ?,
+                    logo_last_error = NULL
+                WHERE id = ? AND site_url = ? AND platform = 'other'
+            "#,
+        )
+        .bind(png)
+        .bind(&candidate.site_url)
+        .bind(attempted_at)
+        .bind(&candidate.site_url)
+        .bind(&candidate.declared_icon_url)
+        .bind(&candidate.feed_id)
+        .bind(&candidate.site_url)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d’enregistrer le logo du flux")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Records a non-blocking logo discovery failure for retry cooldown.
+    pub async fn record_feed_logo_failure(
+        &self,
+        candidate: &FeedLogoCandidate,
+        message: &str,
+        attempted_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let bounded_message = message.chars().take(1_000).collect::<String>();
+        let result = sqlx::query(
+            r#"
+                UPDATE feeds
+                SET logo_attempted_at = ?, logo_attempted_site_url = ?,
+                    logo_attempted_declared_url = ?, logo_last_error = ?
+                WHERE id = ? AND site_url = ? AND platform = 'other'
+            "#,
+        )
+        .bind(attempted_at)
+        .bind(&candidate.site_url)
+        .bind(&candidate.declared_icon_url)
+        .bind(bounded_message)
+        .bind(&candidate.feed_id)
+        .bind(&candidate.site_url)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d’enregistrer l’échec du logo du flux")?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Inserts new articles and refreshes existing remote metadata.
@@ -679,6 +892,23 @@ impl Storage {
     /// Articles in their retry cooldown and due articles beyond the per-refresh
     /// limit are reported as skipped. Rows without an URL are not candidates.
     pub async fn extraction_candidates(&self, now: DateTime<Utc>) -> Result<ExtractionSelection> {
+        self.extraction_candidates_scoped(now, None).await
+    }
+
+    /// Selects due extraction candidates belonging to one active feed.
+    pub async fn extraction_candidates_for_feed(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: &str,
+    ) -> Result<ExtractionSelection> {
+        self.extraction_candidates_scoped(now, Some(feed_id)).await
+    }
+
+    async fn extraction_candidates_scoped(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: Option<&str>,
+    ) -> Result<ExtractionSelection> {
         type CandidateRow = (String, String);
 
         let retry_cutoff = now - chrono::Duration::days(EXTRACTION_RETRY_DAYS);
@@ -693,8 +923,11 @@ impl Storage {
                   AND articles.content_kind IN ('excerpt', 'missing')
                   AND articles.url IS NOT NULL
                   AND TRIM(articles.url) <> ''
+                  AND (? IS NULL OR articles.feed_id = ?)
             "#,
         )
+        .bind(feed_id)
+        .bind(feed_id)
         .fetch_one(&self.pool)
         .await
         .context("Impossible de compter les candidats à l'extraction")?;
@@ -709,6 +942,7 @@ impl Storage {
                   AND articles.content_kind IN ('excerpt', 'missing')
                   AND articles.url IS NOT NULL
                   AND TRIM(articles.url) <> ''
+                  AND (? IS NULL OR articles.feed_id = ?)
                   AND (
                     articles.extraction_attempted_at IS NULL
                     OR articles.extraction_attempted_url IS NULL
@@ -721,6 +955,8 @@ impl Storage {
                 LIMIT ?
             "#,
         )
+        .bind(feed_id)
+        .bind(feed_id)
         .bind(retry_cutoff)
         .bind(MAX_EXTRACTION_ATTEMPTS_PER_REFRESH as i64)
         .fetch_all(&self.pool)
@@ -974,6 +1210,24 @@ impl Storage {
 
     /// Archives old read articles that are not favorites and releases their bodies.
     pub async fn archive_expired_read_articles(&self, now: DateTime<Utc>) -> Result<usize> {
+        self.archive_expired_read_articles_scoped(now, None).await
+    }
+
+    /// Archives expired read articles belonging to one subscription only.
+    pub async fn archive_expired_read_articles_for_feed(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: &str,
+    ) -> Result<usize> {
+        self.archive_expired_read_articles_scoped(now, Some(feed_id))
+            .await
+    }
+
+    async fn archive_expired_read_articles_scoped(
+        &self,
+        now: DateTime<Utc>,
+        feed_id: Option<&str>,
+    ) -> Result<usize> {
         let cutoff = now - chrono::Duration::days(ARTICLE_RETENTION_DAYS);
         let result = sqlx::query(
             r#"
@@ -988,10 +1242,13 @@ impl Storage {
                   AND is_favorite = 0
                   AND published_at IS NOT NULL
                   AND published_at < ?
+                  AND (? IS NULL OR feed_id = ?)
             "#,
         )
         .bind(now)
         .bind(cutoff)
+        .bind(feed_id)
+        .bind(feed_id)
         .execute(&self.pool)
         .await
         .context("Impossible d'archiver les anciens articles lus")?;
@@ -1044,6 +1301,7 @@ mod tests {
             last_published_at: None,
             last_success_at: None,
             last_error: None,
+            logo_png: None,
         }
     }
 
@@ -1111,7 +1369,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 5);
+        assert_eq!(migration_count, 6);
 
         storage.close().await;
     }
@@ -1166,6 +1424,8 @@ mod tests {
                     title: "Night sky notes".to_string(),
                     description: "A practical guide to astronomy".to_string(),
                     author: Some("Claire du Ciel".to_string()),
+                    site_url: "https://astronomy.example".to_string(),
+                    declared_icon_url: None,
                 }],
                 &[],
                 success_at,
@@ -1389,6 +1649,337 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+    }
+
+    /// Verifies the feed-logo migration leaves subscriptions, articles, and
+    /// their local state untouched while initializing an empty logo cache.
+    #[tokio::test]
+    async fn feed_logo_migration_preserves_existing_data() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080001_initial_schema.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080002_article_content_kind.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608120001_feed_details.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608140001_article_archiving.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608160001_article_extraction.sql"
+            )),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO feeds (id, platform, url, title) VALUES ('feed', 'other', 'https://example.com/feed', 'Example')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+                INSERT INTO articles (
+                    id, feed_id, title, content, source, content_kind,
+                    is_read, is_favorite, is_archived, archived_at, archive_reason
+                ) VALUES (
+                    'article', 'feed', 'Kept article', '<p>kept</p>', 'other',
+                    'full', 1, 1, 1, '2026-08-20T12:00:00Z', 'manual'
+                )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608220001_feed_logos.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let feed_state: (String, Option<String>, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT title, site_url, logo_png FROM feeds WHERE id = 'feed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(feed_state, ("Example".to_string(), None, None));
+        let article_state: (String, bool, bool, bool, Option<String>) = sqlx::query_as(
+            "SELECT title, is_read, is_favorite, is_archived, archive_reason FROM articles WHERE id = 'article'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            article_state,
+            (
+                "Kept article".to_string(),
+                true,
+                true,
+                true,
+                Some("manual".to_string())
+            )
+        );
+    }
+
+    /// Verifies logo discovery is scoped to successful Other feeds, observes
+    /// the retry delay, persists success permanently, and invalidates a logo
+    /// when the website changes.
+    #[tokio::test]
+    async fn feed_logo_candidates_observe_scope_retry_and_site_changes() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage
+            .import_feeds(&[
+                feed("other", Platform::Other, "https://example.com/feed"),
+                feed(
+                    "substack",
+                    Platform::Substack,
+                    "https://newsletter.substack.com/feed",
+                ),
+                feed(
+                    "untouched",
+                    Platform::Other,
+                    "https://untouched.example/feed",
+                ),
+            ])
+            .await
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+        storage
+            .record_feed_refreshes(
+                &[
+                    FeedMetadata {
+                        id: "other".to_string(),
+                        title: "Example".to_string(),
+                        description: String::new(),
+                        author: None,
+                        site_url: "https://example.com/articles/".to_string(),
+                        declared_icon_url: Some("/icon.png".to_string()),
+                    },
+                    FeedMetadata {
+                        id: "substack".to_string(),
+                        title: "Newsletter".to_string(),
+                        description: String::new(),
+                        author: None,
+                        site_url: "https://newsletter.substack.com/".to_string(),
+                        declared_icon_url: Some("/favicon.ico".to_string()),
+                    },
+                    FeedMetadata {
+                        id: "untouched".to_string(),
+                        title: "Untouched".to_string(),
+                        description: String::new(),
+                        author: None,
+                        site_url: "https://untouched.example/".to_string(),
+                        declared_icon_url: None,
+                    },
+                ],
+                &[],
+                now,
+            )
+            .await
+            .unwrap();
+
+        let successful = vec!["other".to_string(), "substack".to_string()];
+        let candidates = storage
+            .feed_logo_candidates(&successful, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates,
+            vec![FeedLogoCandidate {
+                feed_id: "other".to_string(),
+                site_url: "https://example.com/articles/".to_string(),
+                declared_icon_url: Some("/icon.png".to_string()),
+            }]
+        );
+
+        storage
+            .record_feed_logo_failure(&candidates[0], "not found", now)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .feed_logo_candidates(&successful, now + chrono::Duration::days(6))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .feed_logo_candidates(&successful, now + chrono::Duration::days(LOGO_RETRY_DAYS))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let changed_icon_at = now + chrono::Duration::hours(1);
+        storage
+            .record_feed_refreshes(
+                &[FeedMetadata {
+                    id: "other".to_string(),
+                    title: "Example".to_string(),
+                    description: String::new(),
+                    author: None,
+                    site_url: "https://example.com/articles/".to_string(),
+                    declared_icon_url: Some("/new-icon.png".to_string()),
+                }],
+                &[],
+                changed_icon_at,
+            )
+            .await
+            .unwrap();
+        let changed_icon = storage
+            .feed_logo_candidates(&successful, changed_icon_at)
+            .await
+            .unwrap();
+        assert_eq!(
+            changed_icon[0].declared_icon_url.as_deref(),
+            Some("/new-icon.png")
+        );
+
+        storage
+            .record_feed_logo_success(&changed_icon[0], b"normalized png", changed_icon_at)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.list_feeds().await.unwrap()[0].logo_png.as_deref(),
+            Some(b"normalized png".as_slice())
+        );
+        assert!(
+            storage
+                .feed_logo_candidates(&successful, now + chrono::Duration::days(365))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let changed_path_at = changed_icon_at + chrono::Duration::minutes(30);
+        storage
+            .record_feed_refreshes(
+                &[FeedMetadata {
+                    id: "other".to_string(),
+                    title: "Example moved within its site".to_string(),
+                    description: String::new(),
+                    author: None,
+                    site_url: "https://example.com/new-home/".to_string(),
+                    declared_icon_url: None,
+                }],
+                &[],
+                changed_path_at,
+            )
+            .await
+            .unwrap();
+        let stored = storage
+            .list_feeds()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|feed| feed.id == "other")
+            .unwrap();
+        assert_eq!(
+            stored.logo_png.as_deref(),
+            Some(b"normalized png".as_slice())
+        );
+        assert!(
+            storage
+                .feed_logo_candidates(&successful, changed_path_at)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let changed_site_at = changed_icon_at + chrono::Duration::hours(1);
+        storage
+            .record_feed_refreshes(
+                &[FeedMetadata {
+                    id: "other".to_string(),
+                    title: "Example moved".to_string(),
+                    description: String::new(),
+                    author: None,
+                    site_url: "https://new.example/".to_string(),
+                    declared_icon_url: None,
+                }],
+                &[],
+                changed_site_at,
+            )
+            .await
+            .unwrap();
+        let moved = storage
+            .feed_logo_candidates(&successful, changed_site_at)
+            .await
+            .unwrap();
+        assert_eq!(moved[0].site_url, "https://new.example/");
+        let stored = storage
+            .list_feeds()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|feed| feed.id == "other")
+            .unwrap();
+        assert!(stored.logo_png.is_none());
+    }
+
+    /// Verifies one refresh never schedules more website-logo downloads than
+    /// the configured bound.
+    #[tokio::test]
+    async fn feed_logo_candidates_are_limited_to_twenty() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let feeds = (0..21)
+            .map(|index| {
+                feed(
+                    &format!("feed-{index:02}"),
+                    Platform::Other,
+                    &format!("https://site-{index:02}.example/feed"),
+                )
+            })
+            .collect::<Vec<_>>();
+        storage.import_feeds(&feeds).await.unwrap();
+        let metadata = feeds
+            .iter()
+            .map(|feed| FeedMetadata {
+                id: feed.id.clone(),
+                title: feed.id.clone(),
+                description: String::new(),
+                author: None,
+                site_url: feed.url.replace("/feed", "/"),
+                declared_icon_url: None,
+            })
+            .collect::<Vec<_>>();
+        let now = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+        storage
+            .record_feed_refreshes(&metadata, &[], now)
+            .await
+            .unwrap();
+        let successful = feeds.iter().map(|feed| feed.id.clone()).collect::<Vec<_>>();
+
+        let candidates = storage
+            .feed_logo_candidates(&successful, now)
+            .await
+            .unwrap();
+
+        assert_eq!(candidates.len(), MAX_LOGO_ATTEMPTS_PER_REFRESH);
+        assert_eq!(candidates.first().unwrap().feed_id, "feed-00");
+        assert_eq!(candidates.last().unwrap().feed_id, "feed-19");
     }
 
     /// Verifies a feed import persists every configured value as active.

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   InkRiverApp,
   articleSourceHost,
@@ -7,7 +7,10 @@ import {
   detectPlatform,
   errorMessage,
   prepareArticleContent,
+  readArticleTextSize,
+  resolveArticleImageUrl,
   resolveExternalArticleUrl,
+  writeArticleTextSize,
 } from "./app";
 import type { InkRiverApi } from "./api";
 import type { ArticleDetail, ArticleSummary, Feed, RefreshReport } from "./types";
@@ -55,7 +58,12 @@ const feed: Feed = {
   lastPublishedAt: "2026-08-08T12:00:00Z",
   lastSuccessAt: "2026-08-08T12:05:00Z",
   lastError: null,
+  logoDataUrl: null,
 };
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
   return {
@@ -66,6 +74,17 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       collectedArticles: 1,
       insertedArticles: 0,
       updatedArticles: 1,
+      autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
+      errors: [],
+    })),
+    refreshFeed: vi.fn(async (): Promise<RefreshReport> => ({
+      activeFeeds: 1,
+      collectedArticles: 1,
+      insertedArticles: 1,
+      updatedArticles: 0,
       autoArchivedArticles: 0,
       extractedArticles: 0,
       extractionFailedArticles: 0,
@@ -85,6 +104,10 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
 
 async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
 async function mounted(
@@ -172,6 +195,76 @@ describe("InkRiverApp", () => {
     expect(root.querySelector("[data-article-row-id]")).toBeNull();
   });
 
+  it("toggles the unread-only filter without calling the backend", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+    });
+    const { root } = await mounted(api);
+    const timeline = root.querySelector<HTMLElement>(".timeline")!;
+    let filter = root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-unread-filter"]',
+    )!;
+
+    expect(filter.getAttribute("aria-pressed")).toBe("false");
+    expect(filter.getAttribute("title")).toBe("Afficher seulement les articles non lus");
+    expect(filter.textContent).toContain("Non lus");
+    expect(filter.textContent).toContain("1");
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::venus"]')).not.toBeNull();
+
+    timeline.scrollTop = 320;
+    filter.click();
+    filter = root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-unread-filter"]',
+    )!;
+    expect(filter.getAttribute("aria-pressed")).toBe("true");
+    expect(filter.getAttribute("title")).toBe("Afficher aussi les articles lus");
+    expect(root.querySelector<HTMLElement>(".timeline")?.scrollTop).toBe(0);
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::venus"]')).toBeNull();
+
+    filter.click();
+    expect(root.querySelector('[data-article-row-id="space::venus"]')).not.toBeNull();
+    expect(api.listArticles).toHaveBeenCalledOnce();
+    expect(api.refreshFeeds).not.toHaveBeenCalled();
+  });
+
+  it("combines the unread filter with the favorites view", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+    expect(root.textContent).toContain("Observer Vénus à l'aube");
+    expect(
+      root.querySelector('[data-action="toggle-unread-filter"]')?.textContent,
+    ).toContain("0");
+
+    root.querySelector<HTMLElement>('[data-action="toggle-unread-filter"]')!.click();
+    expect(root.querySelector('[data-testid="unread-empty"]')?.textContent).toContain(
+      "Aucun article non lu",
+    );
+    expect(root.querySelector("[data-article-row-id]")).toBeNull();
+  });
+
+  it("keeps an opened article visible when it leaves the unread list", async () => {
+    const { root, api } = await mounted();
+    root.querySelector<HTMLElement>('[data-action="toggle-unread-filter"]')!.click();
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+
+    expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", true);
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+    expect(root.querySelector('[data-testid="unread-empty"]')).not.toBeNull();
+    expect(root.querySelector(".reader-article")?.textContent).toContain(
+      "Observer Mars au crépuscule",
+    );
+    expect(
+      root.querySelector('[data-action="toggle-unread-filter"]')?.getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
   it("immediately adds and removes the open article in the favorites view", async () => {
     const api = fakeApi({
       listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
@@ -212,7 +305,8 @@ describe("InkRiverApp", () => {
     expect(firstRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-label")).toContain("Marquer comme lu");
     expect(secondRow.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(secondRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("true");
-    expect(firstRow.querySelectorAll("button")).toHaveLength(3);
+    expect(firstRow.querySelector('[data-action="timeline-archive"]')?.getAttribute("aria-label")).toContain("Observer Mars au crépuscule");
+    expect(firstRow.querySelectorAll("button")).toHaveLength(4);
   });
 
   it("renders a platform icon while retaining the source label", async () => {
@@ -255,6 +349,93 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-source-icon="substack"]')?.getAttribute("aria-hidden")).toBe(
       "true",
     );
+  });
+
+  it("uses a cached website logo for Other feeds in every view", async () => {
+    const logoDataUrl = "data:image/png;base64,iVBORw0KGgo=";
+    const otherFeed: Feed = {
+      ...structuredClone(feed),
+      platform: "other",
+      logoDataUrl,
+    };
+    const otherSummary: ArticleSummary = {
+      ...structuredClone(summary),
+      source: "other",
+    };
+    const otherDetail: ArticleDetail = {
+      ...structuredClone(detail),
+      source: "other",
+    };
+    const api = fakeApi({
+      listFeeds: vi.fn(async () => [otherFeed]),
+      listArticles: vi.fn(async () => [otherSummary]),
+      getArticle: vi.fn(async () => otherDetail),
+    });
+    const { root } = await mounted(api);
+
+    expect(
+      root.querySelector<HTMLImageElement>('[data-article-row-id="space::mars"] [data-feed-logo]')
+        ?.src,
+    ).toBe(logoDataUrl);
+
+    root.querySelector<HTMLElement>('[data-action="select-article"]')!.click();
+    await flush();
+    expect(root.querySelector<HTMLImageElement>(".reader-article [data-feed-logo]")?.src).toBe(
+      logoDataUrl,
+    );
+
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    expect(root.querySelector<HTMLImageElement>(".feed-card [data-feed-logo]")?.src).toBe(
+      logoDataUrl,
+    );
+  });
+
+  it("keeps branded icons and falls back to RSS for absent, unsafe, or broken logos", async () => {
+    const feeds: Feed[] = [
+      { ...structuredClone(feed), logoDataUrl: "data:image/png;base64,ignored" },
+      {
+        ...structuredClone(feed),
+        id: "other-feed",
+        platform: "other",
+        logoDataUrl: "data:image/png;base64,broken",
+      },
+      {
+        ...structuredClone(feed),
+        id: "unsafe-feed",
+        platform: "other",
+        logoDataUrl: "https://tracker.example/favicon.png",
+      },
+      {
+        ...structuredClone(feed),
+        id: "medium-feed",
+        platform: "medium",
+        logoDataUrl: "data:image/png;base64,ignored",
+      },
+    ];
+    const articles: ArticleSummary[] = [
+      structuredClone(summary),
+      { ...structuredClone(summary), id: "other", feedId: "other-feed", source: "other" },
+      { ...structuredClone(summary), id: "unsafe", feedId: "unsafe-feed", source: "other" },
+      { ...structuredClone(summary), id: "medium", feedId: "medium-feed", source: "medium" },
+    ];
+    const { root } = await mounted(fakeApi({
+      listFeeds: vi.fn(async () => feeds),
+      listArticles: vi.fn(async () => articles),
+    }));
+
+    expect(root.querySelector('[data-article-row-id="space::mars"] [data-source-icon="substack"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::mars"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="medium"] [data-source-icon="medium"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="medium"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="unsafe"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="unsafe"] [data-source-icon="rss"]')).not.toBeNull();
+
+    const broken = root.querySelector<HTMLImageElement>(
+      '[data-article-row-id="other"] [data-feed-logo]',
+    )!;
+    broken.dispatchEvent(new Event("error"));
+    expect(root.querySelector('[data-article-row-id="other"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="other"] [data-source-icon="rss"]')).not.toBeNull();
   });
 
   it("toggles a favorite from the timeline without opening the article", async () => {
@@ -397,7 +578,7 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.getArticle).toHaveBeenCalledWith("space::mars");
     expect(api.setArticleRead).toHaveBeenCalledWith("space::mars", true);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+
     const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
     expect(readButton.textContent?.trim()).toBe("");
     expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
@@ -422,7 +603,10 @@ describe("InkRiverApp", () => {
     await flush();
 
     expect(api.setArticleRead).not.toHaveBeenCalled();
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+  
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme non lu");
   });
 
   it("marks the selected article unread and read again in both panels", async () => {
@@ -433,7 +617,10 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
     await flush();
     expect(api.setArticleRead).toHaveBeenNthCalledWith(2, "space::mars", false);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
     expect(root.querySelector('[data-action="toggle-read"]')?.getAttribute("title")).toBe(
       "Marquer comme lu",
     );
@@ -443,7 +630,7 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="toggle-read"]')!.click();
     await flush();
     expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+  
     expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
   });
 
@@ -465,13 +652,18 @@ describe("InkRiverApp", () => {
       '[data-article-row-id="space::mars"] [data-action="timeline-read"]',
     )!.click();
     await flush();
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
 
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
+    
     root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
     await flush();
     expect(getArticle).toHaveBeenCalledTimes(1);
     expect(api.setArticleRead).toHaveBeenCalledTimes(2);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+  
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
 
     root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
     await flush();
@@ -480,7 +672,6 @@ describe("InkRiverApp", () => {
 
     expect(getArticle).toHaveBeenCalledTimes(3);
     expect(api.setArticleRead).toHaveBeenNthCalledWith(3, "space::mars", true);
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
   });
 
   it("disables the read action while its update is pending", async () => {
@@ -507,7 +698,10 @@ describe("InkRiverApp", () => {
 
     finishUpdate!();
     await flush();
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Non lu");
+
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme lu");
   });
 
   it("keeps the previous read state when the explicit update fails", async () => {
@@ -529,7 +723,9 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[role="alert"]')?.textContent).toContain(
       "État de lecture non enregistré",
     );
-    expect(root.querySelector('[data-testid="read-state"]')?.textContent).toContain("Lu");
+    const readButton = root.querySelector<HTMLElement>('[data-action="toggle-read"]')!;
+    expect(readButton.getAttribute("title")).toBe("Marquer comme non lu");
+    expect(readButton.getAttribute("aria-label")).toBe("Marquer comme non lu");
     expect(root.querySelector("[data-article-row-id]")?.classList).toContain("read");
   });
 
@@ -554,6 +750,136 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-action="favorite"]')?.getAttribute("title")).toBe(
       "Ajouter aux favoris",
     );
+  });
+
+  it("renders favorite, archive and source actions at the end of the article", async () => {
+    const { root, opener } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const footer = root.querySelector<HTMLElement>(".reader-footer")!;
+    const favorite = footer.querySelector<HTMLButtonElement>('[data-action="favorite"]')!;
+    const archive = footer.querySelector<HTMLButtonElement>(
+      '[data-action="archive-article"]',
+    )!;
+    const source = footer.querySelector<HTMLButtonElement>('[data-action="open-source"]')!;
+    expect(footer.getAttribute("aria-label")).toBe("Actions de fin d’article");
+    expect(footer.querySelectorAll(":scope > button")).toHaveLength(3);
+    expect(favorite.getAttribute("title")).toBe("Ajouter aux favoris");
+    expect(archive.getAttribute("title")).toBe("Archiver l’article");
+    expect(source.getAttribute("title")).toBe(
+      "Ouvrir le lien : https://space.example/mars",
+    );
+    expect(source.querySelector("svg")).not.toBeNull();
+
+    source.click();
+    await flush();
+    expect(opener).toHaveBeenCalledWith("https://space.example/mars");
+    expect(root.querySelector(".reader-article")).not.toBeNull();
+  });
+
+  it("disables the footer source action when the article URL is unsupported", async () => {
+    const unsupportedDetail = { ...structuredClone(detail), url: "mailto:reader@example.com" };
+    const api = fakeApi({ getArticle: vi.fn(async () => unsupportedDetail) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const source = root.querySelector<HTMLButtonElement>(
+      '.reader-footer [data-action="open-source"]',
+    )!;
+    expect(source.disabled).toBe(true);
+    expect(source.getAttribute("title")).toBe("Lien source indisponible");
+    source.click();
+    expect(opener).not.toHaveBeenCalled();
+  });
+
+  it("preserves the reading position when using footer actions", async () => {
+    const { root, api } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    let reader = root.querySelector<HTMLElement>(".reader")!;
+    root.querySelector<HTMLIFrameElement>(".article-content")!.style.height = "2400px";
+    reader.scrollTop = 900;
+    root.querySelector<HTMLElement>('.reader-footer [data-action="favorite"]')!.click();
+    await flush();
+
+    reader = root.querySelector<HTMLElement>(".reader")!;
+    expect(api.setArticleFavorite).toHaveBeenCalledWith("space::mars", true);
+    expect(reader.scrollTop).toBe(900);
+    expect(root.querySelectorAll('[data-action="favorite"][aria-pressed="true"]')).toHaveLength(2);
+
+    reader.scrollTop = 900;
+    root.querySelector<HTMLElement>(
+      '.reader-footer [data-action="archive-article"]',
+    )!.click();
+    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
+    root.querySelector<HTMLElement>(
+      '.archive-confirmation [data-action="cancel-archive"]',
+    )!.click();
+    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
+    expect(document.activeElement?.closest(".reader-footer")).not.toBeNull();
+  });
+
+  it("persists the text size across articles and application instances", async () => {
+    const firstApi = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    let mountedApp = await mounted(firstApi);
+    mountedApp.root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+    mountedApp.root.querySelector<HTMLButtonElement>(
+      '[data-action="increase-text-size"]',
+    )!.click();
+
+    mountedApp.root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(
+      mountedApp.root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc,
+    ).toContain('style="--article-font-size:22px"');
+
+    mountedApp = await mounted();
+    mountedApp.root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+    expect(
+      mountedApp.root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc,
+    ).toContain('style="--article-font-size:22px"');
+  });
+
+  it("restores relative reading progress after text reflow", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    Object.defineProperty(reader, "clientHeight", { configurable: true, value: 500 });
+    Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 2500 });
+    reader.scrollTop = 1000;
+
+    root.querySelector<HTMLButtonElement>('[data-action="increase-text-size"]')!.click();
+    Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 3500 });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 3000 },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(frame.style.height).toBe("3000px");
+    expect(reader.scrollTop).toBe(1500);
+
+    Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 4500 });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 4000 },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(reader.scrollTop).toBe(1500);
   });
 
   it("opens an accessible archive dialog and honors cancellation", async () => {
@@ -615,6 +941,80 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
     expect(root.querySelector(".reader-placeholder")).not.toBeNull();
     expect(root.querySelector('[role="status"]')?.textContent).toContain("Article archivé");
+
+    const dismiss = root.querySelector<HTMLButtonElement>('[data-action="dismiss-notice"]')!;
+    expect(dismiss.getAttribute("aria-label")).toBe("Fermer la notification");
+    expect(dismiss.getAttribute("title")).toBe("Fermer la notification");
+    dismiss.click();
+    expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    expect(root.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("opens the archive confirmation from the timeline without opening the article", async () => {
+    const { root, api } = await mounted();
+    const archive = root.querySelector<HTMLButtonElement>(
+      '[data-action="timeline-archive"]',
+    )!;
+
+    expect(archive.getAttribute("data-article-id")).toBe(summary.id);
+    expect(archive.getAttribute("aria-label")).toContain(summary.title);
+    archive.click();
+
+    expect(root.querySelector(".reader-placeholder")).not.toBeNull();
+    expect(root.querySelector(".archive-confirmation")?.textContent).toContain(summary.title);
+    expect(api.getArticle).not.toHaveBeenCalled();
+    expect(api.setArticleRead).not.toHaveBeenCalled();
+
+    root.querySelector<HTMLElement>('[data-action="cancel-archive"]')!.click();
+    expect(root.querySelector(".archive-confirmation")).toBeNull();
+    expect(document.activeElement?.getAttribute("data-action")).toBe("timeline-archive");
+    expect(document.activeElement?.getAttribute("data-article-id")).toBe(summary.id);
+  });
+
+  it("archives a timeline article without closing a different selected article", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [
+        structuredClone(summary),
+        structuredClone(secondSummary),
+      ]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>(`[data-article-id="${summary.id}"]`)!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>(
+      `[data-article-row-id="${secondSummary.id}"] [data-action="timeline-archive"]`,
+    )!.click();
+    expect(root.querySelector(".archive-confirmation")?.textContent).toContain(
+      secondSummary.title,
+    );
+    root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+    await flush();
+
+    expect(api.archiveArticle).toHaveBeenCalledWith(secondSummary.id);
+    expect(root.querySelector(`[data-article-row-id="${secondSummary.id}"]`)).toBeNull();
+    expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)?.classList).toContain(
+      "selected",
+    );
+    expect(root.querySelector(".reader-article")?.textContent).toContain(summary.title);
+  });
+
+  it("keeps a timeline article when its archive request fails", async () => {
+    const api = fakeApi({
+      archiveArticle: vi.fn(async () =>
+        Promise.reject({ code: "storage", message: "Archivage impossible" }),
+      ),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-action="timeline-archive"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+    await flush();
+
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("Archivage impossible");
+    expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)).not.toBeNull();
+    expect(root.querySelector(".reader-placeholder")).not.toBeNull();
   });
 
   it("keeps the selected article visible when archiving fails", async () => {
@@ -695,6 +1095,108 @@ describe("InkRiverApp", () => {
     expect(root.textContent).toContain("Actualisation partielle");
     expect(root.textContent).toContain("2 ancien(s) supprimé(s) automatiquement");
     expect(root.textContent).toContain("Observer Mars au crépuscule");
+  });
+
+  it("automatically hides a success notice after eight seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+
+      expect(root.querySelector('[role="status"]')?.textContent).toContain(
+        "Actualisation terminée",
+      );
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-entering");
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(179);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses the notice timeout while it is hovered", async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      const banner = root.querySelector<HTMLElement>(".banner.notice")!;
+      banner.dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+
+      banner.dispatchEvent(new MouseEvent("mouseleave"));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses the notice timeout while its close button has focus", async () => {
+    vi.useFakeTimers();
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+
+      const dismiss = root.querySelector<HTMLButtonElement>('[data-action="dismiss-notice"]')!;
+      dismiss.focus();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+
+      dismiss.blur();
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(root.querySelector('[role="status"]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps error banners visible", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi({
+        refreshFeeds: vi.fn(async () =>
+          Promise.reject({ code: "refresh", message: "Actualisation impossible" }),
+        ),
+      });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
+      await flushMicrotasks();
+
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        "Actualisation impossible",
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        "Actualisation impossible",
+      );
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("renders subscription metadata and the persisted detailed error", async () => {
@@ -779,9 +1281,202 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.addFeed).toHaveBeenCalledWith("https://notes.medium.com/feed", "medium");
     expect(api.refreshFeeds).not.toHaveBeenCalled();
+    expect(api.refreshFeed).not.toHaveBeenCalled();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(
+      "bouton d’actualisation de sa carte",
+    );
     root.querySelector<HTMLElement>('[data-action="toggle-feed"]')!.click();
     await flush();
     expect(api.setFeedActive).toHaveBeenCalledWith("stable-feed-id", false);
+  });
+
+  it("renders an accessible per-feed refresh button and disables it for inactive feeds", async () => {
+    const inactiveFeed: Feed = {
+      ...structuredClone(feed),
+      id: "inactive-feed",
+      url: "https://inactive.example/feed",
+      isActive: false,
+    };
+    const api = fakeApi({
+      listFeeds: vi.fn(async () => [structuredClone(feed), inactiveFeed]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    const activeButton = root.querySelector<HTMLButtonElement>(
+      '[data-feed-card-id="stable-feed-id"] [data-action="refresh-feed"]',
+    )!;
+    const inactiveButton = root.querySelector<HTMLButtonElement>(
+      '[data-feed-card-id="inactive-feed"] [data-action="refresh-feed"]',
+    )!;
+    expect(activeButton.title).toBe("Actualiser ce flux");
+    expect(activeButton.getAttribute("aria-label")).toBe("Actualiser ce flux");
+    expect(activeButton.textContent?.trim()).toBe("");
+    expect(activeButton.disabled).toBe(false);
+    expect(inactiveButton.disabled).toBe(true);
+    expect(inactiveButton.title).toContain("Réactivez");
+  });
+
+  it("refreshes one feed, reloads the cache and remains on subscription management", async () => {
+    const refreshedFeed: Feed = {
+      ...structuredClone(feed),
+      lastSuccessAt: "2026-08-22T12:00:00Z",
+    };
+    const listFeeds = vi
+      .fn<InkRiverApi["listFeeds"]>()
+      .mockResolvedValueOnce([structuredClone(feed)])
+      .mockResolvedValueOnce([refreshedFeed]);
+    const listArticles = vi
+      .fn<InkRiverApi["listArticles"]>()
+      .mockResolvedValueOnce([structuredClone(summary)])
+      .mockResolvedValueOnce([structuredClone(summary), structuredClone(secondSummary)]);
+    const api = fakeApi({ listFeeds, listArticles });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>('[data-action="refresh-feed"]')!.click();
+    await flush();
+
+    expect(api.refreshFeed).toHaveBeenCalledWith(feed.id);
+    expect(api.refreshFeeds).not.toHaveBeenCalled();
+    expect(listFeeds).toHaveBeenCalledTimes(2);
+    expect(listArticles).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(
+      "« Carnet du ciel » actualisé : 1 nouveau(x)",
+    );
+  });
+
+  it("spins only the selected feed button and blocks every refresh while it runs", async () => {
+    let finishRefresh!: (report: RefreshReport) => void;
+    const refreshFeed = vi.fn<InkRiverApi["refreshFeed"]>(
+      () => new Promise((resolve) => { finishRefresh = resolve; }),
+    );
+    const secondFeed: Feed = {
+      ...structuredClone(feed),
+      id: "second-feed",
+      url: "https://second.example/feed",
+    };
+    const api = fakeApi({
+      refreshFeed,
+      listFeeds: vi.fn(async () => [structuredClone(feed), secondFeed]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    root.querySelector<HTMLElement>(
+      '[data-feed-card-id="stable-feed-id"] [data-action="refresh-feed"]',
+    )!.click();
+    await flushMicrotasks();
+
+    const buttons = Array.from(
+      root.querySelectorAll<HTMLButtonElement>('[data-action="refresh-feed"]'),
+    );
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(buttons[0]?.getAttribute("aria-busy")).toBe("true");
+    expect(buttons[1]?.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.disabled).toBe(true);
+
+    finishRefresh({
+      activeFeeds: 1,
+      collectedArticles: 0,
+      insertedArticles: 0,
+      updatedArticles: 0,
+      autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
+      errors: [],
+    });
+    await flush();
+    expect(root.querySelector('[data-action="refresh-feed"]')?.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("preserves subscription scrolling throughout a targeted refresh", async () => {
+    let finishRefresh!: (report: RefreshReport) => void;
+    const api = fakeApi({
+      refreshFeed: vi.fn(
+        () => new Promise<RefreshReport>((resolve) => { finishRefresh = resolve; }),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>(".feed-management")!.scrollTop = 640;
+
+    root.querySelector<HTMLElement>('[data-action="refresh-feed"]')!.click();
+    await flushMicrotasks();
+    expect(root.querySelector<HTMLElement>(".feed-management")?.scrollTop).toBe(640);
+
+    finishRefresh({
+      activeFeeds: 1,
+      collectedArticles: 1,
+      insertedArticles: 0,
+      updatedArticles: 1,
+      autoArchivedArticles: 0,
+      extractedArticles: 0,
+      extractionFailedArticles: 0,
+      extractionSkippedArticles: 0,
+      errors: [],
+    });
+    await flush();
+    expect(root.querySelector<HTMLElement>(".feed-management")?.scrollTop).toBe(640);
+  });
+
+  it("shows a dismissible detailed error toast and persists the error on the feed card", async () => {
+    vi.useFakeTimers();
+    try {
+      const failedFeed: Feed = {
+        ...structuredClone(feed),
+        lastError: {
+          stage: "HTTP request",
+          message: "Connexion refusée",
+          occurredAt: "2026-08-22T12:00:00Z",
+        },
+      };
+      const listFeeds = vi
+        .fn<InkRiverApi["listFeeds"]>()
+        .mockResolvedValueOnce([structuredClone(feed)])
+        .mockResolvedValueOnce([failedFeed]);
+      const api = fakeApi({
+        listFeeds,
+        refreshFeed: vi.fn(async () => ({
+          activeFeeds: 1,
+          collectedArticles: 0,
+          insertedArticles: 0,
+          updatedArticles: 0,
+          autoArchivedArticles: 0,
+          extractedArticles: 0,
+          extractionFailedArticles: 0,
+          extractionSkippedArticles: 0,
+          errors: [{
+            feedId: feed.id,
+            feedUrl: feed.url,
+            stage: "HTTP request",
+            message: "Connexion refusée",
+          }],
+        })),
+      });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+      root.querySelector<HTMLElement>('[data-action="refresh-feed"]')!.click();
+      await flushMicrotasks();
+
+      const toast = root.querySelector<HTMLElement>(".banner.error-notice");
+      expect(toast?.querySelector('[role="alert"]')?.textContent).toContain(
+        "HTTP request : Connexion refusée",
+      );
+      expect(root.querySelector(".feed-error")?.textContent).toContain("Connexion refusée");
+      expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+      expect(root.querySelector('[data-action="dismiss-notice"]')).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(root.querySelector(".banner.error-notice")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".banner.error-notice")).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("cancels feed deletion without changing cached data", async () => {
@@ -884,7 +1579,12 @@ describe("InkRiverApp", () => {
     missing.root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
     expect(missing.root.querySelector(".article-source")?.textContent).toContain("Source indisponible");
-    expect(missing.root.querySelector('[data-action="open-source"]')).toBeNull();
+    expect(missing.root.querySelector('.article-source [data-action="open-source"]')).toBeNull();
+    expect(
+      missing.root.querySelector<HTMLButtonElement>(
+        '.reader-footer [data-action="open-source"]',
+      )?.disabled,
+    ).toBe(true);
     expect(missing.root.querySelector('[data-action="open-original"]')).toBeNull();
     expect(missing.opener).not.toHaveBeenCalled();
 
@@ -895,7 +1595,12 @@ describe("InkRiverApp", () => {
     invalid.root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
     expect(invalid.root.querySelector(".article-source")?.textContent).toContain("Source non prise en charge");
-    expect(invalid.root.querySelector('[data-action="open-source"]')).toBeNull();
+    expect(invalid.root.querySelector('.article-source [data-action="open-source"]')).toBeNull();
+    expect(
+      invalid.root.querySelector<HTMLButtonElement>(
+        '.reader-footer [data-action="open-source"]',
+      )?.disabled,
+    ).toBe(true);
     expect(invalid.root.querySelector('[data-action="open-original"]')).toBeNull();
     expect(invalid.opener).not.toHaveBeenCalled();
   });
@@ -962,6 +1667,95 @@ describe("InkRiverApp", () => {
     expect(frame.style.height).toBe("1235px");
   });
 
+  it("shows the Top button after one viewport and hides it below three quarters", async () => {
+    const { root } = await mounted();
+    expect(root.querySelector('[data-action="reader-top"]')).toBeNull();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    const button = root.querySelector<HTMLButtonElement>('[data-action="reader-top"]')!;
+    Object.defineProperty(reader, "clientHeight", { configurable: true, value: 600 });
+
+    expect(button.getAttribute("title")).toBe("Revenir en haut");
+    expect(button.getAttribute("aria-label")).toBe("Revenir en haut");
+    expect(button.getAttribute("aria-hidden")).toBe("true");
+    expect(button.tabIndex).toBe(-1);
+    expect(button.querySelector("svg")).not.toBeNull();
+
+    reader.scrollTop = 600;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).not.toContain("visible");
+
+    reader.scrollTop = 601;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).toContain("visible");
+    expect(button.getAttribute("aria-hidden")).toBe("false");
+    expect(button.tabIndex).toBe(0);
+
+    reader.scrollTop = 451;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).toContain("visible");
+
+    reader.scrollTop = 450;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(button.classList).not.toContain("visible");
+    expect(button.getAttribute("aria-hidden")).toBe("true");
+    expect(button.tabIndex).toBe(-1);
+  });
+
+  it("scrolls the reader smoothly to the top and respects reduced motion", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    const button = root.querySelector<HTMLButtonElement>('[data-action="reader-top"]')!;
+    const scrollTo = vi.fn();
+    Object.defineProperty(reader, "scrollTo", { configurable: true, value: scrollTo });
+
+    button.click();
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "smooth" });
+
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((media: string) => ({ matches: true, media }) as MediaQueryList),
+    });
+    try {
+      button.click();
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "auto" });
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("starts with the Top button hidden when another article is opened", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+
+    const reader = root.querySelector<HTMLElement>(".reader")!;
+    Object.defineProperty(reader, "clientHeight", { configurable: true, value: 600 });
+    reader.scrollTop = 700;
+    reader.dispatchEvent(new Event("scroll"));
+    expect(root.querySelector(".reader-top-button")?.classList).toContain("visible");
+
+    root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(root.querySelector(".reader-top-button")?.classList).not.toContain("visible");
+    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(0);
+  });
+
   it("keeps fragment links inside the article frame", async () => {
     const linkedDetail = {
       ...detail,
@@ -976,6 +1770,113 @@ describe("InkRiverApp", () => {
     expect(frame.srcdoc).toContain('data-internal-fragment="notes"');
     expect(frame.srcdoc).toContain("destination.scrollIntoView");
     expect(opener).not.toHaveBeenCalled();
+  });
+
+  it("opens article images in a reader lightbox instead of the system browser", async () => {
+    const imageDetail = {
+      ...structuredClone(detail),
+      content: '<a href="https://photos.example/full"><img src="/mars.jpg" alt="Mars au crépuscule"></a>',
+    };
+    const api = fakeApi({ getArticle: vi.fn(async () => imageDetail) });
+    const { root, opener } = await mounted(api);
+    root.querySelector<HTMLElement>("[data-article-id]")!.click();
+    await flush();
+
+    let frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "inkriver:article-image",
+          src: "/mars.jpg",
+          alt: "Mars au crépuscule",
+          imageId: "0",
+        },
+        source: frame.contentWindow,
+      }),
+    );
+
+    const lightbox = root.querySelector<HTMLElement>(".image-lightbox")!;
+    const dialog = lightbox.querySelector<HTMLElement>('[role="dialog"]')!;
+    const image = lightbox.querySelector<HTMLImageElement>(".image-lightbox-image")!;
+    const close = lightbox.querySelector<HTMLButtonElement>(
+      '[data-action="close-image-zoom"]',
+    )!;
+    expect(lightbox.classList).toContain("is-entering");
+    expect(dialog.getAttribute("aria-label")).toBe("Image agrandie : Mars au crépuscule");
+    expect(image.getAttribute("src")).toBe("https://space.example/mars.jpg");
+    expect(image.getAttribute("alt")).toBe("Mars au crépuscule");
+    expect(close.getAttribute("title")).toBe("Fermer l’image");
+    expect(document.activeElement).toBe(close);
+    expect(opener).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    try {
+      close.click();
+      expect(root.querySelector(".image-lightbox")?.classList).toContain("is-leaving");
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".image-lightbox")).toBeNull();
+
+      frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "inkriver:article-image", src: "/mars.jpg", imageId: "0" },
+          source: frame.contentWindow,
+        }),
+      );
+      root.querySelector<HTMLElement>(".image-lightbox")!.click();
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".image-lightbox")).toBeNull();
+
+      frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "inkriver:article-image", src: "/mars.jpg", imageId: "0" },
+          source: frame.contentWindow,
+        }),
+      );
+      root.querySelector<HTMLElement>(".image-lightbox")!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await vi.advanceTimersByTimeAsync(180);
+      expect(root.querySelector(".image-lightbox")).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores unsupported image sources and closes the zoom when changing article", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+    await flush();
+
+    let frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-image", src: "http://unsafe.example/mars.jpg", imageId: "0" },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(root.querySelector(".image-lightbox")).toBeNull();
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "inkriver:article-image", src: "https://safe.example/mars.jpg", imageId: "0" },
+        source: frame.contentWindow,
+      }),
+    );
+    expect(root.querySelector(".image-lightbox")).not.toBeNull();
+
+    root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+    await flush();
+    expect(root.querySelector(".image-lightbox")).toBeNull();
+    expect(root.querySelector(".reader-article")?.textContent).toContain("Observer Vénus");
   });
 
   it("rejects non-HTTP article links and reports opener failures", async () => {
@@ -1059,6 +1960,44 @@ describe("view helpers", () => {
     expect(() => resolveExternalArticleUrl("relative-without-base")).toThrow("Lien invalide");
   });
 
+  it("resolves only safe article image sources", () => {
+    expect(resolveArticleImageUrl("/images/mars.jpg", detail.url)).toBe(
+      "https://space.example/images/mars.jpg",
+    );
+    expect(resolveArticleImageUrl("data:image/png;base64,AAAA")).toBe(
+      "data:image/png;base64,AAAA",
+    );
+    expect(() => resolveArticleImageUrl("http://space.example/mars.jpg")).toThrow(
+      "HTTPS ou data:",
+    );
+    expect(() =>
+      resolveArticleImageUrl("https://user:secret@space.example/mars.jpg"),
+    ).toThrow("HTTPS ou data:");
+    expect(() => resolveArticleImageUrl("/mars.jpg")).toThrow("Image invalide");
+  });
+
+  it("reads and writes text-size preferences with a safe fallback", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        values.set(key, value);
+      }),
+    };
+    expect(readArticleTextSize(storage)).toBe("medium");
+    writeArticleTextSize(storage, "large");
+    expect(readArticleTextSize(storage)).toBe("large");
+
+    values.set("inkriver.articleTextSize", "enormous");
+    expect(readArticleTextSize(storage)).toBe("medium");
+    expect(readArticleTextSize({ getItem: () => { throw new Error("denied"); } })).toBe(
+      "medium",
+    );
+    expect(() =>
+      writeArticleTextSize({ setItem: () => { throw new Error("denied"); } }, "small"),
+    ).not.toThrow();
+  });
+
   it("neutralizes external frame navigation while preserving fragment links", () => {
     const content = prepareArticleContent(
       '<a href="/story" target="_blank">Story</a><a href="#notes" target="_top">Notes</a>',
@@ -1074,16 +2013,42 @@ describe("view helpers", () => {
     expect(links[1]?.hasAttribute("target")).toBe(false);
   });
 
-  it("builds a nonce-protected iframe bridge for links", () => {
+  it("makes article images keyboard-accessible zoom controls", () => {
+    const content = prepareArticleContent(
+      '<a href="https://photos.example/full"><img src="/mars.jpg" alt="Mars"></a>',
+    );
+    const document = new DOMParser().parseFromString(content, "text/html");
+    const image = document.querySelector<HTMLImageElement>("img")!;
+    expect(image.dataset.zoomableImage).toBe("0");
+    expect(image.tabIndex).toBe(0);
+    expect(image.getAttribute("role")).toBe("button");
+    expect(image.getAttribute("aria-label")).toBe("Agrandir l’image : Mars");
+    expect(document.querySelector("a")?.dataset.externalHref).toBe(
+      "https://photos.example/full",
+    );
+  });
+
+  it("builds a nonce-protected iframe bridge for links and text sizing", () => {
     const document = buildArticleDocument(
       '<a href="https://example.com/read">Read</a>',
       "test-nonce",
+      "small",
     );
     expect(document).toContain("script-src 'nonce-test-nonce'");
     expect(document).toContain('<script nonce="test-nonce">');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
+    expect(document).toContain('window.parent.postMessage({type:"inkriver:article-image"');
+    expect(document).toContain('message.type==="inkriver:article-image-focus"');
+    expect(document).toContain('message.type==="inkriver:article-text-size"');
+    expect(document).toContain("[16,18,22].includes(message.fontSize)");
+    expect(document).toContain('style="--article-font-size:16px"');
+    expect(document).toContain("font-size:var(--article-font-size)");
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
     expect(document).toContain('document.addEventListener("click"');
+    expect(document).toContain('document.addEventListener("keydown"');
+    expect(document.indexOf('closest("img[data-zoomable-image]")')).toBeLessThan(
+      document.indexOf('closest("a[data-external-href],a[data-internal-fragment]")'),
+    );
     expect(document).toContain("new ResizeObserver(reportArticleHeight)");
     expect(document).toContain("html,body{overflow:hidden}");
   });

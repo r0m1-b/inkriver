@@ -4,6 +4,7 @@ pub mod config;
 pub mod content_extractor;
 pub mod enrichment;
 pub mod feed;
+pub mod feed_logo;
 pub mod http;
 pub mod page_http;
 pub mod refresh;
