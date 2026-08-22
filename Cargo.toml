@@ -17,8 +17,11 @@ clap = { version = "4.6.4", features = ["derive"] }
 feed-rs = "2.4.0"
 futures-util = "0.3.31"
 html2text = "0.17.1"
+image = { version = "0.25.8", default-features = false, features = ["gif", "ico", "jpeg", "png", "webp"] }
 legible = "0.5.1"
 reqwest = "0.13.4"
+resvg = { version = "0.45.1", default-features = false }
+scraper = "0.24.0"
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "macros"] }

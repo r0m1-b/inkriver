@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::enrichment;
+use crate::feed_logo;
 use crate::service::{self, CollectionReport, FeedCollectionError};
 use crate::storage::{FeedRefreshFailure, Storage, UpsertStats};
 use anyhow::Result;
@@ -97,6 +98,7 @@ async fn store_collection(
         errors,
     } = report;
     let collected_articles = articles.len();
+    let successful_feed_ids = feeds.iter().map(|feed| feed.id.clone()).collect::<Vec<_>>();
     let UpsertStats { inserted, updated } = storage.upsert_articles(&articles).await?;
     let failures = errors
         .iter()
@@ -110,6 +112,7 @@ async fn store_collection(
     storage
         .record_feed_refreshes(&feeds, &failures, refreshed_at)
         .await?;
+    feed_logo::enrich_feed_logos(storage, &successful_feed_ids, refreshed_at).await?;
     let (auto_archived_articles, extraction) = if let Some(feed_id) = maintenance_feed_id {
         (
             storage
@@ -207,6 +210,8 @@ mod tests {
                 title: "Night sky notes".to_string(),
                 description: "Practical astronomy".to_string(),
                 author: Some("Claire".to_string()),
+                site_url: "https://astronomy.example".to_string(),
+                declared_icon_url: None,
             }],
             articles: vec![article("astronomy::jupiter", "astronomy", Source::Substack)],
             errors: vec![collection_error("bread")],
@@ -487,6 +492,8 @@ mod tests {
                     title: "Night sky notes".to_string(),
                     description: "Practical astronomy".to_string(),
                     author: Some("Claire".to_string()),
+                    site_url: "https://astronomy.example".to_string(),
+                    declared_icon_url: None,
                 }],
                 articles: vec![article("astronomy::new", "astronomy", Source::Substack)],
                 errors: Vec::new(),
@@ -539,6 +546,8 @@ mod tests {
                     title: "Night sky notes".to_string(),
                     description: "Practical astronomy".to_string(),
                     author: Some("Claire".to_string()),
+                    site_url: "https://astronomy.example".to_string(),
+                    declared_icon_url: None,
                 }],
                 articles: Vec::new(),
                 errors: Vec::new(),

@@ -129,9 +129,11 @@ shows the current state and lets you explicitly mark the article as read or
 unread; the change is stored in SQLite and immediately reflected in the
 timeline. Each timeline row also provides always-visible star and envelope
 buttons to change favorite and read states without opening the article.
-Source badges pair the Medium or Substack brand mark—or a generic RSS icon—with
-their text label. The brand vectors come from Simple Icons v16.21.0; Medium and
-Substack retain ownership of their respective trademarks.
+Source badges pair their text label with the Medium or Substack brand mark, or
+with the cached website logo of another RSS feed. A generic RSS icon remains
+the fallback when no usable website logo is available. The brand vectors come
+from Simple Icons v16.21.0; Medium and Substack retain ownership of their
+respective trademarks.
 The **All** and **Favorites** tabs above the timeline provide an immediate,
 offline view of starred articles while keeping the same reading panel.
 
@@ -467,6 +469,21 @@ validated HTTP(S) redirects. Private or local network destinations are
 rejected. Failed pages enter a seven-day cooldown; changing an article URL
 makes it eligible immediately.
 
+### Website logo discovery
+
+After an `Other` feed refreshes successfully, InkRiver looks first for an icon
+declared by RSS, Atom, or JSON Feed, then for icon links in the feed website,
+and finally for `/favicon.ico`. Medium and Substack always keep their official
+marks. Logo lookup never runs at application startup or inside the WebView.
+
+Downloads use the same public-network and redirect protections as article-page
+extraction. Images are limited to 512 KiB, validated, and normalized to a
+transparent 64 × 64 PNG before being cached in SQLite. A successful logo stays
+available offline and is not fetched again while the feed website remains the
+same. A failed lookup is retried after seven days; a changed website or declared
+icon is eligible immediately. Any failure is silent and the generic RSS icon
+remains visible.
+
 Main project structure:
 
 ```text
@@ -477,6 +494,7 @@ src/feed.rs     RSS/Atom conversion to the shared model
 src/content_extractor.rs  offline main-content extraction and sanitization
 src/page_http.rs  bounded and public-network-only article page downloads
 src/enrichment.rs  extraction selection, concurrency, and persistence
+src/feed_logo.rs  safe website-logo discovery and normalization
 src/service.rs  collection, deduplication, and sorting
 src/storage.rs  SQLite storage and local states
 src/refresh.rs  import → collection → storage orchestration

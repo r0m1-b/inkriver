@@ -135,9 +135,11 @@ lu ou non lu ; la modification est enregistrée dans SQLite et immédiatement
 répercutée dans la chronologie. Chaque ligne de la chronologie propose également
 des boutons étoile et enveloppe toujours visibles pour changer les états favori
 et lu sans ouvrir l'article.
-Les badges de source associent leur libellé à la marque Medium ou Substack, ou à
-une icône RSS générique. Les vecteurs de marque proviennent de Simple Icons
-v16.21.0 ; Medium et Substack restent propriétaires de leurs marques respectives.
+Les badges de source associent leur libellé à la marque Medium ou Substack, ou
+au logo mis en cache du site pour les autres flux RSS. Une icône RSS générique
+reste affichée lorsqu'aucun logo exploitable n'est disponible. Les vecteurs de
+marque proviennent de Simple Icons v16.21.0 ; Medium et Substack restent
+propriétaires de leurs marques respectives.
 Les onglets **Tous** et **Favoris** au-dessus de la chronologie donnent un accès
 immédiat et hors ligne aux articles étoilés, dans le même panneau de lecture.
 
@@ -482,6 +484,21 @@ requêtes simultanées, avec un délai maximal de 10 secondes, un corps limité 
 locales sont rejetées. Après un échec, la page n'est retentée qu'au bout de sept
 jours ; une modification de son URL la rend immédiatement éligible.
 
+### Découverte du logo des sites
+
+Après l'actualisation réussie d'un flux `Other`, InkRiver cherche d'abord
+l'icône déclarée par RSS, Atom ou JSON Feed, puis les balises d'icône du site et
+enfin `/favicon.ico`. Medium et Substack conservent toujours leurs marques
+officielles. Cette recherche n'a jamais lieu au démarrage ni depuis la WebView.
+
+Les téléchargements réutilisent les protections réseau public et de redirection
+de l'extraction des articles. Chaque image est limitée à 512 Kio, contrôlée puis
+normalisée en PNG transparent 64 × 64 avant sa mise en cache dans SQLite. Un
+logo trouvé reste disponible hors ligne et n'est plus téléchargé tant que le
+site du flux ne change pas. Un échec est retenté après sept jours ; un nouveau
+site ou une nouvelle icône déclarée rend la recherche immédiatement éligible.
+Les échecs restent silencieux et l'icône RSS générique demeure le repli.
+
 Organisation principale :
 
 ```text
@@ -492,6 +509,7 @@ src/feed.rs     conversion RSS/Atom vers le modèle commun
 src/content_extractor.rs  extraction hors ligne et nettoyage du contenu principal
 src/page_http.rs  téléchargement borné des pages sur le réseau public
 src/enrichment.rs  sélection, concurrence et persistance des extractions
+src/feed_logo.rs  découverte et normalisation sûres des logos de sites
 src/service.rs  collecte, déduplication et tri
 src/storage.rs  stockage SQLite et états locaux
 src/refresh.rs  orchestration import → collecte → stockage

@@ -98,8 +98,15 @@ function sourceIcon(platform: Platform): string {
   return '<svg class="source-icon" data-source-icon="rss" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2" fill="currentColor"/><path d="M4 11a9 9 0 0 1 9 9M4 5a15 15 0 0 1 15 15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
 }
 
-function renderSourceBadge(platform: Platform): string {
-  return `<span class="source-identity"><span class="source-logo ${platform}">${sourceIcon(platform)}</span><span class="source ${platform}">${displayPlatform(platform)}</span></span>`;
+function renderSourceBadge(platform: Platform, logoDataUrl: string | null = null): string {
+  const safeLogo = platform === "other" && logoDataUrl?.startsWith("data:image/png;base64,")
+    ? logoDataUrl
+    : null;
+  const icon = safeLogo
+    ? `<img class="source-icon website-icon" data-feed-logo src="${escapeHtml(safeLogo)}" alt="">`
+    : sourceIcon(platform);
+  const websiteClass = safeLogo ? " website" : "";
+  return `<span class="source-identity"><span class="source-logo ${platform}${websiteClass}">${icon}</span><span class="source ${platform}">${displayPlatform(platform)}</span></span>`;
 }
 
 export function detectPlatform(url: string): Platform {
@@ -919,7 +926,7 @@ export class InkRiverApp {
 
         return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
           <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}">
-          <span class="row-top">${renderSourceBadge(article.source)}<time>${displayDate(article.publishedAt)}</time></span>
+          <span class="row-top">${renderSourceBadge(article.source, this.feedLogo(article.feedId))}<time>${displayDate(article.publishedAt)}</time></span>
           <strong>${escapeHtml(title)}</strong>
           <span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span>
           </button>
@@ -949,6 +956,10 @@ export class InkRiverApp {
     </div>`;
   }
 
+  private feedLogo(feedId: string): string | null {
+    return this.feeds.find((feed) => feed.id === feedId)?.logoDataUrl ?? null;
+  }
+
   private renderReader(): string {
     if (!this.selected) {
       return '<div class="reader-placeholder"><img class="reader-placeholder-logo" src="/inkriver-wordmark.png" alt="InkRiver"><p>Sélectionnez un article dans la chronologie.</p></div>';
@@ -970,7 +981,7 @@ export class InkRiverApp {
       ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts" scrolling="no"></iframe>'
       : '<p class="missing-content">Le flux ne fournit pas de contenu pour cet article.</p>';
     return `<article class="reader-article">
-      <header>${renderSourceBadge(article.source)}
+      <header>${renderSourceBadge(article.source, this.feedLogo(article.feedId))}
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
       ${sourceLink}
@@ -1029,7 +1040,7 @@ export class InkRiverApp {
       ? this.feeds
           .map(
             (feed) => `<article class="feed-card ${feed.isActive ? "active" : "inactive"}" data-feed-card-id="${escapeHtml(feed.id)}">
-              <header><div>${renderSourceBadge(feed.platform)}<span class="feed-status">${feed.isActive ? "Actif" : "Inactif"}</span></div><h2>${escapeHtml(feed.title ?? "Flux non actualisé")}</h2></header>
+              <header><div>${renderSourceBadge(feed.platform, feed.logoDataUrl)}<span class="feed-status">${feed.isActive ? "Actif" : "Inactif"}</span></div><h2>${escapeHtml(feed.title ?? "Flux non actualisé")}</h2></header>
               <dl>
                 <div><dt>URL du flux</dt><dd>${escapeHtml(feed.url)}</dd></div>
                 <div><dt>Auteur</dt><dd>${escapeHtml(feed.author ?? "Inconnu")}</dd></div>
@@ -1130,6 +1141,14 @@ export class InkRiverApp {
   }
 
   private bindEvents(): void {
+    this.root.querySelectorAll<HTMLImageElement>("[data-feed-logo]").forEach((logo) => {
+      logo.addEventListener("error", () => {
+        const container = logo.closest<HTMLElement>(".source-logo");
+        if (!container) return;
+        container.classList.remove("website");
+        container.innerHTML = sourceIcon("other");
+      });
+    });
     const noticeBanner = this.root.querySelector<HTMLElement>(".banner.notice");
     this.root
       .querySelector<HTMLElement>('[data-action="dismiss-notice"]')

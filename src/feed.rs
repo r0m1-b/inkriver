@@ -73,6 +73,7 @@ pub struct Feed {
     pub id: String,
     pub title: String,
     pub link: String,
+    pub declared_icon_url: Option<String>,
     pub description: String,
     pub author: Option<String>,
     pub source: Source,
@@ -86,6 +87,8 @@ pub struct FeedMetadata {
     pub title: String,
     pub description: String,
     pub author: Option<String>,
+    pub site_url: String,
+    pub declared_icon_url: Option<String>,
 }
 
 impl Feed {
@@ -103,11 +106,18 @@ impl Feed {
             id,
             title,
             link,
+            declared_icon_url: None,
             description,
             author,
             source,
             entries,
         }
+    }
+
+    /// Attaches the optional icon URL declared by RSS, Atom, or JSON Feed.
+    pub fn with_declared_icon_url(mut self, declared_icon_url: Option<String>) -> Self {
+        self.declared_icon_url = declared_icon_url;
+        self
     }
 
     /// Copies the feed-level fields that must remain available after refresh.
@@ -117,6 +127,8 @@ impl Feed {
             title: self.title.clone(),
             description: self.description.clone(),
             author: self.author.clone(),
+            site_url: self.link.clone(),
+            declared_icon_url: self.declared_icon_url.clone(),
         }
     }
 

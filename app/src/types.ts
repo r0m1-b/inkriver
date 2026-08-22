@@ -29,6 +29,7 @@ export interface Feed {
   lastPublishedAt: string | null;
   lastSuccessAt: string | null;
   lastError: FeedStatusError | null;
+  logoDataUrl: string | null;
 }
 
 export interface FeedStatusError {

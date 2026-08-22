@@ -1,3 +1,4 @@
+use base64::Engine;
 use inkriver::config::Platform;
 use inkriver::refresh::{self, RefreshReport};
 use inkriver::storage::{
@@ -112,6 +113,7 @@ pub struct FeedDto {
     pub last_published_at: Option<String>,
     pub last_success_at: Option<String>,
     pub last_error: Option<StoredFeedErrorDto>,
+    pub logo_data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -138,6 +140,12 @@ impl From<StoredFeed> for FeedDto {
                 stage: error.stage,
                 message: error.message,
                 occurred_at: error.occurred_at.to_rfc3339(),
+            }),
+            logo_data_url: feed.logo_png.map(|png| {
+                format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(png)
+                )
             }),
         }
     }
@@ -579,6 +587,10 @@ mod tests {
         assert_eq!(summaries[0].source, "substack");
         assert_eq!(detail.content_kind, "excerpt");
         assert_eq!(detail.content.as_deref(), Some("<p>Mars est orangée.</p>"));
+        let summary_value = serde_json::to_value(&summaries[0]).unwrap();
+        let detail_value = serde_json::to_value(&detail).unwrap();
+        assert!(summary_value.get("logoDataUrl").is_none());
+        assert!(detail_value.get("logoDataUrl").is_none());
     }
 
     #[test]
@@ -763,6 +775,8 @@ mod tests {
                     title: "Carnet du ciel".to_string(),
                     description: "Observer les planètes".to_string(),
                     author: Some("Claire".to_string()),
+                    site_url: "https://space.example".to_string(),
+                    declared_icon_url: None,
                 }],
                 &[],
                 refreshed_at,
@@ -819,6 +833,30 @@ mod tests {
     }
 
     #[test]
+    fn feed_dto_embeds_cached_png_as_a_data_url() {
+        let dto = FeedDto::from(StoredFeed {
+            id: "feed-id".to_string(),
+            platform: Platform::Other,
+            url: "https://example.com/feed".to_string(),
+            is_active: true,
+            title: Some("Example".to_string()),
+            description: None,
+            author: None,
+            last_published_at: None,
+            last_success_at: None,
+            last_error: None,
+            logo_png: Some(vec![0x89, b'P', b'N', b'G']),
+        });
+
+        assert_eq!(
+            dto.logo_data_url.as_deref(),
+            Some("data:image/png;base64,iVBORw==")
+        );
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["logoDataUrl"], "data:image/png;base64,iVBORw==");
+    }
+
+    #[test]
     fn serialized_dtos_use_camel_case_fields() {
         let value = serde_json::to_value(FeedDto {
             id: "feed-id".to_string(),
@@ -831,6 +869,7 @@ mod tests {
             last_published_at: None,
             last_success_at: None,
             last_error: None,
+            logo_data_url: None,
         })
         .unwrap();
         assert_eq!(value["isActive"], true);

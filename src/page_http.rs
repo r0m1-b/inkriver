@@ -31,6 +31,13 @@ pub struct DownloadedPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedResource {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+    pub final_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageDownloadError(String);
 
 impl PageDownloadError {
@@ -52,6 +59,20 @@ pub async fn download_article_page(url: &str) -> Result<DownloadedPage, PageDown
     download_article_page_with_limits(url, PRODUCTION_LIMITS).await
 }
 
+/// Downloads one public HTTP(S) resource with the article network protections.
+pub async fn download_public_resource(
+    url: &str,
+    max_bytes: usize,
+) -> Result<DownloadedResource, PageDownloadError> {
+    let limits = DownloadLimits {
+        max_bytes,
+        ..PRODUCTION_LIMITS
+    };
+    tokio::time::timeout(limits.timeout, download_public_resource_inner(url, limits))
+        .await
+        .map_err(|_| PageDownloadError::new("resource download timed out"))?
+}
+
 async fn download_article_page_with_limits(
     url: &str,
     limits: DownloadLimits,
@@ -65,6 +86,18 @@ async fn download_article_page_inner(
     url: &str,
     limits: DownloadLimits,
 ) -> Result<DownloadedPage, PageDownloadError> {
+    let resource = download_public_resource_inner(url, limits).await?;
+    validate_html_content(resource.content_type.as_deref(), &resource.bytes)?;
+    Ok(DownloadedPage {
+        html: String::from_utf8_lossy(&resource.bytes).into_owned(),
+        final_url: resource.final_url,
+    })
+}
+
+async fn download_public_resource_inner(
+    url: &str,
+    limits: DownloadLimits,
+) -> Result<DownloadedResource, PageDownloadError> {
     let mut current = validate_page_url(url, limits.allow_private_addresses)?;
 
     for redirect_count in 0..=limits.max_redirects {
@@ -144,14 +177,30 @@ async fn download_article_page_inner(
             body.extend_from_slice(&chunk);
         }
 
-        validate_html_content(content_type.as_deref(), &body)?;
-        return Ok(DownloadedPage {
-            html: String::from_utf8_lossy(&body).into_owned(),
+        return Ok(DownloadedResource {
+            bytes: body,
+            content_type,
             final_url: current.into(),
         });
     }
 
     unreachable!("the redirect loop always returns or continues within its bound")
+}
+
+#[cfg(test)]
+pub(crate) async fn download_test_resource(
+    url: &str,
+    max_bytes: usize,
+) -> Result<DownloadedResource, PageDownloadError> {
+    let limits = DownloadLimits {
+        timeout: Duration::from_millis(250),
+        max_bytes,
+        max_redirects: MAX_REDIRECTS,
+        allow_private_addresses: true,
+    };
+    tokio::time::timeout(limits.timeout, download_public_resource_inner(url, limits))
+        .await
+        .map_err(|_| PageDownloadError::new("resource download timed out"))?
 }
 
 async fn client_for_url(
@@ -394,6 +443,24 @@ mod tests {
 
         assert_eq!(page.final_url, format!("{base_url}/final"));
         assert_eq!(page.html, body);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_resource_download_preserves_bytes_type_and_limits() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlogo";
+        let (base_url, server) = local_server(vec![(Duration::ZERO, response.to_string())]).await;
+
+        let resource = download_test_resource(&format!("{base_url}/logo"), 4)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(resource.bytes, b"logo");
+        assert_eq!(resource.content_type.as_deref(), Some("image/png"));
+
+        let oversized = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n12345";
+        let (base_url, server) = local_server(vec![(Duration::ZERO, oversized.to_string())]).await;
+        assert!(download_test_resource(&base_url, 4).await.is_err());
         server.await.unwrap();
     }
 

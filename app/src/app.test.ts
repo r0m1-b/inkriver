@@ -58,6 +58,7 @@ const feed: Feed = {
   lastPublishedAt: "2026-08-08T12:00:00Z",
   lastSuccessAt: "2026-08-08T12:05:00Z",
   lastError: null,
+  logoDataUrl: null,
 };
 
 beforeEach(() => {
@@ -348,6 +349,93 @@ describe("InkRiverApp", () => {
     expect(root.querySelector('[data-source-icon="substack"]')?.getAttribute("aria-hidden")).toBe(
       "true",
     );
+  });
+
+  it("uses a cached website logo for Other feeds in every view", async () => {
+    const logoDataUrl = "data:image/png;base64,iVBORw0KGgo=";
+    const otherFeed: Feed = {
+      ...structuredClone(feed),
+      platform: "other",
+      logoDataUrl,
+    };
+    const otherSummary: ArticleSummary = {
+      ...structuredClone(summary),
+      source: "other",
+    };
+    const otherDetail: ArticleDetail = {
+      ...structuredClone(detail),
+      source: "other",
+    };
+    const api = fakeApi({
+      listFeeds: vi.fn(async () => [otherFeed]),
+      listArticles: vi.fn(async () => [otherSummary]),
+      getArticle: vi.fn(async () => otherDetail),
+    });
+    const { root } = await mounted(api);
+
+    expect(
+      root.querySelector<HTMLImageElement>('[data-article-row-id="space::mars"] [data-feed-logo]')
+        ?.src,
+    ).toBe(logoDataUrl);
+
+    root.querySelector<HTMLElement>('[data-action="select-article"]')!.click();
+    await flush();
+    expect(root.querySelector<HTMLImageElement>(".reader-article [data-feed-logo]")?.src).toBe(
+      logoDataUrl,
+    );
+
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    expect(root.querySelector<HTMLImageElement>(".feed-card [data-feed-logo]")?.src).toBe(
+      logoDataUrl,
+    );
+  });
+
+  it("keeps branded icons and falls back to RSS for absent, unsafe, or broken logos", async () => {
+    const feeds: Feed[] = [
+      { ...structuredClone(feed), logoDataUrl: "data:image/png;base64,ignored" },
+      {
+        ...structuredClone(feed),
+        id: "other-feed",
+        platform: "other",
+        logoDataUrl: "data:image/png;base64,broken",
+      },
+      {
+        ...structuredClone(feed),
+        id: "unsafe-feed",
+        platform: "other",
+        logoDataUrl: "https://tracker.example/favicon.png",
+      },
+      {
+        ...structuredClone(feed),
+        id: "medium-feed",
+        platform: "medium",
+        logoDataUrl: "data:image/png;base64,ignored",
+      },
+    ];
+    const articles: ArticleSummary[] = [
+      structuredClone(summary),
+      { ...structuredClone(summary), id: "other", feedId: "other-feed", source: "other" },
+      { ...structuredClone(summary), id: "unsafe", feedId: "unsafe-feed", source: "other" },
+      { ...structuredClone(summary), id: "medium", feedId: "medium-feed", source: "medium" },
+    ];
+    const { root } = await mounted(fakeApi({
+      listFeeds: vi.fn(async () => feeds),
+      listArticles: vi.fn(async () => articles),
+    }));
+
+    expect(root.querySelector('[data-article-row-id="space::mars"] [data-source-icon="substack"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::mars"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="medium"] [data-source-icon="medium"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="medium"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="unsafe"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="unsafe"] [data-source-icon="rss"]')).not.toBeNull();
+
+    const broken = root.querySelector<HTMLImageElement>(
+      '[data-article-row-id="other"] [data-feed-logo]',
+    )!;
+    broken.dispatchEvent(new Event("error"));
+    expect(root.querySelector('[data-article-row-id="other"] [data-feed-logo]')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="other"] [data-source-icon="rss"]')).not.toBeNull();
   });
 
   it("toggles a favorite from the timeline without opening the article", async () => {
