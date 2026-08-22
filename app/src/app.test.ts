@@ -304,7 +304,8 @@ describe("InkRiverApp", () => {
     expect(firstRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-label")).toContain("Marquer comme lu");
     expect(secondRow.querySelector('[data-action="timeline-favorite"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(secondRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("true");
-    expect(firstRow.querySelectorAll("button")).toHaveLength(3);
+    expect(firstRow.querySelector('[data-action="timeline-archive"]')?.getAttribute("aria-label")).toContain("Observer Mars au crépuscule");
+    expect(firstRow.querySelectorAll("button")).toHaveLength(4);
   });
 
   it("renders a platform icon while retaining the source label", async () => {
@@ -860,6 +861,72 @@ describe("InkRiverApp", () => {
     expect(root.querySelector(".banner.notice")?.classList).toContain("is-leaving");
     await new Promise((resolve) => setTimeout(resolve, 180));
     expect(root.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("opens the archive confirmation from the timeline without opening the article", async () => {
+    const { root, api } = await mounted();
+    const archive = root.querySelector<HTMLButtonElement>(
+      '[data-action="timeline-archive"]',
+    )!;
+
+    expect(archive.getAttribute("data-article-id")).toBe(summary.id);
+    expect(archive.getAttribute("aria-label")).toContain(summary.title);
+    archive.click();
+
+    expect(root.querySelector(".reader-placeholder")).not.toBeNull();
+    expect(root.querySelector(".archive-confirmation")?.textContent).toContain(summary.title);
+    expect(api.getArticle).not.toHaveBeenCalled();
+    expect(api.setArticleRead).not.toHaveBeenCalled();
+
+    root.querySelector<HTMLElement>('[data-action="cancel-archive"]')!.click();
+    expect(root.querySelector(".archive-confirmation")).toBeNull();
+    expect(document.activeElement?.getAttribute("data-action")).toBe("timeline-archive");
+    expect(document.activeElement?.getAttribute("data-article-id")).toBe(summary.id);
+  });
+
+  it("archives a timeline article without closing a different selected article", async () => {
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [
+        structuredClone(summary),
+        structuredClone(secondSummary),
+      ]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>(`[data-article-id="${summary.id}"]`)!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>(
+      `[data-article-row-id="${secondSummary.id}"] [data-action="timeline-archive"]`,
+    )!.click();
+    expect(root.querySelector(".archive-confirmation")?.textContent).toContain(
+      secondSummary.title,
+    );
+    root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+    await flush();
+
+    expect(api.archiveArticle).toHaveBeenCalledWith(secondSummary.id);
+    expect(root.querySelector(`[data-article-row-id="${secondSummary.id}"]`)).toBeNull();
+    expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)?.classList).toContain(
+      "selected",
+    );
+    expect(root.querySelector(".reader-article")?.textContent).toContain(summary.title);
+  });
+
+  it("keeps a timeline article when its archive request fails", async () => {
+    const api = fakeApi({
+      archiveArticle: vi.fn(async () =>
+        Promise.reject({ code: "storage", message: "Archivage impossible" }),
+      ),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLElement>('[data-action="timeline-archive"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+    await flush();
+
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("Archivage impossible");
+    expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)).not.toBeNull();
+    expect(root.querySelector(".reader-placeholder")).not.toBeNull();
   });
 
   it("keeps the selected article visible when archiving fails", async () => {

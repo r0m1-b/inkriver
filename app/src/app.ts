@@ -13,6 +13,7 @@ type ConfirmAction = (message: string) => boolean;
 type ArticleView = "all" | "favorites";
 type MainView = "articles" | "feeds";
 type NoticeKind = "success" | "error";
+type ArchiveActionOrigin = "reader-header" | "reader-footer" | "timeline";
 export type ArticleTextSize = "small" | "medium" | "large";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
@@ -254,7 +255,7 @@ export class InkRiverApp {
   private deletingFeedId: string | null = null;
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
-  private archiveReturnFocusToFooter = false;
+  private archiveActionOrigin: ArchiveActionOrigin = "reader-header";
   private zoomedImage: { url: string; alt: string; imageId: string } | null = null;
   private imageZoomAppearing = false;
   private imageZoomDismissing = false;
@@ -826,43 +827,61 @@ export class InkRiverApp {
 
   private requestArchiveSelectedArticle(returnFocusToFooter = false): void {
     if (!this.selected) return;
-    this.archiveReturnFocusToFooter = returnFocusToFooter;
-    this.archiveConfirmationArticleId = this.selected.id;
+    this.requestArchiveArticle(
+      this.selected.id,
+      returnFocusToFooter ? "reader-footer" : "reader-header",
+    );
+  }
+
+  private requestArchiveArticle(
+    articleId: string,
+    origin: ArchiveActionOrigin,
+  ): void {
+    if (!this.articles.some((article) => article.id === articleId)) return;
+    this.archiveActionOrigin = origin;
+    this.archiveConfirmationArticleId = articleId;
     this.render();
   }
 
   private cancelArchiveSelectedArticle(): void {
+    const articleId = this.archiveConfirmationArticleId;
+    const origin = this.archiveActionOrigin;
     this.archiveConfirmationArticleId = null;
     this.render();
-    this.root
-      .querySelector<HTMLElement>(
-        this.archiveReturnFocusToFooter
-          ? '.reader-footer [data-action="archive-article"]'
-          : '.reader-actions [data-action="archive-article"]',
+    if (origin === "timeline") {
+      Array.from(
+        this.root.querySelectorAll<HTMLElement>(
+          '[data-action="timeline-archive"]',
+        ),
       )
-      ?.focus();
+        .find((element) => element.dataset.articleId === articleId)
+        ?.focus();
+      return;
+    }
+    this.root.querySelector<HTMLElement>(
+      origin === "reader-footer"
+        ? '.reader-footer [data-action="archive-article"]'
+        : '.reader-actions [data-action="archive-article"]',
+    )?.focus();
   }
 
   private async confirmArchiveSelectedArticle(): Promise<void> {
-    if (
-      !this.selected ||
-      this.selected.id !== this.archiveConfirmationArticleId
-    ) {
+    const articleId = this.archiveConfirmationArticleId;
+    if (!articleId || !this.articles.some((article) => article.id === articleId)) {
       this.archiveConfirmationArticleId = null;
       this.render();
       return;
     }
-    const article = this.selected;
 
     this.archiveConfirmationArticleId = null;
-    this.archivingArticleId = article.id;
+    this.archivingArticleId = articleId;
     this.error = null;
     this.clearNotice();
     this.render();
     try {
-      await this.api.archiveArticle(article.id);
-      this.articles = this.articles.filter((candidate) => candidate.id !== article.id);
-      this.selected = null;
+      await this.api.archiveArticle(articleId);
+      this.articles = this.articles.filter((candidate) => candidate.id !== articleId);
+      if (this.selected?.id === articleId) this.selected = null;
       this.showNotice("Article archivé.");
     } catch (error) {
       this.error = errorMessage(error);
@@ -896,6 +915,8 @@ export class InkRiverApp {
         const readAction = article.isRead ? "Marquer comme non lu" : "Marquer comme lu";
         const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
         const readPending = this.updatingReadArticleIds.has(article.id);
+        const archivePending = this.archivingArticleId === article.id;
+
         return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
           <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}">
           <span class="row-top">${renderSourceBadge(article.source)}<time>${displayDate(article.publishedAt)}</time></span>
@@ -903,8 +924,9 @@ export class InkRiverApp {
           <span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span>
           </button>
           <span class="article-row-actions">
-            <button type="button" class="article-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="timeline-favorite" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${favoriteAction} : ${title}`)}" title="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
-            <button type="button" class="article-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="timeline-read" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${readAction} : ${title}`)}" title="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending ? "disabled" : ""}>${readIcon(article.isRead)}</button>
+            <button type="button" class="article-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="timeline-favorite" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${favoriteAction} : ${title}`)}" title="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
+            <button type="button" class="article-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="timeline-read" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${readAction} : ${title}`)}" title="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button>
+            <button type="button" class="article-icon-button danger" data-action="timeline-archive" data-article-id="${escapeHtml(article.id)}" title="Archiver l’article" aria-label="${escapeHtml(`Archiver l’article : ${title}`)}" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>
           </span>
         </article>`;
       })
@@ -1033,13 +1055,11 @@ export class InkRiverApp {
   }
 
   private renderArchiveConfirmation(): string {
-    if (
-      !this.selected ||
-      this.selected.id !== this.archiveConfirmationArticleId
-    ) {
-      return "";
-    }
-    const title = escapeHtml(this.selected.title ?? "Sans titre");
+    const article = this.articles.find(
+      (candidate) => candidate.id === this.archiveConfirmationArticleId,
+    );
+    if (!article) return "";
+    const title = escapeHtml(article.title ?? "Sans titre");
     return `<div class="modal-backdrop archive-confirmation-backdrop" data-action="cancel-archive-backdrop">
       <section class="confirmation-dialog archive-confirmation" role="dialog" aria-modal="true" aria-labelledby="archive-confirmation-title" aria-describedby="archive-confirmation-description">
         <header><div class="confirmation-symbol" aria-hidden="true">${archiveIcon()}</div><button type="button" class="icon-button" data-action="cancel-archive" aria-label="Fermer">×</button></header>
@@ -1179,6 +1199,11 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="timeline-read"]').forEach((element) => {
       element.addEventListener("click", () =>
         void this.toggleTimelineReadState(element.dataset.stateArticleId!),
+      );
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="timeline-archive"]').forEach((element) => {
+      element.addEventListener("click", () =>
+        this.requestArchiveArticle(element.dataset.articleId!, "timeline"),
       );
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="subscriptions"]').forEach((element) => {

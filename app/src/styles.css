@@ -80,7 +80,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .article-select > strong { font: 650 16px/1.35 Georgia, serif; }
 .row-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .row-top time, .byline { color: var(--muted); font-size: 12px; }
-.byline { padding-right: 76px; }
+.byline { padding-right: 111px; }
 .source-identity { display: inline-flex; align-items: center; gap: 7px; width: fit-content; }
 .source-logo { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; color: #ff6719; }
 .source-logo.medium { color: #000; }
