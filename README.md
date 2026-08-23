@@ -7,8 +7,8 @@ and other compatible subscriptions together in a single timeline and makes
 articles available offline.
 
 The project includes a command-line application and a Tauri 2 desktop
-application for Linux. Both use the same Rust core and SQLite schema. Android
-support is planned for a later stage.
+application for Linux. Both use the same Rust core and SQLite schema. A first
+responsive Android interface is in development on top of the same backend.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
@@ -27,6 +27,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - read cached articles even when some feeds are unavailable;
 - use separate commands to refresh, list, read, and update article states;
 - use a two-pane Linux interface with subscription management;
+- use separate timeline and reader screens on narrow mobile displays;
 - distinguish feed-provided, extracted, excerpt, and missing content;
 - archive articles manually and automatically retain only relevant history;
 - safely extract complete pages for incomplete articles from other feeds;
@@ -97,6 +98,45 @@ npm install
 ```
 
 `app/package-lock.json` pins the resolved versions and should remain committed.
+
+## Prepare Android development
+
+The responsive interface and Android back navigation are implemented, but the
+generated Android project requires the local mobile toolchain. Install Android
+Studio, then use its SDK Manager to install an Android SDK Platform,
+Platform-Tools, Build-Tools, Command-line Tools, and an NDK (side by side).
+
+On Ubuntu, expose Android Studio's bundled JDK and your SDK/NDK. Replace the NDK
+version below with the directory installed on your machine:
+
+```bash
+export JAVA_HOME=/opt/android-studio/jbr
+export ANDROID_HOME="$HOME/Android/Sdk"
+export NDK_HOME="$ANDROID_HOME/ndk/<installed-version>"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+```
+
+Install the Rust Android targets, initialize the native project once, then run
+it on a connected device or emulator:
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi \
+  i686-linux-android x86_64-linux-android
+cd app
+npm run tauri android init
+npm run tauri android dev
+```
+
+Vite reads `TAURI_DEV_HOST`, which lets the device reach the development server.
+To produce a test APK after initialization:
+
+```bash
+npm run tauri android build -- --apk
+```
+
+The Android WebView uses the same Tauri commands, Rust core, migrations, and
+SQLite storage layer as Linux. Its database is created in the application's
+private AppData directory and is not shared with the Linux database.
 
 ## Use the Linux application
 
@@ -511,12 +551,14 @@ app/src-tauri/  Tauri adapter, commands, and configuration
 - the numbers displayed by `list` are not stable between timelines, unlike
   article identifiers;
 - content requiring authentication or a paid subscription is not supported;
-- the interface is not yet adapted to mobile screens;
+- the responsive Android interface still needs validation on a real device or
+  emulator;
+- the generated Android project and APK require a configured JDK, SDK, and NDK;
 - the CLI's `inkriver.db` is still stored in the development repository.
 
-The next step is to adapt the interface to Android. In the installed
-application, SQLite is already the source of truth and lives in the AppData
-directory for the `io.github.r0m1-b.inkriver` bundle.
+The next step is to initialize, run, and refine the Android application on a
+device. In the installed application, SQLite remains the source of truth in the
+private AppData directory for the `io.github.r0m1-b.inkriver` bundle.
 
 ## License
 

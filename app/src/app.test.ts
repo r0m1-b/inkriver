@@ -125,7 +125,7 @@ async function mounted(
   const initialization = app.init();
   expect(root.querySelector('[data-testid="loading"]')).not.toBeNull();
   await initialization;
-  return { root, api, opener, confirmer };
+  return { root, app, api, opener, confirmer };
 }
 
 describe("InkRiverApp", () => {
@@ -143,6 +143,48 @@ describe("InkRiverApp", () => {
     expect(root.textContent).toContain("Observer Mars au crépuscule");
     expect(api.listArticles).toHaveBeenCalledOnce();
     expect(api.refreshFeeds).not.toHaveBeenCalled();
+  });
+
+  it("uses separate timeline and reader screens for the responsive layout", async () => {
+    const { root, app, api } = await mounted();
+
+    expect(root.querySelector("main")?.classList).toContain("mobile-timeline");
+    root.querySelector<HTMLElement>('[data-action="select-article"]')!.click();
+    await flush();
+
+    expect(api.getArticle).toHaveBeenCalledWith(summary.id);
+    expect(root.querySelector("main")?.classList).toContain("mobile-reader");
+    const back = root.querySelector<HTMLButtonElement>(
+      '[data-action="mobile-reader-back"]',
+    );
+    expect(back?.textContent).toContain("Articles");
+    expect(back?.querySelector("svg")).not.toBeNull();
+
+    expect(app.handleBackNavigation()).toBe(true);
+    expect(root.querySelector("main")?.classList).toContain("mobile-timeline");
+    expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)).not.toBeNull();
+    expect(app.handleBackNavigation()).toBe(false);
+  });
+
+  it("closes mobile overlays before leaving the current screen", async () => {
+    const { root, app } = await mounted();
+    root.querySelector<HTMLElement>('[data-action="select-article"]')!.click();
+    await flush();
+    root.querySelector<HTMLElement>('[data-action="archive-article"]')!.click();
+
+    expect(root.querySelector(".archive-confirmation")).not.toBeNull();
+    expect(app.handleBackNavigation()).toBe(true);
+    expect(root.querySelector(".archive-confirmation")).toBeNull();
+    expect(root.querySelector("main")?.classList).toContain("mobile-reader");
+
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="add-subscription"]')!.click();
+    expect(root.querySelector(".add-subscription")).not.toBeNull();
+    expect(app.handleBackNavigation()).toBe(true);
+    expect(root.querySelector(".add-subscription")).toBeNull();
+    expect(root.querySelector("main")?.classList).toContain("feeds-view");
+    expect(app.handleBackNavigation()).toBe(true);
+    expect(root.querySelector("main")?.classList).toContain("mobile-timeline");
   });
 
   it("renders the full InkRiver wordmark while no article is selected", async () => {
@@ -2061,5 +2103,6 @@ describe("view helpers", () => {
     );
     expect(document).toContain("new ResizeObserver(reportArticleHeight)");
     expect(document).toContain("html,body{overflow:hidden}");
+    expect(document).toContain("@media(max-width:720px){body{padding:8px 18px 48px}}");
   });
 });

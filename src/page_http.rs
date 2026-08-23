@@ -231,7 +231,8 @@ async fn client_for_url(
         ));
     }
 
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http::client_builder()
+        .map_err(|error| PageDownloadError::new(format!("cannot configure HTTP client: {error}")))?
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
         .no_proxy()

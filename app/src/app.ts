@@ -12,6 +12,7 @@ type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmAction = (message: string) => boolean;
 type ArticleView = "all" | "favorites" | "unread";
 type MainView = "articles" | "feeds";
+type MobileArticleScreen = "timeline" | "reader";
 type NoticeKind = "success" | "error";
 type ArchiveActionOrigin = "reader-header" | "reader-footer" | "timeline";
 export type ArticleTextSize = "small" | "medium" | "large";
@@ -212,7 +213,7 @@ export function buildArticleDocument(
 ): string {
   const preparedContent = prepareArticleContent(content);
   const fontSize = ARTICLE_TEXT_SIZE_CONFIG[textSize].pixels;
-  return `<!doctype html><html style="--article-font-size:${fontSize}px"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src '${ARTICLE_BRIDGE_CSP_HASH}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font-family:Georgia,serif;font-size:var(--article-font-size);line-height:1.75;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #a84d2f;outline-offset:3px}a{color:#a84d2f}pre{white-space:pre-wrap}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script>${ARTICLE_BRIDGE_SCRIPT}</script></head><body>${preparedContent}</body></html>`;
+  return `<!doctype html><html style="--article-font-size:${fontSize}px"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src '${ARTICLE_BRIDGE_CSP_HASH}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font-family:Georgia,serif;font-size:var(--article-font-size);line-height:1.75;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#292621;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #a84d2f;outline-offset:3px}a{color:#a84d2f}pre{white-space:pre-wrap}@media(max-width:720px){body{padding:8px 18px 48px}}@media(prefers-color-scheme:dark){body{color:#e8e1d8}}</style><script>${ARTICLE_BRIDGE_SCRIPT}</script></head><body>${preparedContent}</body></html>`;
 }
 
 function favoriteIcon(isFavorite: boolean): string {
@@ -237,6 +238,10 @@ function topIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 11 6-6 6 6M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function backIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
 function externalLinkIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5M19 5l-9 9M18 13v6H5V6h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
@@ -255,6 +260,7 @@ export class InkRiverApp {
   private pendingTextSizeProgress: number | null = null;
   private readonly preferenceStorage: PreferenceStorage | null;
   private mainView: MainView = "articles";
+  private mobileArticleScreen: MobileArticleScreen = "timeline";
   private loading = true;
   private refreshing = false;
   private refreshingFeedId: string | null = null;
@@ -351,7 +357,11 @@ export class InkRiverApp {
   }
 
   private async selectArticle(articleId: string): Promise<void> {
-    if (this.selected?.id === articleId) return;
+    if (this.selected?.id === articleId) {
+      this.mobileArticleScreen = "reader";
+      this.render();
+      return;
+    }
     this.discardImageZoom();
     this.pendingTextSizeProgress = null;
     this.error = null;
@@ -360,6 +370,7 @@ export class InkRiverApp {
       if (!this.selected.isRead) {
         await this.setArticleReadState(articleId, true);
       }
+      this.mobileArticleScreen = "reader";
     } catch (error) {
       this.error = errorMessage(error);
     }
@@ -882,7 +893,10 @@ export class InkRiverApp {
     try {
       await this.api.archiveArticle(articleId);
       this.articles = this.articles.filter((candidate) => candidate.id !== articleId);
-      if (this.selected?.id === articleId) this.selected = null;
+      if (this.selected?.id === articleId) {
+        this.selected = null;
+        this.mobileArticleScreen = "timeline";
+      }
       this.showNotice("Article archivé.");
     } catch (error) {
       this.error = errorMessage(error);
@@ -979,6 +993,41 @@ export class InkRiverApp {
       ${content}
       ${this.renderReaderFooter(article, favoritePending, archivePending)}
     </article>`;
+  }
+
+  private renderMobileReaderToolbar(): string {
+    if (!this.selected) return "";
+    return `<nav class="mobile-reader-toolbar" aria-label="Navigation du lecteur"><button type="button" data-action="mobile-reader-back">${backIcon()}<span>Articles</span></button></nav>`;
+  }
+
+  public handleBackNavigation(): boolean {
+    if (this.zoomedImage) {
+      this.closeImageZoom();
+      return true;
+    }
+    if (this.archiveConfirmationArticleId) {
+      this.cancelArchiveSelectedArticle();
+      return true;
+    }
+    if (this.addSubscriptionOpen) {
+      this.addSubscriptionOpen = false;
+      this.render();
+      return true;
+    }
+    if (this.mainView === "feeds") {
+      this.mainView = "articles";
+      this.mobileArticleScreen = "timeline";
+      this.render();
+      this.scrollSelectedArticleIntoView();
+      return true;
+    }
+    if (this.mobileArticleScreen === "reader") {
+      this.mobileArticleScreen = "timeline";
+      this.render();
+      this.scrollSelectedArticleIntoView();
+      return true;
+    }
+    return false;
   }
 
   private renderReaderFooter(
@@ -1088,7 +1137,7 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="${this.noticeKind === "error" ? "alert" : "status"}">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main>${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
+      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
@@ -1168,6 +1217,9 @@ export class InkRiverApp {
     this.root
       .querySelector<HTMLElement>('[data-action="reader-top"]')
       ?.addEventListener("click", () => this.scrollReaderToTop());
+    this.root
+      .querySelector<HTMLElement>('[data-action="mobile-reader-back"]')
+      ?.addEventListener("click", () => this.handleBackNavigation());
     this.root.querySelectorAll<HTMLElement>('[data-action="decrease-text-size"]').forEach((element) => {
       element.addEventListener("click", () => this.changeArticleTextSize(-1));
     });
@@ -1218,6 +1270,7 @@ export class InkRiverApp {
     });
     this.root.querySelector<HTMLElement>('[data-action="show-articles"]')?.addEventListener("click", () => {
       this.mainView = "articles";
+      this.mobileArticleScreen = "timeline";
       this.render();
       this.scrollSelectedArticleIntoView();
     });

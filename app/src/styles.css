@@ -97,6 +97,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .text-button { color: var(--accent); border: 0; background: transparent; text-decoration: underline; }
 
 .reader { min-width: 0; overflow-y: auto; background: var(--paper); }
+.mobile-reader-toolbar { display: none; }
 .reader-placeholder { height: 100%; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); }
 .reader-placeholder-logo { display: block; width: min(460px, 72%); height: auto; border-radius: 18px; box-shadow: 0 16px 40px rgb(7 26 45 / 10%); }
 .reader-article { min-height: 100%; }
@@ -206,4 +207,106 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .feed-error { color: #f1b4ad; border-color: #754841; background: #352724; }
   button.danger { color: #f0aaa3; border-color: #754841; background: #352724; }
   .confirmation-symbol { color: #f0aaa3; border-color: #754841; background: #352724; }
+}
+
+@media (max-width: 720px) {
+  html, body, #app { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+  body { overflow: hidden; }
+  button { min-height: 44px; }
+
+  .shell {
+    height: 100dvh;
+    min-height: 100vh;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .topbar {
+    min-height: 60px;
+    gap: 7px;
+    padding: max(4px, env(safe-area-inset-top)) 10px 5px;
+  }
+  .brand { flex: 0 0 auto; }
+  .brand-logo { width: 46px; height: 46px; }
+  .brand > div { display: none; }
+  .main-navigation { flex: 1; justify-content: center; gap: 2px; }
+  .main-navigation button { min-width: 0; padding: 8px 10px; font-size: 13px; }
+  .top-actions { flex: 0 0 auto; }
+  .refresh-button { width: 44px; height: 44px; }
+  .banners { top: calc(66px + env(safe-area-inset-top)); width: calc(100% - 20px); }
+
+  main.main-view { display: block; min-height: 0; overflow: hidden; }
+  .articles-view.mobile-timeline .timeline { display: block; }
+  .articles-view.mobile-timeline .reader { display: none; }
+  .articles-view.mobile-reader .timeline { display: none; }
+  .articles-view.mobile-reader .reader { display: block; }
+  .timeline, .reader, .feed-management { width: 100%; height: 100%; border: 0; }
+  .timeline-tabs { padding: 8px; }
+  .timeline-view-tabs { gap: 2px; }
+  .timeline-tab { gap: 4px; padding: 8px 5px; font-size: 12px; }
+  .tab-count { min-width: 18px; padding-inline: 5px; }
+  .article-select { min-height: 108px; padding: 16px 14px; }
+  .byline { padding-right: 138px; }
+  .article-row-actions { right: 8px; bottom: 7px; gap: 1px; }
+  .article-icon-button { width: 44px; height: 44px; padding: 11px; }
+
+  .mobile-reader-toolbar {
+    position: sticky;
+    z-index: 5;
+    top: 0;
+    display: flex;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--paper) 94%, transparent);
+    backdrop-filter: blur(8px);
+  }
+  .mobile-reader-toolbar button { display: inline-flex; align-items: center; gap: 4px; padding: 7px 10px; color: var(--accent); border-color: transparent; background: transparent; font-weight: 700; }
+  .mobile-reader-toolbar svg { width: 22px; height: 22px; }
+  .reader-article > header { padding: 28px 18px 20px; }
+  .reader-article h1 { margin-top: 13px; font-size: clamp(30px, 9vw, 42px); }
+  .reader-actions { gap: 8px; margin-top: 20px; }
+  .reader-icon-button { width: 44px; height: 44px; }
+  .text-size-controls { gap: 1px; margin-left: 0; padding-left: 7px; }
+  .text-size-label { min-width: 42px; }
+  .article-content { height: calc(100dvh - 300px); min-height: calc(100dvh - 300px); }
+  .missing-content { margin: 20px 18px; padding: 20px; }
+  .reader-footer { flex-wrap: wrap; margin-inline: 18px; padding: 22px 4px calc(44px + env(safe-area-inset-bottom)); }
+  .reader-top-button { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .reader-placeholder { padding: 24px; }
+  .reader-placeholder-logo { width: min(420px, 92%); }
+  .image-lightbox { position: fixed; inset: 0; padding: 16px; }
+  .image-lightbox-content { max-width: 96%; max-height: 90%; }
+  .image-lightbox-image { max-height: 88dvh; }
+
+  .feed-management { padding: 24px 14px calc(44px + env(safe-area-inset-bottom)); }
+  .feed-management > header { flex-direction: column; gap: 18px; margin-bottom: 22px; }
+  .feed-management > header > button { width: 100%; }
+  .feed-management h1 { font-size: clamp(29px, 9vw, 38px); }
+  .feed-card { padding: 18px 15px; }
+  .feed-card > header > div { flex-wrap: wrap; }
+  .feed-card h2 { margin: 14px 0 18px; font-size: 22px; }
+  .feed-card dl { grid-template-columns: 1fr; gap: 15px; }
+  .feed-card .feed-description { grid-column: auto; }
+  .feed-error { grid-template-columns: 1fr; }
+  .feed-error time, .feed-error p { grid-column: auto; }
+  .feed-actions { flex-wrap: wrap; justify-content: stretch !important; }
+  .feed-actions button:not(.feed-refresh-button) { flex: 1; }
+  .feed-refresh-button { width: 44px; height: 44px; }
+
+  .modal-backdrop { align-items: end; padding: 0; }
+  .subscriptions, .confirmation-dialog {
+    width: 100%;
+    max-height: calc(100dvh - env(safe-area-inset-top));
+    padding: 22px 18px calc(22px + env(safe-area-inset-bottom));
+    border-radius: 18px 18px 0 0;
+  }
+  .subscriptions h2, .confirmation-dialog h2 { font-size: 28px; }
+  #feed-form { grid-template-columns: 1fr; padding: 15px; }
+  #feed-form input, #feed-form select { min-height: 44px; }
+  .confirmation-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .confirmation-actions button { justify-content: center; }
+}
+
+@media (max-width: 360px) {
+  .main-navigation button { padding-inline: 7px; font-size: 12px; }
+  .brand-logo { width: 42px; height: 42px; }
+  .topbar { padding-inline: 7px; }
 }

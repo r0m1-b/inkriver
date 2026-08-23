@@ -3,6 +3,7 @@
   "identifier": "main-capability",
   "description": "Permissions minimales de la fenêtre principale",
   "windows": ["main"],
+  "platforms": ["linux", "macOS", "windows"],
   "permissions": [
     "core:default",
     {
