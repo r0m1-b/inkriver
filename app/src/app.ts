@@ -294,6 +294,7 @@ export class InkRiverApp {
   private error: string | null = null;
   private notice: string | null = null;
   private noticeKind: NoticeKind = "success";
+  private noticeHasCheck = false;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   private noticeTimerStartedAt = 0;
   private noticeRemainingMs = NOTICE_TIMEOUT_MS;
@@ -640,6 +641,7 @@ export class InkRiverApp {
     this.cancelNoticeDismissTimer();
     this.notice = null;
     this.noticeKind = "success";
+    this.noticeHasCheck = false;
     this.noticeRemainingMs = NOTICE_TIMEOUT_MS;
     this.noticeHovered = false;
     this.noticeFocused = false;
@@ -647,10 +649,15 @@ export class InkRiverApp {
     this.noticeDismissing = false;
   }
 
-  private showNotice(message: string, kind: NoticeKind = "success"): void {
+  private showNotice(
+    message: string,
+    kind: NoticeKind = "success",
+    hasCheck = false,
+  ): void {
     this.clearNotice();
     this.notice = message;
     this.noticeKind = kind;
+    this.noticeHasCheck = hasCheck;
     this.noticeAppearing = true;
     this.resumeNoticeTimer();
   }
@@ -819,7 +826,12 @@ export class InkRiverApp {
         this.api.listArticles(),
         this.api.listFeeds(),
       ]);
-      this.showNotice(this.refreshNotice(report));
+      const upToDate = this.isRefreshUpToDate(report);
+      this.showNotice(
+        this.refreshNotice(report),
+        report.errors.length > 0 ? "error" : "success",
+        upToDate,
+      );
       if (this.selected) {
         this.selected = await this.api.getArticle(this.selected.id).catch(() => null);
       }
@@ -857,7 +869,9 @@ export class InkRiverApp {
         );
       } else {
         this.showNotice(
-          `« ${feedName} » actualisé : ${this.refreshResult(report)}.`,
+          this.refreshResult(report),
+          "success",
+          this.isRefreshUpToDate(report),
         );
       }
     } catch (error) {
@@ -873,14 +887,37 @@ export class InkRiverApp {
   }
 
   private refreshResult(report: RefreshReport): string {
-    return `${report.insertedArticles} nouveau(x), ${report.updatedArticles} actualisé(s), ${report.extractedArticles} extrait(s), ${report.extractionFailedArticles} extraction(s) en échec, ${report.extractionSkippedArticles} différée(s), ${report.autoArchivedArticles} ancien(s) supprimé(s) automatiquement`;
+    const parts: string[] = [];
+    if (report.insertedArticles > 0) {
+      parts.push(
+        report.insertedArticles === 1
+          ? "1 nouvel article"
+          : `${report.insertedArticles} nouveaux articles`,
+      );
+    }
+    if (report.autoArchivedArticles > 0) {
+      parts.push(
+        report.autoArchivedArticles === 1
+          ? "1 ancien article supprimé"
+          : `${report.autoArchivedArticles} anciens articles supprimés`,
+      );
+    }
+    return parts.length > 0 ? parts.join(" · ") : "À jour";
+  }
+
+  private isRefreshUpToDate(report: RefreshReport): boolean {
+    return report.errors.length === 0 &&
+      report.insertedArticles === 0 &&
+      report.autoArchivedArticles === 0;
   }
 
   private refreshNotice(report: RefreshReport): string {
     const result = this.refreshResult(report);
-    return report.errors.length === 0
-      ? `Actualisation terminée : ${result}.`
-      : `Actualisation partielle : ${result}, ${report.errors.length} flux en erreur. Consultez la page Abonnements.`;
+    if (report.errors.length === 0) return result;
+    const changes = report.insertedArticles > 0 || report.autoArchivedArticles > 0
+      ? `${result} · `
+      : "";
+    return `${changes}${report.errors.length} flux en erreur. Consultez la page Abonnements.`;
   }
 
   private async submitFeed(form: HTMLFormElement): Promise<void> {
@@ -1356,7 +1393,7 @@ export class InkRiverApp {
       : undefined;
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
-      <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="${this.noticeKind === "error" ? "alert" : "status"}">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
+      <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span class="notice-content" role="${this.noticeKind === "error" ? "alert" : "status"}">${this.noticeHasCheck ? `<span class="notice-check" aria-hidden="true">${checkIcon()}</span>` : ""}<span>${escapeHtml(this.notice)}</span></span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
       <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}

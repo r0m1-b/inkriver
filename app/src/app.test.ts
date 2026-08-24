@@ -1560,9 +1560,9 @@ describe("InkRiverApp", () => {
     expect(root.querySelector("[data-article-row-id]")).toBeNull();
     expect(root.querySelector(".reader-placeholder")).not.toBeNull();
     expect(root.querySelector('[role="status"]')?.textContent).toContain(
-      "1 ancien(s) supprimé(s) automatiquement",
+      "1 ancien article supprimé",
     );
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("2 extrait(s)");
+    expect(root.querySelector('[role="status"]')?.textContent).not.toContain("extrait");
   });
 
   it("reports a partial refresh while retaining cached articles", async () => {
@@ -1582,8 +1582,11 @@ describe("InkRiverApp", () => {
     const { root } = await mounted(api);
     root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
     await flush();
-    expect(root.textContent).toContain("Actualisation partielle");
-    expect(root.textContent).toContain("2 ancien(s) supprimé(s) automatiquement");
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("1 nouvel article");
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      "2 anciens articles supprimés",
+    );
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain("1 flux en erreur");
     expect(root.textContent).toContain("Observer Mars au crépuscule");
   });
 
@@ -1594,9 +1597,8 @@ describe("InkRiverApp", () => {
       root.querySelector<HTMLElement>('[data-action="refresh"]')!.click();
       await flushMicrotasks();
 
-      expect(root.querySelector('[role="status"]')?.textContent).toContain(
-        "Actualisation terminée",
-      );
+      expect(root.querySelector('[role="status"]')?.textContent).toBe("À jour");
+      expect(root.querySelector(".notice-check svg")).not.toBeNull();
       expect(root.querySelector(".banner.notice")?.classList).toContain("is-entering");
       await vi.advanceTimersByTimeAsync(7_999);
       expect(root.querySelector('[role="status"]')).not.toBeNull();
@@ -1833,8 +1835,10 @@ describe("InkRiverApp", () => {
     expect(listArticles).toHaveBeenCalledTimes(2);
     expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
     expect(root.querySelector('[role="status"]')?.textContent).toContain(
-      "« Carnet du ciel » actualisé : 1 nouveau(x)",
+      "1 nouvel article",
     );
+    expect(root.querySelector('[role="status"]')?.textContent).not.toContain("Carnet du ciel");
+    expect(root.querySelector(".notice-check")).toBeNull();
   });
 
   it("spins only the selected feed button and blocks every refresh while it runs", async () => {

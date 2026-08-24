@@ -54,6 +54,9 @@ button.danger:hover { color: #fff; border-color: #9b2f27; background: #9b2f27; }
 .banner.notice.is-entering { animation: notice-fade-in 180ms ease-out both; }
 .banner.notice.is-leaving { pointer-events: none; animation: notice-fade-out 180ms ease-in both; }
 .banner.notice > span { flex: 1; }
+.notice-content { display: flex; align-items: center; gap: 8px; }
+.notice-check { display: grid; flex: 0 0 auto; place-items: center; width: 20px; height: 20px; color: #4f742f; }
+.notice-check svg { width: 100%; height: 100%; }
 .banner-dismiss { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; padding: 0; color: inherit; border-color: transparent; background: transparent; font-size: 21px; line-height: 1; }
 .banner-dismiss:hover { color: #2f4521; border-color: transparent; background: rgb(69 93 51 / 10%); }
 .banners:empty { display: none; }
