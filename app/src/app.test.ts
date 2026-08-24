@@ -114,6 +114,21 @@ async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
+function dispatchTouch(
+  target: HTMLElement,
+  type: "touchstart" | "touchmove" | "touchend" | "touchcancel",
+  clientX = 0,
+  clientY = 0,
+): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  const touches = type === "touchend" || type === "touchcancel"
+    ? []
+    : [{ clientX, clientY }];
+  Object.defineProperty(event, "touches", { configurable: true, value: touches });
+  target.dispatchEvent(event);
+  return event;
+}
+
 async function mounted(
   api = fakeApi(),
   opener = vi.fn(async () => undefined),
@@ -217,6 +232,46 @@ describe("InkRiverApp", () => {
     expect(refresh.getAttribute("aria-label")).toBe("Actualiser");
     expect(refresh.getAttribute("aria-busy")).toBe("false");
     expect(refresh.querySelector("svg")).not.toBeNull();
+  });
+
+  it("refreshes by pulling down only from the top of the mobile timeline", async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((media: string) => ({
+        matches: media === "(max-width: 720px)",
+        media,
+      }) as MediaQueryList),
+    });
+    try {
+      const { root, api } = await mounted();
+      let timeline = root.querySelector<HTMLElement>(".timeline")!;
+      const indicator = timeline.querySelector<HTMLElement>("[data-pull-refresh]")!;
+
+      expect(indicator.getAttribute("aria-hidden")).toBe("true");
+      dispatchTouch(timeline, "touchstart", 24, 100);
+      const move = dispatchTouch(timeline, "touchmove", 24, 260);
+      expect(move.defaultPrevented).toBe(true);
+      expect(indicator.classList).toContain("ready");
+      expect(indicator.textContent).toContain("Relâchez pour actualiser");
+
+      dispatchTouch(timeline, "touchend");
+      expect(api.refreshFeeds).toHaveBeenCalledOnce();
+      expect(root.querySelector("[data-pull-refresh]")?.classList).toContain("refreshing");
+      await flush();
+
+      timeline = root.querySelector<HTMLElement>(".timeline")!;
+      timeline.scrollTop = 10;
+      dispatchTouch(timeline, "touchstart", 24, 100);
+      dispatchTouch(timeline, "touchmove", 24, 280);
+      dispatchTouch(timeline, "touchend");
+      expect(api.refreshFeeds).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
   });
 
   it("shows only cached favorites in the favorites tab and opens them", async () => {

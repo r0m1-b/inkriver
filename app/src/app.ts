@@ -38,6 +38,8 @@ const NOTICE_TIMEOUT_MS = 8_000;
 const NOTICE_FADE_MS = 180;
 const IMAGE_ZOOM_FADE_MS = 180;
 const TOP_BUTTON_SHOW_RATIO = 1;
+const PULL_REFRESH_THRESHOLD = 72;
+const PULL_REFRESH_MAX_DISTANCE = 96;
 const TOP_BUTTON_HIDE_RATIO = 0.75;
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
@@ -689,6 +691,7 @@ export class InkRiverApp {
   }
 
   private async refresh(): Promise<void> {
+    if (this.refreshing) return;
     this.refreshing = true;
     this.refreshingFeedId = null;
     this.error = null;
@@ -957,6 +960,11 @@ export class InkRiverApp {
     </div>`;
   }
 
+  private renderPullRefresh(): string {
+    const label = this.refreshing ? "Actualisation en cours…" : "Tirez pour actualiser";
+    return `<div class="pull-refresh${this.refreshing ? " refreshing" : ""}" data-pull-refresh aria-hidden="${!this.refreshing}"><span class="pull-refresh-icon">${refreshIcon()}</span><span data-pull-refresh-label>${label}</span></div>`;
+  }
+
   private feedLogo(feedId: string): string | null {
     return this.feeds.find((feed) => feed.id === feedId)?.logoDataUrl ?? null;
   }
@@ -1135,7 +1143,7 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="${this.noticeKind === "error" ? "alert" : "status"}">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
+      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
@@ -1212,6 +1220,7 @@ export class InkRiverApp {
       () => this.updateReaderTopButton(reader),
       { passive: true },
     );
+    this.bindPullToRefresh();
     this.root
       .querySelector<HTMLElement>('[data-action="reader-top"]')
       ?.addEventListener("click", () => this.scrollReaderToTop());
@@ -1351,5 +1360,73 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="delete-feed"]').forEach((element) => {
       element.addEventListener("click", () => void this.deleteFeed(element.dataset.feedId!));
     });
+  }
+
+  private bindPullToRefresh(): void {
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    const indicator = timeline?.querySelector<HTMLElement>("[data-pull-refresh]");
+    const view = this.root.ownerDocument.defaultView;
+    if (
+      !timeline ||
+      !indicator ||
+      this.refreshing ||
+      !view?.matchMedia?.("(max-width: 720px)").matches
+    ) return;
+
+    const label = indicator.querySelector<HTMLElement>("[data-pull-refresh-label]");
+    let startX: number | null = null;
+    let startY: number | null = null;
+    let distance = 0;
+
+    const reset = () => {
+      startX = null;
+      startY = null;
+      distance = 0;
+      indicator.style.removeProperty("--pull-distance");
+      indicator.classList.remove("visible", "ready");
+      indicator.setAttribute("aria-hidden", "true");
+      if (label) label.textContent = "Tirez pour actualiser";
+    };
+
+    timeline.addEventListener("touchstart", (event) => {
+      const touch = event.touches[0];
+      if (!touch || timeline.scrollTop > 0 || event.touches.length !== 1) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+      distance = 0;
+    }, { passive: true });
+
+    timeline.addEventListener("touchmove", (event) => {
+      const touch = event.touches[0];
+      if (!touch || startX === null || startY === null) return;
+      const horizontalDistance = Math.abs(touch.clientX - startX);
+      const verticalDistance = touch.clientY - startY;
+      if (horizontalDistance > Math.max(8, verticalDistance)) {
+        reset();
+        return;
+      }
+      if (verticalDistance <= 0 || timeline.scrollTop > 0) {
+        reset();
+        return;
+      }
+      event.preventDefault();
+      distance = Math.min(PULL_REFRESH_MAX_DISTANCE, verticalDistance * 0.5);
+      indicator.style.setProperty("--pull-distance", `${distance}px`);
+      indicator.classList.toggle("visible", distance > 4);
+      indicator.classList.toggle("ready", distance >= PULL_REFRESH_THRESHOLD);
+      indicator.setAttribute("aria-hidden", distance > 4 ? "false" : "true");
+      if (label) {
+        label.textContent = distance >= PULL_REFRESH_THRESHOLD
+          ? "Relâchez pour actualiser"
+          : "Tirez pour actualiser";
+      }
+    }, { passive: false });
+
+    timeline.addEventListener("touchend", () => {
+      const shouldRefresh = distance >= PULL_REFRESH_THRESHOLD;
+      reset();
+      if (shouldRefresh) void this.refresh();
+    });
+    timeline.addEventListener("touchcancel", reset);
   }
 }
