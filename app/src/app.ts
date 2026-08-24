@@ -14,7 +14,7 @@ type ArticleView = "all" | "favorites" | "unread";
 type MainView = "articles" | "feeds";
 type MobileArticleScreen = "timeline" | "reader";
 type NoticeKind = "success" | "error";
-type ArchiveActionOrigin = "reader-header" | "reader-footer" | "timeline";
+type ArchiveActionOrigin = "reader-header" | "timeline";
 export type ArticleTextSize = "small" | "medium" | "large";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
@@ -112,7 +112,7 @@ function renderSourceBadge(platform: Platform, logoDataUrl: string | null = null
     ? `<img class="source-icon website-icon" data-feed-logo src="${escapeHtml(safeLogo)}" alt="">`
     : sourceIcon(platform);
   const websiteClass = safeLogo ? " website" : "";
-  return `<span class="source-identity"><span class="source-logo ${platform}${websiteClass}">${icon}</span><span class="source ${platform}">${displayPlatform(platform)}</span></span>`;
+  return `<span class="source-identity"><span class="source-logo ${platform}${websiteClass}">${icon}</span></span>`;
 }
 
 export function detectPlatform(url: string): Platform {
@@ -837,12 +837,9 @@ export class InkRiverApp {
     if (this.selected?.url) await this.openExternalUrl(this.selected.url);
   }
 
-  private requestArchiveSelectedArticle(returnFocusToFooter = false): void {
+  private requestArchiveSelectedArticle(): void {
     if (!this.selected) return;
-    this.requestArchiveArticle(
-      this.selected.id,
-      returnFocusToFooter ? "reader-footer" : "reader-header",
-    );
+    this.requestArchiveArticle(this.selected.id, "reader-header");
   }
 
   private requestArchiveArticle(
@@ -870,11 +867,9 @@ export class InkRiverApp {
         ?.focus();
       return;
     }
-    this.root.querySelector<HTMLElement>(
-      origin === "reader-footer"
-        ? '.reader-footer [data-action="archive-article"]'
-        : '.reader-actions [data-action="archive-article"]',
-    )?.focus();
+    this.root
+      .querySelector<HTMLElement>('.reader-actions [data-action="archive-article"]')
+      ?.focus();
   }
 
   private async confirmArchiveSelectedArticle(): Promise<void> {
@@ -991,7 +986,7 @@ export class InkRiverApp {
       <!-- <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div> -->
       <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}${this.renderTextSizeControls(true)}</div></header>
       ${content}
-      ${this.renderReaderFooter(article, favoritePending, archivePending)}
+      ${this.renderReaderFooter(article)}
     </article>`;
   }
 
@@ -1030,19 +1025,12 @@ export class InkRiverApp {
     return false;
   }
 
-  private renderReaderFooter(
-    article: ArticleDetail,
-    favoritePending: boolean,
-    archivePending: boolean,
-  ): string {
-    const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
+  private renderReaderFooter(article: ArticleDetail): string {
     const sourceAvailable = articleSourceHost(article.url) !== null && article.url !== null;
     const sourceAction = sourceAvailable
       ? `Ouvrir le lien : ${article.url}`
       : "Lien source indisponible";
     return `<footer class="reader-footer" aria-label="Actions de fin d’article">
-      <button type="button" class="reader-footer-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
-      <button type="button" class="reader-footer-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>
       <button type="button" class="reader-footer-button" data-action="open-source" title="${escapeHtml(sourceAction)}" aria-label="${escapeHtml(sourceAction)}" ${sourceAvailable ? "" : "disabled"}>${externalLinkIcon()}</button>
     </footer>`;
   }
@@ -1293,9 +1281,7 @@ export class InkRiverApp {
       element.addEventListener("click", () => void this.toggleFavorite());
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="archive-article"]').forEach((element) => {
-      element.addEventListener("click", () =>
-        this.requestArchiveSelectedArticle(element.closest(".reader-footer") !== null),
-      );
+      element.addEventListener("click", () => this.requestArchiveSelectedArticle());
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="cancel-archive"]').forEach((element) => {
       element.addEventListener("click", () => this.cancelArchiveSelectedArticle());

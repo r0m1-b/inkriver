@@ -354,7 +354,7 @@ describe("InkRiverApp", () => {
     expect(firstRow.querySelectorAll("button")).toHaveLength(4);
   });
 
-  it("renders a platform icon while retaining the source label", async () => {
+  it("renders platform icons without redundant source labels", async () => {
     const mediumArticle = {
       ...structuredClone(summary),
       id: "source::medium",
@@ -385,12 +385,8 @@ describe("InkRiverApp", () => {
     );
     expect(root.querySelector('[data-source-icon="medium"]')?.closest(".source-logo")).not.toBeNull();
     expect(root.querySelector('[data-source-icon="medium"]')?.closest(".source")).toBeNull();
-    expect(root.querySelector('[data-article-row-id="source::medium"] .source')?.textContent).toBe(
-      "Medium",
-    );
-    expect(root.querySelector('[data-article-row-id="source::rss"] .source')?.textContent).toBe(
-      "RSS",
-    );
+    expect(root.querySelector('[data-article-row-id="source::medium"] .source')).toBeNull();
+    expect(root.querySelector('[data-article-row-id="source::rss"] .source')).toBeNull();
     expect(root.querySelector('[data-source-icon="substack"]')?.getAttribute("aria-hidden")).toBe(
       "true",
     );
@@ -797,21 +793,17 @@ describe("InkRiverApp", () => {
     );
   });
 
-  it("renders favorite, archive and source actions at the end of the article", async () => {
+  it("keeps only the source action at the end of the article", async () => {
     const { root, opener } = await mounted();
     root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
 
     const footer = root.querySelector<HTMLElement>(".reader-footer")!;
-    const favorite = footer.querySelector<HTMLButtonElement>('[data-action="favorite"]')!;
-    const archive = footer.querySelector<HTMLButtonElement>(
-      '[data-action="archive-article"]',
-    )!;
     const source = footer.querySelector<HTMLButtonElement>('[data-action="open-source"]')!;
     expect(footer.getAttribute("aria-label")).toBe("Actions de fin d’article");
-    expect(footer.querySelectorAll(":scope > button")).toHaveLength(3);
-    expect(favorite.getAttribute("title")).toBe("Ajouter aux favoris");
-    expect(archive.getAttribute("title")).toBe("Archiver l’article");
+    expect(footer.querySelectorAll(":scope > button")).toHaveLength(1);
+    expect(footer.querySelector('[data-action="favorite"]')).toBeNull();
+    expect(footer.querySelector('[data-action="archive-article"]')).toBeNull();
     expect(source.getAttribute("title")).toBe(
       "Ouvrir le lien : https://space.example/mars",
     );
@@ -839,32 +831,20 @@ describe("InkRiverApp", () => {
     expect(opener).not.toHaveBeenCalled();
   });
 
-  it("preserves the reading position when using footer actions", async () => {
-    const { root, api } = await mounted();
+  it("preserves the reading position when opening the source from the footer", async () => {
+    const { root, opener } = await mounted();
     root.querySelector<HTMLElement>("[data-article-id]")!.click();
     await flush();
 
     let reader = root.querySelector<HTMLElement>(".reader")!;
     root.querySelector<HTMLIFrameElement>(".article-content")!.style.height = "2400px";
     reader.scrollTop = 900;
-    root.querySelector<HTMLElement>('.reader-footer [data-action="favorite"]')!.click();
+    root.querySelector<HTMLElement>('.reader-footer [data-action="open-source"]')!.click();
     await flush();
 
     reader = root.querySelector<HTMLElement>(".reader")!;
-    expect(api.setArticleFavorite).toHaveBeenCalledWith("space::mars", true);
+    expect(opener).toHaveBeenCalledWith("https://space.example/mars");
     expect(reader.scrollTop).toBe(900);
-    expect(root.querySelectorAll('[data-action="favorite"][aria-pressed="true"]')).toHaveLength(2);
-
-    reader.scrollTop = 900;
-    root.querySelector<HTMLElement>(
-      '.reader-footer [data-action="archive-article"]',
-    )!.click();
-    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
-    root.querySelector<HTMLElement>(
-      '.archive-confirmation [data-action="cancel-archive"]',
-    )!.click();
-    expect(root.querySelector<HTMLElement>(".reader")?.scrollTop).toBe(900);
-    expect(document.activeElement?.closest(".reader-footer")).not.toBeNull();
   });
 
   it("persists the text size across articles and application instances", async () => {

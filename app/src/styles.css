@@ -101,7 +101,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .reader-placeholder { height: 100%; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); }
 .reader-placeholder-logo { display: block; width: min(460px, 72%); height: auto; border-radius: 18px; box-shadow: 0 16px 40px rgb(7 26 45 / 10%); }
 .reader-article { min-height: 100%; }
-.reader-article > header { max-width: 780px; margin: 0 auto; padding: 58px 46px 24px; }
+.reader-article > header { max-width: 780px; margin: 0 auto; padding: 92px 46px 24px; }
 .reader-article h1 { margin: 16px 0 12px; font: 700 clamp(32px, 4vw, 52px)/1.08 Georgia, serif; letter-spacing: -.025em; }
 .reader-article header p { color: var(--muted); }
 .article-source { color: var(--muted); font-size: 13px; }
@@ -109,7 +109,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .article-source-link:hover { color: var(--accent-dark); border-color: transparent; background: transparent; }
 .read-state { margin-top: 18px; color: var(--muted); font-size: 13px; }
 .read-state strong { color: var(--ink); }
-.reader-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 24px; }
+.reader-actions { position: fixed; z-index: 5; top: 68px; right: 0; left: 370px; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; margin: 0; padding: 10px 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 94%, transparent); box-shadow: 0 5px 14px rgb(41 38 33 / 7%); backdrop-filter: blur(8px); }
 .reader-icon-button { display: grid; place-items: center; width: 42px; height: 42px; padding: 9px; color: var(--muted); }
 .reader-icon-button svg { width: 22px; height: 22px; pointer-events: none; }
 .reader-icon-button.favorite.active { color: #c28b28; }
@@ -262,7 +262,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .mobile-reader-toolbar svg { width: 22px; height: 22px; }
   .reader-article > header { padding: 28px 18px 20px; }
   .reader-article h1 { margin-top: 13px; font-size: clamp(30px, 9vw, 42px); }
-  .reader-actions { gap: 8px; margin-top: 20px; }
+  .reader-actions { position: static; justify-content: flex-start; gap: 8px; margin-top: 20px; padding: 0; border-bottom: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
   .reader-icon-button { width: 44px; height: 44px; }
   .text-size-controls { gap: 1px; margin-left: 0; padding-left: 7px; }
   .text-size-label { min-width: 42px; }
