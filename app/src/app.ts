@@ -14,7 +14,7 @@ type ArticleView = "all" | "favorites" | "unread";
 type MainView = "articles" | "feeds";
 type MobileArticleScreen = "timeline" | "reader";
 type NoticeKind = "success" | "error";
-type ArchiveActionOrigin = "reader-header" | "timeline";
+type ArchiveActionOrigin = "reader-header" | "reader-mobile" | "timeline";
 export type ArticleTextSize = "small" | "medium" | "large";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
@@ -837,9 +837,9 @@ export class InkRiverApp {
     if (this.selected?.url) await this.openExternalUrl(this.selected.url);
   }
 
-  private requestArchiveSelectedArticle(): void {
+  private requestArchiveSelectedArticle(origin: ArchiveActionOrigin = "reader-header"): void {
     if (!this.selected) return;
-    this.requestArchiveArticle(this.selected.id, "reader-header");
+    this.requestArchiveArticle(this.selected.id, origin);
   }
 
   private requestArchiveArticle(
@@ -867,9 +867,10 @@ export class InkRiverApp {
         ?.focus();
       return;
     }
-    this.root
-      .querySelector<HTMLElement>('.reader-actions [data-action="archive-article"]')
-      ?.focus();
+    const selector = origin === "reader-mobile"
+      ? '.mobile-reader-toolbar [data-action="archive-article"]'
+      : '.desktop-reader-actions [data-action="archive-article"]';
+    this.root.querySelector<HTMLElement>(selector)?.focus();
   }
 
   private async confirmArchiveSelectedArticle(): Promise<void> {
@@ -928,9 +929,11 @@ export class InkRiverApp {
 
         return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
           <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}">
-          <span class="row-top">${renderSourceBadge(article.source, this.feedLogo(article.feedId))}<time>${displayDate(article.publishedAt)}</time></span>
-          <strong>${escapeHtml(title)}</strong>
-          <span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span>
+          <span class="article-list-logo">${renderSourceBadge(article.source, this.feedLogo(article.feedId))}</span>
+          <span class="article-list-copy">
+            <span class="row-top"><span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span><time>${displayDate(article.publishedAt)}</time></span>
+            <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
+          </span>
           </button>
           <span class="article-row-actions">
             <button type="button" class="article-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="timeline-favorite" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${favoriteAction} : ${title}`)}" title="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
@@ -963,28 +966,20 @@ export class InkRiverApp {
       return '<div class="reader-placeholder"><img class="reader-placeholder-logo" src="/inkriver-wordmark.png" alt="InkRiver"><p>Sélectionnez un article dans la chronologie.</p></div>';
     }
     const article = this.selected;
-    const readPending = this.updatingReadArticleIds.has(article.id);
-    const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
-    const archivePending = this.archivingArticleId === article.id;
-    const readAction = article.isRead ? "Marquer comme non lu" : "Marquer comme lu";
-    const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
     const sourceHost = articleSourceHost(article.url);
     const sourceLink = sourceHost && article.url
-      ? `<div class="article-source">Source : <button type="button" class="article-source-link" data-action="open-source" title="${escapeHtml(article.url)}" aria-label="${escapeHtml(`Ouvrir la source ${sourceHost} dans le navigateur`)}">${escapeHtml(sourceHost)} ↗</button></div>`
+      ? `<div class="article-source">${renderSourceBadge(article.source, this.feedLogo(article.feedId))} <button type="button" class="article-source-link" data-action="open-source" title="${escapeHtml(article.url)}" aria-label="${escapeHtml(`Ouvrir la source ${sourceHost} dans le navigateur`)}">${escapeHtml(sourceHost)} ↗</button></div>`
       : `<div class="article-source">${article.url ? "Source non prise en charge" : "Source indisponible"}</div>`;
-    const originalButton = canOpenOriginal(article)
-      ? '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
-      : "";
     const content = article.content
       ? '<iframe class="article-content" title="Contenu de l’article" sandbox="allow-scripts" scrolling="no"></iframe>'
       : '<p class="missing-content">Le flux ne fournit pas de contenu pour cet article.</p>';
     return `<article class="reader-article">
-      <header>${renderSourceBadge(article.source, this.feedLogo(article.feedId))}
+      <header>
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
       ${sourceLink}
       <!-- <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div> -->
-      <div class="reader-actions"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}${this.renderTextSizeControls(true)}</div></header>
+      ${this.renderReaderActions(article, false)}</header>
       ${content}
       ${this.renderReaderFooter(article)}
     </article>`;
@@ -992,7 +987,22 @@ export class InkRiverApp {
 
   private renderMobileReaderToolbar(): string {
     if (!this.selected) return "";
-    return `<nav class="mobile-reader-toolbar" aria-label="Navigation du lecteur"><button type="button" data-action="mobile-reader-back">${backIcon()}<span>Articles</span></button></nav>`;
+    return `<nav class="mobile-reader-toolbar" aria-label="Navigation et actions du lecteur"><button type="button" class="mobile-reader-back" data-action="mobile-reader-back" title="Retour aux articles" aria-label="Retour aux articles">${backIcon()}</button>${this.renderReaderActions(this.selected, true)}</nav>`;
+  }
+
+  private renderReaderActions(article: ArticleDetail, mobile: boolean): string {
+    const readPending = this.updatingReadArticleIds.has(article.id);
+    const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
+    const archivePending = this.archivingArticleId === article.id;
+    const readAction = article.isRead ? "Marquer comme non lu" : "Marquer comme lu";
+    const favoriteAction = article.isFavorite ? "Retirer des favoris" : "Ajouter aux favoris";
+    const originalButton = canOpenOriginal(article)
+      ? mobile
+        ? `<button type="button" class="reader-icon-button primary" data-action="open-original" title="Lire l’original" aria-label="Lire l’original">${externalLinkIcon()}</button>`
+        : '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
+      : "";
+    const modeClass = mobile ? "mobile-reader-actions" : "desktop-reader-actions";
+    return `<div class="reader-actions ${modeClass}"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}${this.renderTextSizeControls(true)}</div>`;
   }
 
   public handleBackNavigation(): boolean {
@@ -1276,12 +1286,18 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="refresh-feed"]').forEach((element) => {
       element.addEventListener("click", () => void this.refreshFeed(element.dataset.feedId!));
     });
-    this.root.querySelector<HTMLElement>('[data-action="toggle-read"]')?.addEventListener("click", () => void this.toggleReadState());
+    this.root.querySelectorAll<HTMLElement>('[data-action="toggle-read"]').forEach((element) => {
+      element.addEventListener("click", () => void this.toggleReadState());
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="favorite"]').forEach((element) => {
       element.addEventListener("click", () => void this.toggleFavorite());
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="archive-article"]').forEach((element) => {
-      element.addEventListener("click", () => this.requestArchiveSelectedArticle());
+      element.addEventListener("click", () =>
+        this.requestArchiveSelectedArticle(
+          element.closest(".mobile-reader-toolbar") ? "reader-mobile" : "reader-header",
+        ),
+      );
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="cancel-archive"]').forEach((element) => {
       element.addEventListener("click", () => this.cancelArchiveSelectedArticle());
@@ -1315,7 +1331,9 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="open-source"]').forEach((element) => {
       element.addEventListener("click", () => void this.openSelectedOriginal());
     });
-    this.root.querySelector<HTMLElement>('[data-action="open-original"]')?.addEventListener("click", () => void this.openSelectedOriginal());
+    this.root.querySelectorAll<HTMLElement>('[data-action="open-original"]').forEach((element) => {
+      element.addEventListener("click", () => void this.openSelectedOriginal());
+    });
     this.root.querySelector<HTMLFormElement>("#feed-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.submitFeed(event.currentTarget as HTMLFormElement);

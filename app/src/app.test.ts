@@ -157,8 +157,18 @@ describe("InkRiverApp", () => {
     const back = root.querySelector<HTMLButtonElement>(
       '[data-action="mobile-reader-back"]',
     );
-    expect(back?.textContent).toContain("Articles");
+    expect(back?.textContent?.trim()).toBe("");
+    expect(back?.getAttribute("aria-label")).toBe("Retour aux articles");
+    expect(back?.getAttribute("title")).toBe("Retour aux articles");
     expect(back?.querySelector("svg")).not.toBeNull();
+    const mobileActions = root.querySelector<HTMLElement>(".mobile-reader-actions")!;
+    expect(mobileActions.closest(".mobile-reader-toolbar")).not.toBeNull();
+    expect(mobileActions.querySelector('[data-action="toggle-read"]')).not.toBeNull();
+    expect(mobileActions.querySelector('[data-action="favorite"]')).not.toBeNull();
+    expect(mobileActions.querySelector('[data-action="archive-article"]')).not.toBeNull();
+    mobileActions.querySelector<HTMLElement>('[data-action="favorite"]')!.click();
+    await flush();
+    expect(api.setArticleFavorite).toHaveBeenCalledWith(summary.id, true);
 
     expect(app.handleBackNavigation()).toBe(true);
     expect(root.querySelector("main")?.classList).toContain("mobile-timeline");
@@ -352,6 +362,21 @@ describe("InkRiverApp", () => {
     expect(secondRow.querySelector('[data-action="timeline-read"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(firstRow.querySelector('[data-action="timeline-archive"]')?.getAttribute("aria-label")).toContain("Observer Mars au crépuscule");
     expect(firstRow.querySelectorAll("button")).toHaveLength(4);
+  });
+
+  it("places the logo beside an author/date row and a multiline article title", async () => {
+    const { root } = await mounted();
+    const row = root.querySelector<HTMLElement>('[data-article-row-id="space::mars"]')!;
+    const logo = row.querySelector<HTMLElement>(".article-list-logo .source-logo");
+    const copy = row.querySelector<HTMLElement>(".article-list-copy")!;
+    const title = copy.querySelector<HTMLElement>(":scope > strong")!;
+
+    expect(logo).not.toBeNull();
+    expect(row.querySelector(".row-top .source-identity")).toBeNull();
+    expect(copy.querySelector(".row-top .byline")?.textContent).toBe("Claire du Ciel");
+    expect(copy.querySelector(".row-top time")).not.toBeNull();
+    expect(title.textContent).toBe("Observer Mars au crépuscule");
+    expect(title.getAttribute("title")).toBe("Observer Mars au crépuscule");
   });
 
   it("renders platform icons without redundant source labels", async () => {
