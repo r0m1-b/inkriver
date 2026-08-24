@@ -44,6 +44,8 @@ const SWIPE_ARCHIVE_THRESHOLD_RATIO = 0.5;
 const SWIPE_ARCHIVE_EDGE_GUARD = 24;
 const SWIPE_ARCHIVE_INTENT_DISTANCE = 10;
 const SWIPE_ARCHIVE_TRANSITION_MS = 220;
+const ARTICLE_LONG_PRESS_MS = 500;
+const ARTICLE_LONG_PRESS_MOVE_TOLERANCE = 10;
 const TOP_BUTTON_HIDE_RATIO = 0.75;
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
@@ -248,6 +250,10 @@ function backIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function checkIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
 function externalLinkIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5M19 5l-9 9M18 13v6H5V6h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
@@ -276,7 +282,10 @@ export class InkRiverApp {
   private deletingFeedId: string | null = null;
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
+  private archiveConfirmationArticleIds: string[] = [];
   private archiveActionOrigin: ArchiveActionOrigin = "reader-header";
+  private readonly selectedArticleIds = new Set<string>();
+  private batchArticleActionPending = false;
   private zoomedImage: { url: string; alt: string; imageId: string } | null = null;
   private imageZoomAppearing = false;
   private imageZoomDismissing = false;
@@ -404,6 +413,75 @@ export class InkRiverApp {
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     if (timeline) timeline.scrollTop = 0;
     this.scrollSelectedArticleIntoView();
+  }
+
+  private visibleArticles(): ArticleSummary[] {
+    if (this.articleView === "favorites") {
+      return this.articles.filter((article) => article.isFavorite);
+    }
+    if (this.articleView === "unread") {
+      return this.articles.filter((article) => !article.isRead);
+    }
+    return this.articles;
+  }
+
+  private isMobileViewport(): boolean {
+    return this.root.ownerDocument.defaultView?.matchMedia?.("(max-width: 720px)").matches ?? false;
+  }
+
+  private toggleArticleSelection(articleId: string): void {
+    if (this.batchArticleActionPending) return;
+    if (!this.articles.some((article) => article.id === articleId)) return;
+    if (this.selectedArticleIds.has(articleId)) {
+      this.selectedArticleIds.delete(articleId);
+    } else {
+      this.selectedArticleIds.add(articleId);
+    }
+    this.render();
+  }
+
+  private clearArticleSelection(): void {
+    this.selectedArticleIds.clear();
+    this.archiveConfirmationArticleIds = [];
+  }
+
+  private toggleAllVisibleArticles(): void {
+    if (this.batchArticleActionPending) return;
+    const visibleIds = this.visibleArticles().map((article) => article.id);
+    const allSelected = visibleIds.length > 0 &&
+      visibleIds.every((articleId) => this.selectedArticleIds.has(articleId));
+    if (allSelected) {
+      visibleIds.forEach((articleId) => this.selectedArticleIds.delete(articleId));
+    } else {
+      visibleIds.forEach((articleId) => this.selectedArticleIds.add(articleId));
+    }
+    this.render();
+  }
+
+  private async setSelectedArticlesRead(isRead: boolean): Promise<void> {
+    if (this.batchArticleActionPending || this.selectedArticleIds.size === 0) return;
+    const articleIds = [...this.selectedArticleIds];
+    this.batchArticleActionPending = true;
+    this.error = null;
+    this.clearNotice();
+    this.render();
+    try {
+      await this.api.setArticlesRead(articleIds, isRead);
+      const selectedIds = new Set(articleIds);
+      this.articles.forEach((article) => {
+        if (selectedIds.has(article.id)) article.isRead = isRead;
+      });
+      if (this.selected && selectedIds.has(this.selected.id)) this.selected.isRead = isRead;
+      this.selectedArticleIds.clear();
+      this.showNotice(
+        `${articleIds.length} article${articleIds.length > 1 ? "s" : ""} marqué${articleIds.length > 1 ? "s" : ""} comme ${isRead ? "lu" : "non lu"}${articleIds.length > 1 ? "s" : ""}.`,
+      );
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.batchArticleActionPending = false;
+      this.render();
+    }
   }
 
   private textSizeControlState(): {
@@ -855,7 +933,15 @@ export class InkRiverApp {
   ): void {
     if (!this.articles.some((article) => article.id === articleId)) return;
     this.archiveActionOrigin = origin;
+    this.archiveConfirmationArticleIds = [];
     this.archiveConfirmationArticleId = articleId;
+    this.render();
+  }
+
+  private requestArchiveSelectedArticles(): void {
+    if (this.batchArticleActionPending || this.selectedArticleIds.size === 0) return;
+    this.archiveConfirmationArticleId = null;
+    this.archiveConfirmationArticleIds = [...this.selectedArticleIds];
     this.render();
   }
 
@@ -863,7 +949,13 @@ export class InkRiverApp {
     const articleId = this.archiveConfirmationArticleId;
     const origin = this.archiveActionOrigin;
     this.archiveConfirmationArticleId = null;
+    const wasBatchArchive = this.archiveConfirmationArticleIds.length > 0;
+    this.archiveConfirmationArticleIds = [];
     this.render();
+    if (wasBatchArchive) {
+      this.root.querySelector<HTMLElement>('[data-action="archive-selected"]')?.focus();
+      return;
+    }
     if (origin === "timeline") {
       Array.from(
         this.root.querySelectorAll<HTMLElement>(
@@ -881,6 +973,10 @@ export class InkRiverApp {
   }
 
   private async confirmArchiveSelectedArticle(): Promise<void> {
+    if (this.archiveConfirmationArticleIds.length > 0) {
+      await this.confirmArchiveSelectedArticles();
+      return;
+    }
     const articleId = this.archiveConfirmationArticleId;
     if (!articleId || !this.articles.some((article) => article.id === articleId)) {
       this.archiveConfirmationArticleId = null;
@@ -909,16 +1005,47 @@ export class InkRiverApp {
     }
   }
 
+  private async confirmArchiveSelectedArticles(): Promise<void> {
+    const articleIds = this.archiveConfirmationArticleIds.filter((articleId) =>
+      this.selectedArticleIds.has(articleId) &&
+      this.articles.some((article) => article.id === articleId)
+    );
+    this.archiveConfirmationArticleIds = [];
+    if (articleIds.length === 0) {
+      this.render();
+      return;
+    }
+
+    this.batchArticleActionPending = true;
+    this.error = null;
+    this.clearNotice();
+    this.render();
+    try {
+      await this.api.archiveArticles(articleIds);
+      const archivedIds = new Set(articleIds);
+      this.articles = this.articles.filter((article) => !archivedIds.has(article.id));
+      if (this.selected && archivedIds.has(this.selected.id)) {
+        this.selected = null;
+        this.mobileArticleScreen = "timeline";
+      }
+      this.selectedArticleIds.clear();
+      this.showNotice(
+        `${articleIds.length} article${articleIds.length > 1 ? "s archivés" : " archivé"}.`,
+      );
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.batchArticleActionPending = false;
+      this.render();
+    }
+  }
+
   private renderArticleList(): string {
     if (this.loading) return '<div class="state" data-testid="loading">Chargement du cache…</div>';
     if (this.articles.length === 0) {
       return '<div class="state" data-testid="empty">Aucun article enregistré.<button class="text-button" data-action="add-subscription">Ajouter un abonnement</button></div>';
     }
-    const visibleArticles = this.articleView === "favorites"
-      ? this.articles.filter((article) => article.isFavorite)
-      : this.articleView === "unread"
-        ? this.articles.filter((article) => !article.isRead)
-        : this.articles;
+    const visibleArticles = this.visibleArticles();
     if (visibleArticles.length === 0) {
       if (this.articleView === "unread") {
         return '<div class="state" data-testid="unread-empty"><strong>Aucun article non lu.</strong><span>Sélectionnez « Tous » pour retrouver les articles lus.</span></div>';
@@ -933,12 +1060,16 @@ export class InkRiverApp {
         const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
         const readPending = this.updatingReadArticleIds.has(article.id);
         const archivePending = this.archivingArticleId === article.id;
+        const multiSelected = this.selectedArticleIds.has(article.id);
+        const selectionAttributes = this.selectedArticleIds.size > 0
+          ? ` aria-pressed="${multiSelected}"`
+          : "";
 
-        return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
+        return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""} ${multiSelected ? "multi-selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
           <span class="article-swipe-action" aria-hidden="true">${archiveIcon()}<span data-swipe-archive-label>Glissez pour archiver</span></span>
           <div class="article-row-foreground">
-          <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}">
-          <span class="article-list-logo">${renderSourceBadge(article.source, this.feedLogo(article.feedId))}</span>
+          <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}"${selectionAttributes}>
+          <span class="article-list-logo">${multiSelected ? `<span class="article-selection-check">${checkIcon()}</span>` : renderSourceBadge(article.source, this.feedLogo(article.feedId))}</span>
           <span class="article-list-copy">
             <span class="row-top"><span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span><time>${displayDate(article.publishedAt)}</time></span>
             <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
@@ -956,6 +1087,7 @@ export class InkRiverApp {
   }
 
   private renderArticleViews(): string {
+    if (this.selectedArticleIds.size > 0) return this.renderArticleSelectionToolbar();
     const favoriteCount = this.articles.filter((article) => article.isFavorite).length;
     const unreadCount = this.articles.filter((article) => !article.isRead).length;
     return `<div class="timeline-tabs">
@@ -964,6 +1096,25 @@ export class InkRiverApp {
         <button type="button" class="timeline-tab ${this.articleView === "favorites" ? "active" : ""}" data-action="article-view" data-article-view="favorites" role="tab" aria-selected="${this.articleView === "favorites"}">Favoris <span class="tab-count">${favoriteCount}</span></button>
         <button type="button" class="timeline-tab ${this.articleView === "unread" ? "active" : ""}" data-action="article-view" data-article-view="unread" role="tab" aria-selected="${this.articleView === "unread"}">Non lus <span class="tab-count">${unreadCount}</span></button>
       </nav>
+    </div>`;
+  }
+
+  private renderArticleSelectionToolbar(): string {
+    const selectedArticles = this.articles.filter((article) =>
+      this.selectedArticleIds.has(article.id)
+    );
+    const visibleArticles = this.visibleArticles();
+    const allVisibleSelected = visibleArticles.length > 0 &&
+      visibleArticles.every((article) => this.selectedArticleIds.has(article.id));
+    const allRead = selectedArticles.every((article) => article.isRead);
+    const allUnread = selectedArticles.every((article) => !article.isRead);
+    const toggleAllLabel = allVisibleSelected ? "Tout désélectionner" : "Tout sélectionner";
+    const disabled = this.batchArticleActionPending;
+    return `<div class="timeline-tabs article-selection-toolbar" role="toolbar" aria-label="Actions sur ${selectedArticles.length} article${selectedArticles.length > 1 ? "s sélectionnés" : " sélectionné"}">
+      <label class="select-all-control" title="${toggleAllLabel}"><input type="checkbox" data-action="toggle-all-articles" aria-label="${toggleAllLabel}" ${allVisibleSelected ? "checked" : ""} ${disabled ? "disabled" : ""}><span>${selectedArticles.length}</span></label>
+      <button type="button" class="selection-action read-state-icon" data-action="mark-selected-read" title="Marquer comme lus" aria-label="Marquer les articles sélectionnés comme lus" ${disabled || allRead ? "disabled" : ""}>${readIcon(true)}</button>
+      <button type="button" class="selection-action read-state-icon" data-action="mark-selected-unread" title="Marquer comme non lus" aria-label="Marquer les articles sélectionnés comme non lus" ${disabled || allUnread ? "disabled" : ""}>${readIcon(false)}</button>
+      <button type="button" class="selection-action danger" data-action="archive-selected" title="Archiver la sélection" aria-label="Archiver les articles sélectionnés" ${disabled ? "disabled" : ""}>${archiveIcon()}</button>
     </div>`;
   }
 
@@ -1025,12 +1176,17 @@ export class InkRiverApp {
       this.closeImageZoom();
       return true;
     }
-    if (this.archiveConfirmationArticleId) {
+    if (this.archiveConfirmationArticleId || this.archiveConfirmationArticleIds.length > 0) {
       this.cancelArchiveSelectedArticle();
       return true;
     }
     if (this.addSubscriptionOpen) {
       this.addSubscriptionOpen = false;
+      this.render();
+      return true;
+    }
+    if (this.selectedArticleIds.size > 0) {
+      this.clearArticleSelection();
       this.render();
       return true;
     }
@@ -1117,6 +1273,18 @@ export class InkRiverApp {
   }
 
   private renderArchiveConfirmation(): string {
+    if (this.archiveConfirmationArticleIds.length > 0) {
+      const count = this.archiveConfirmationArticleIds.length;
+      return `<div class="modal-backdrop archive-confirmation-backdrop" data-action="cancel-archive-backdrop">
+        <section class="confirmation-dialog archive-confirmation" role="dialog" aria-modal="true" aria-labelledby="archive-confirmation-title" aria-describedby="archive-confirmation-description">
+          <header><div class="confirmation-symbol" aria-hidden="true">${archiveIcon()}</div><button type="button" class="icon-button" data-action="cancel-archive" aria-label="Fermer">×</button></header>
+          <span class="eyebrow">Archivage groupé</span>
+          <h2 id="archive-confirmation-title">Archiver ${count} article${count > 1 ? "s" : ""} ?</h2>
+          <p id="archive-confirmation-description">Les articles disparaîtront de la chronologie et des favoris. Ils ne pourront pas être restaurés depuis InkRiver.</p>
+          <footer class="confirmation-actions"><button type="button" data-action="cancel-archive">Annuler</button><button type="button" class="danger confirmation-danger" data-action="confirm-archive">${archiveIcon()}<span>Archiver</span></button></footer>
+        </section>
+      </div>`;
+    }
     const article = this.articles.find(
       (candidate) => candidate.id === this.archiveConfirmationArticleId,
     );
@@ -1150,7 +1318,7 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="${this.noticeKind === "error" ? "alert" : "status"}">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
+      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
@@ -1258,9 +1426,19 @@ export class InkRiverApp {
         this.showArticleView(element.dataset.articleView as ArticleView),
       );
     });
-    this.root.querySelectorAll<HTMLElement>('[data-action="select-article"]').forEach((element) => {
-      element.addEventListener("click", () => void this.selectArticle(element.dataset.articleId!));
-    });
+    this.bindArticleSelection();
+    this.root
+      .querySelector<HTMLInputElement>('[data-action="toggle-all-articles"]')
+      ?.addEventListener("change", () => this.toggleAllVisibleArticles());
+    this.root
+      .querySelector<HTMLElement>('[data-action="mark-selected-read"]')
+      ?.addEventListener("click", () => void this.setSelectedArticlesRead(true));
+    this.root
+      .querySelector<HTMLElement>('[data-action="mark-selected-unread"]')
+      ?.addEventListener("click", () => void this.setSelectedArticlesRead(false));
+    this.root
+      .querySelector<HTMLElement>('[data-action="archive-selected"]')
+      ?.addEventListener("click", () => this.requestArchiveSelectedArticles());
     this.root.querySelectorAll<HTMLElement>('[data-action="timeline-favorite"]').forEach((element) => {
       element.addEventListener("click", () =>
         void this.toggleTimelineFavorite(element.dataset.stateArticleId!),
@@ -1279,6 +1457,7 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="subscriptions"]').forEach((element) => {
       element.addEventListener("click", () => {
         this.discardImageZoom();
+        this.clearArticleSelection();
         this.mainView = "feeds";
         this.render();
       });
@@ -1370,6 +1549,74 @@ export class InkRiverApp {
     });
   }
 
+  private bindArticleSelection(): void {
+    const mobile = this.isMobileViewport();
+    const view = this.root.ownerDocument.defaultView;
+    this.root.querySelectorAll<HTMLElement>('[data-action="select-article"]').forEach((element) => {
+      let longPressTimer: number | null = null;
+      let startX = 0;
+      let startY = 0;
+      let suppressClick = false;
+
+      const cancelLongPress = () => {
+        if (longPressTimer !== null) {
+          clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+      };
+
+      element.addEventListener("click", (event) => {
+        if (suppressClick) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          suppressClick = false;
+          return;
+        }
+        const articleId = element.dataset.articleId!;
+        if (mobile && this.selectedArticleIds.size > 0) {
+          this.toggleArticleSelection(articleId);
+          return;
+        }
+        void this.selectArticle(articleId);
+      });
+
+      if (!mobile || !view) return;
+      element.addEventListener("contextmenu", (event) => event.preventDefault());
+      element.addEventListener("touchstart", (event) => {
+        const touch = event.touches[0];
+        if (
+          !touch ||
+          event.touches.length !== 1 ||
+          this.selectedArticleIds.size > 0 ||
+          this.batchArticleActionPending
+        ) return;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        cancelLongPress();
+        longPressTimer = view.setTimeout(() => {
+          longPressTimer = null;
+          suppressClick = true;
+          this.toggleArticleSelection(element.dataset.articleId!);
+        }, ARTICLE_LONG_PRESS_MS);
+      }, { passive: true });
+      element.addEventListener("touchmove", (event) => {
+        const touch = event.touches[0];
+        if (!touch || longPressTimer === null) return;
+        if (
+          Math.hypot(touch.clientX - startX, touch.clientY - startY) >
+            ARTICLE_LONG_PRESS_MOVE_TOLERANCE
+        ) {
+          cancelLongPress();
+        }
+      }, { passive: true });
+      element.addEventListener("touchend", (event) => {
+        cancelLongPress();
+        if (suppressClick) event.preventDefault();
+      });
+      element.addEventListener("touchcancel", cancelLongPress);
+    });
+  }
+
   private bindPullToRefresh(): void {
     const timeline = this.root.querySelector<HTMLElement>(".timeline");
     const indicator = timeline?.querySelector<HTMLElement>("[data-pull-refresh]");
@@ -1378,6 +1625,7 @@ export class InkRiverApp {
       !timeline ||
       !indicator ||
       this.refreshing ||
+      this.selectedArticleIds.size > 0 ||
       !view?.matchMedia?.("(max-width: 720px)").matches
     ) return;
 
@@ -1440,7 +1688,10 @@ export class InkRiverApp {
 
   private bindSwipeToArchive(): void {
     const view = this.root.ownerDocument.defaultView;
-    if (!view?.matchMedia?.("(max-width: 720px)").matches) return;
+    if (
+      !view?.matchMedia?.("(max-width: 720px)").matches ||
+      this.selectedArticleIds.size > 0
+    ) return;
 
     this.root.querySelectorAll<HTMLElement>("[data-article-row-id]").forEach((row) => {
       const foreground = row.querySelector<HTMLElement>(".article-row-foreground");

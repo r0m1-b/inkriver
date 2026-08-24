@@ -66,6 +66,14 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .pull-refresh { display: none; }
 .timeline-tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 4px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, #f9f6f0 94%, transparent); backdrop-filter: blur(8px); }
 .timeline-view-tabs { display: grid; flex: 1; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.article-selection-toolbar { align-items: center; justify-content: space-between; }
+.select-all-control { display: flex; align-items: center; gap: 7px; min-height: 38px; padding: 5px 8px; color: var(--muted); border-radius: 9px; font-size: 12px; font-weight: 750; cursor: pointer; }
+.select-all-control:hover { color: var(--ink); background: var(--wash); }
+.select-all-control input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.selection-action { display: grid; place-items: center; width: 38px; height: 38px; padding: 8px; color: var(--muted); border-color: transparent; background: transparent; }
+.selection-action:hover { color: var(--ink); background: var(--wash); }
+.selection-action.danger:hover { color: #fff; background: #a83d32; }
+.selection-action svg { width: 21px; height: 21px; pointer-events: none; }
 .timeline-tab { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 10px; color: var(--muted); border-color: transparent; background: transparent; font-size: 13px; font-weight: 700; }
 .timeline-tab:hover { color: var(--ink); background: var(--wash); }
 .timeline-tab.active { color: var(--accent); border-color: var(--line); background: var(--paper); }
@@ -77,6 +85,10 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .article-select:hover { background: var(--wash); }
 .article-row.selected { background: var(--paper); box-shadow: inset 4px 0 var(--accent); }
 .article-row.selected .article-row-foreground { background: var(--paper); }
+.article-row.multi-selected .article-row-foreground { background: color-mix(in srgb, var(--accent) 10%, var(--timeline-background)); }
+.article-selection-check { display: grid; place-items: center; width: 100%; height: 100%; color: #fff; border-radius: 50%; background: var(--accent); }
+.article-selection-check svg { width: 58%; height: 58%; }
+.article-selection-active .article-row-actions { display: none; }
 .article-row.read .article-list-copy > strong { font-weight: 500; color: #55504a; }
 .article-row.unread .article-list-copy > strong { font-weight: 750; }
 .article-list-logo { display: grid; place-items: center; width: 48px; height: 48px; }
@@ -263,6 +275,10 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .pull-refresh [data-pull-refresh-label] { font-size: 12px; font-weight: 700; }
   .timeline-tabs { padding: 8px; }
   .timeline-view-tabs { gap: 2px; }
+  .article-selection-toolbar { gap: 2px; padding: 8px; }
+  .select-all-control { min-width: 58px; min-height: 44px; padding-inline: 6px; }
+  .select-all-control input { width: 22px; height: 22px; }
+  .selection-action { width: 44px; height: 44px; padding: 10px; }
   .timeline-tab { gap: 4px; padding: 8px 5px; font-size: 12px; }
   .tab-count { min-width: 18px; padding-inline: 5px; }
   .article-select { grid-template-columns: 54px minmax(0, 1fr); min-height: 108px; gap: 12px; padding: 14px; }

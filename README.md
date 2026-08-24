@@ -28,6 +28,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - use separate commands to refresh, list, read, and update article states;
 - use a two-pane Linux interface with subscription management;
 - use separate timeline and reader screens on narrow mobile displays;
+- select several mobile timeline articles with a long press, then mark them
+  read or unread or archive them in one atomic action;
 - distinguish feed-provided, extracted, excerpt, and missing content;
 - archive articles manually and automatically retain only relevant history;
 - safely extract complete pages for incomplete articles from other feeds;

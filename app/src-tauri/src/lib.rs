@@ -320,6 +320,31 @@ async fn set_article_read_in(
     }
 }
 
+async fn set_articles_read_in(
+    storage: &Storage,
+    article_ids: &[String],
+    is_read: bool,
+) -> Result<(), ApiError> {
+    if article_ids.is_empty() {
+        return Err(ApiError::new(
+            "invalid_request",
+            "Sélection d'articles vide",
+        ));
+    }
+    if storage
+        .set_read_many(article_ids, is_read)
+        .await
+        .map_err(ApiError::storage)?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "article_not_found",
+            "Au moins un article est introuvable ou déjà archivé",
+        ))
+    }
+}
+
 async fn set_article_favorite_in(
     storage: &Storage,
     article_id: &str,
@@ -350,6 +375,27 @@ async fn archive_article_in(storage: &Storage, article_id: &str) -> Result<(), A
         Err(ApiError::new(
             "article_not_found",
             format!("Article introuvable : {article_id}"),
+        ))
+    }
+}
+
+async fn archive_articles_in(storage: &Storage, article_ids: &[String]) -> Result<(), ApiError> {
+    if article_ids.is_empty() {
+        return Err(ApiError::new(
+            "invalid_request",
+            "Sélection d'articles vide",
+        ));
+    }
+    if storage
+        .archive_articles_now(article_ids)
+        .await
+        .map_err(ApiError::storage)?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "article_not_found",
+            "Au moins un article est introuvable ou déjà archivé",
         ))
     }
 }
@@ -439,6 +485,15 @@ async fn set_article_read(
 }
 
 #[tauri::command]
+async fn set_articles_read(
+    state: State<'_, AppState>,
+    article_ids: Vec<String>,
+    is_read: bool,
+) -> Result<(), ApiError> {
+    set_articles_read_in(&state.storage, &article_ids, is_read).await
+}
+
+#[tauri::command]
 async fn set_article_favorite(
     state: State<'_, AppState>,
     article_id: String,
@@ -450,6 +505,14 @@ async fn set_article_favorite(
 #[tauri::command]
 async fn archive_article(state: State<'_, AppState>, article_id: String) -> Result<(), ApiError> {
     archive_article_in(&state.storage, &article_id).await
+}
+
+#[tauri::command]
+async fn archive_articles(
+    state: State<'_, AppState>,
+    article_ids: Vec<String>,
+) -> Result<(), ApiError> {
+    archive_articles_in(&state.storage, &article_ids).await
 }
 
 #[tauri::command]
@@ -509,8 +572,10 @@ pub fn run() {
             refresh_feeds,
             refresh_feed,
             set_article_read,
+            set_articles_read,
             set_article_favorite,
             archive_article,
+            archive_articles,
             list_feeds,
             add_feed,
             set_feed_active,
@@ -645,6 +710,88 @@ mod tests {
                 .unwrap_err()
                 .code,
             "article_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn grouped_read_adapter_is_atomic_and_rejects_empty_selection() {
+        let (_directory, storage) = storage_with_article().await;
+        storage
+            .upsert_articles(&[Article {
+                id: "space::venus".to_string(),
+                feed_id: "space".to_string(),
+                title: Some("Observer Vénus".to_string()),
+                author: Some("Claire".to_string()),
+                published_at: None,
+                url: Some("https://space.example/venus".to_string()),
+                content: Some("<p>Vénus est brillante.</p>".to_string()),
+                content_kind: ContentKind::Full,
+                source: Source::Substack,
+            }])
+            .await
+            .unwrap();
+
+        set_articles_read_in(
+            &storage,
+            &["space::mars".to_string(), "space::venus".to_string()],
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            list_articles_from(&storage)
+                .await
+                .unwrap()
+                .iter()
+                .all(|article| article.is_read)
+        );
+
+        let error = set_articles_read_in(
+            &storage,
+            &["space::mars".to_string(), "missing".to_string()],
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "article_not_found");
+        assert!(
+            list_articles_from(&storage)
+                .await
+                .unwrap()
+                .iter()
+                .all(|article| article.is_read)
+        );
+        assert_eq!(
+            set_articles_read_in(&storage, &[], false)
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn grouped_archive_adapter_is_atomic() {
+        let (_directory, storage) = storage_with_article().await;
+        let error = archive_articles_in(
+            &storage,
+            &["space::mars".to_string(), "missing".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "article_not_found");
+        assert_eq!(list_articles_from(&storage).await.unwrap().len(), 1);
+
+        archive_articles_in(
+            &storage,
+            &["space::mars".to_string(), "space::mars".to_string()],
+        )
+        .await
+        .unwrap();
+        assert!(list_articles_from(&storage).await.unwrap().is_empty());
+        assert_eq!(
+            archive_articles_in(&storage, &[]).await.unwrap_err().code,
+            "invalid_request"
         );
     }
 

@@ -96,8 +96,10 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       errors: [],
     })),
     setArticleRead: vi.fn(async () => undefined),
+    setArticlesRead: vi.fn(async () => undefined),
     setArticleFavorite: vi.fn(async () => undefined),
     archiveArticle: vi.fn(async () => undefined),
+    archiveArticles: vi.fn(async () => undefined),
     listFeeds: vi.fn(async () => [structuredClone(feed)]),
     addFeed: vi.fn(async () => structuredClone(feed)),
     setFeedActive: vi.fn(async () => structuredClone(feed)),
@@ -127,6 +129,30 @@ function dispatchTouch(
   Object.defineProperty(event, "touches", { configurable: true, value: touches });
   target.dispatchEvent(event);
   return event;
+}
+
+function installMobileViewport(): () => void {
+  const originalMatchMedia = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((media: string) => ({
+      matches: media === "(max-width: 720px)",
+      media,
+    }) as MediaQueryList),
+  });
+  return () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+  };
+}
+
+function longPressArticle(root: HTMLElement, articleId: string): void {
+  const article = root.querySelector<HTMLElement>(`[data-article-id="${articleId}"]`)!;
+  dispatchTouch(article, "touchstart", 50, 80);
+  vi.advanceTimersByTime(500);
+  expect(dispatchTouch(article, "touchend").defaultPrevented).toBe(true);
 }
 
 async function mounted(
@@ -189,6 +215,267 @@ describe("InkRiverApp", () => {
     expect(root.querySelector("main")?.classList).toContain("mobile-timeline");
     expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)).not.toBeNull();
     expect(app.handleBackNavigation()).toBe(false);
+  });
+
+  it("enters mobile multi-selection after a stationary long press", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const api = fakeApi({
+        listArticles: vi.fn(async () => [
+          structuredClone(summary),
+          structuredClone(secondSummary),
+        ]),
+      });
+      const { root } = await mounted(api);
+      vi.useFakeTimers();
+
+      longPressArticle(root, summary.id);
+
+      expect(api.getArticle).not.toHaveBeenCalled();
+      expect(root.querySelector(".timeline-view-tabs")).toBeNull();
+      expect(root.querySelector(".article-selection-toolbar")?.textContent).toContain("1");
+      const firstRow = root.querySelector<HTMLElement>(
+        `[data-article-row-id="${summary.id}"]`,
+      )!;
+      expect(firstRow.classList).toContain("multi-selected");
+      expect(firstRow.querySelector(".article-selection-check svg")).not.toBeNull();
+      expect(firstRow.querySelector('[data-action="select-article"]')?.getAttribute("aria-pressed"))
+        .toBe("true");
+      expect(firstRow.querySelector(".article-row-actions")).not.toBeNull();
+
+      root.querySelector<HTMLElement>(`[data-article-id="${secondSummary.id}"]`)!.click();
+      expect(root.querySelectorAll(".article-row.multi-selected")).toHaveLength(2);
+      root.querySelector<HTMLElement>(`[data-article-id="${summary.id}"]`)!.click();
+      expect(root.querySelectorAll(".article-row.multi-selected")).toHaveLength(1);
+      root.querySelector<HTMLElement>(`[data-article-id="${secondSummary.id}"]`)!.click();
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+      expect(root.querySelector(".timeline-view-tabs")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("cancels the mobile long press when the finger moves", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const { root, api } = await mounted();
+      vi.useFakeTimers();
+      const article = root.querySelector<HTMLElement>(`[data-article-id="${summary.id}"]`)!;
+
+      dispatchTouch(article, "touchstart", 50, 80);
+      dispatchTouch(article, "touchmove", 50, 91);
+      vi.advanceTimersByTime(500);
+      dispatchTouch(article, "touchend");
+
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+      expect(api.getArticle).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("selects visible articles and applies grouped read states", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const api = fakeApi({
+        listArticles: vi.fn(async () => [
+          structuredClone(summary),
+          structuredClone(secondSummary),
+        ]),
+      });
+      const { root } = await mounted(api);
+      vi.useFakeTimers();
+
+      longPressArticle(root, summary.id);
+      root.querySelector<HTMLInputElement>('[data-action="toggle-all-articles"]')!.click();
+      expect(root.querySelectorAll(".article-row.multi-selected")).toHaveLength(2);
+      root.querySelector<HTMLElement>('[data-action="mark-selected-read"]')!.click();
+      await flushMicrotasks();
+
+      expect(api.setArticlesRead).toHaveBeenCalledWith(
+        expect.arrayContaining([summary.id, secondSummary.id]),
+        true,
+      );
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+      expect(root.querySelectorAll(".article-row.read")).toHaveLength(2);
+
+      longPressArticle(root, summary.id);
+      root.querySelector<HTMLInputElement>('[data-action="toggle-all-articles"]')!.click();
+      root.querySelector<HTMLElement>('[data-action="mark-selected-unread"]')!.click();
+      await flushMicrotasks();
+      expect(api.setArticlesRead).toHaveBeenLastCalledWith(
+        expect.arrayContaining([summary.id, secondSummary.id]),
+        false,
+      );
+      expect(root.querySelectorAll(".article-row.unread")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("limits select all to the current filter and confirms grouped archiving", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const api = fakeApi({
+        listArticles: vi.fn(async () => [
+          structuredClone(summary),
+          structuredClone(secondSummary),
+        ]),
+      });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+      vi.useFakeTimers();
+
+      longPressArticle(root, secondSummary.id);
+      const selectAll = root.querySelector<HTMLInputElement>(
+        '[data-action="toggle-all-articles"]',
+      )!;
+      expect(selectAll.checked).toBe(true);
+      expect(root.querySelectorAll(".article-row.multi-selected")).toHaveLength(1);
+      root.querySelector<HTMLElement>('[data-action="archive-selected"]')!.click();
+      expect(root.querySelector(".archive-confirmation")?.textContent).toContain(
+        "Archiver 1 article",
+      );
+      root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+      await flushMicrotasks();
+
+      expect(api.archiveArticles).toHaveBeenCalledWith([secondSummary.id]);
+      expect(root.querySelector(`[data-article-row-id="${secondSummary.id}"]`)).toBeNull();
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("keeps mobile selection after a grouped update failure", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const api = fakeApi({
+        setArticlesRead: vi.fn(async () =>
+          Promise.reject({ code: "storage", message: "Mise à jour impossible" })
+        ),
+      });
+      const { root } = await mounted(api);
+      vi.useFakeTimers();
+
+      longPressArticle(root, summary.id);
+      root.querySelector<HTMLElement>('[data-action="mark-selected-read"]')!.click();
+      await flushMicrotasks();
+
+      expect(root.querySelector(".article-selection-toolbar")).not.toBeNull();
+      expect(root.querySelector(".article-row.multi-selected")).not.toBeNull();
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        "Mise à jour impossible",
+      );
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("locks mobile selection controls during a grouped update", async () => {
+    const restoreViewport = installMobileViewport();
+    let finishUpdate: (() => void) | undefined;
+    try {
+      const api = fakeApi({
+        setArticlesRead: vi.fn(
+          () => new Promise<void>((resolve) => {
+            finishUpdate = resolve;
+          }),
+        ),
+      });
+      const { root } = await mounted(api);
+      vi.useFakeTimers();
+
+      longPressArticle(root, summary.id);
+      root.querySelector<HTMLElement>('[data-action="mark-selected-read"]')!.click();
+
+      expect(
+        Array.from(
+          root.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
+            ".article-selection-toolbar input, .article-selection-toolbar button",
+          ),
+        ).every((control) => control.disabled),
+      ).toBe(true);
+      root.querySelector<HTMLElement>(`[data-article-id="${summary.id}"]`)!.click();
+      expect(root.querySelector(".article-row.multi-selected")).not.toBeNull();
+
+      finishUpdate?.();
+      await flushMicrotasks();
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("keeps mobile selection when grouped archiving fails", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const api = fakeApi({
+        archiveArticles: vi.fn(async () =>
+          Promise.reject({ code: "storage", message: "Archivage groupé impossible" })
+        ),
+      });
+      const { root } = await mounted(api);
+      vi.useFakeTimers();
+
+      longPressArticle(root, summary.id);
+      root.querySelector<HTMLElement>('[data-action="archive-selected"]')!.click();
+      root.querySelector<HTMLElement>('[data-action="confirm-archive"]')!.click();
+      await flushMicrotasks();
+
+      expect(root.querySelector(".article-selection-toolbar")).not.toBeNull();
+      expect(root.querySelector(".article-row.multi-selected")).not.toBeNull();
+      expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)).not.toBeNull();
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+        "Archivage groupé impossible",
+      );
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
+  });
+
+  it("cancels mobile selection with Back and disables conflicting gestures", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const { root, app, api } = await mounted();
+      vi.useFakeTimers();
+      longPressArticle(root, summary.id);
+
+      const timeline = root.querySelector<HTMLElement>(".timeline")!;
+      dispatchTouch(timeline, "touchstart", 24, 100);
+      dispatchTouch(timeline, "touchmove", 24, 260);
+      dispatchTouch(timeline, "touchend");
+      const row = root.querySelector<HTMLElement>(`[data-article-row-id="${summary.id}"]`)!;
+      const foreground = row.querySelector<HTMLElement>(".article-row-foreground")!;
+      Object.defineProperty(row, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ left: 0, width: 320 }),
+      });
+      dispatchTouch(foreground, "touchstart", 50, 100);
+      dispatchTouch(foreground, "touchmove", 220, 102);
+      dispatchTouch(foreground, "touchend");
+
+      expect(api.refreshFeeds).not.toHaveBeenCalled();
+      expect(api.archiveArticle).not.toHaveBeenCalled();
+      expect(app.handleBackNavigation()).toBe(true);
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+
+      longPressArticle(root, summary.id);
+      root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+      expect(root.querySelector(".feed-management")).not.toBeNull();
+      root.querySelector<HTMLElement>('[data-action="show-articles"]')!.click();
+      expect(root.querySelector(".article-selection-toolbar")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      restoreViewport();
+    }
   });
 
   it("closes mobile overlays before leaving the current screen", async () => {

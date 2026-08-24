@@ -14,8 +14,10 @@ export interface InkRiverApi {
   refreshFeeds(): Promise<RefreshReport>;
   refreshFeed(feedId: string): Promise<RefreshReport>;
   setArticleRead(articleId: string, isRead: boolean): Promise<void>;
+  setArticlesRead(articleIds: string[], isRead: boolean): Promise<void>;
   setArticleFavorite(articleId: string, isFavorite: boolean): Promise<void>;
   archiveArticle(articleId: string): Promise<void>;
+  archiveArticles(articleIds: string[]): Promise<void>;
   listFeeds(): Promise<Feed[]>;
   addFeed(url: string, platform?: Platform): Promise<Feed>;
   setFeedActive(feedId: string, isActive: boolean): Promise<Feed>;
@@ -29,9 +31,12 @@ export const tauriApi: InkRiverApi = {
   refreshFeed: (feedId) => invoke("refresh_feed", { feedId }),
   setArticleRead: (articleId, isRead) =>
     invoke("set_article_read", { articleId, isRead }),
+  setArticlesRead: (articleIds, isRead) =>
+    invoke("set_articles_read", { articleIds, isRead }),
   setArticleFavorite: (articleId, isFavorite) =>
     invoke("set_article_favorite", { articleId, isFavorite }),
   archiveArticle: (articleId) => invoke("archive_article", { articleId }),
+  archiveArticles: (articleIds) => invoke("archive_articles", { articleIds }),
   listFeeds: () => invoke("list_feeds"),
   addFeed: (url, platform) => invoke("add_feed", { url, platform }),
   setFeedActive: (feedId, isActive) =>

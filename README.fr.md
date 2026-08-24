@@ -30,6 +30,8 @@ Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
   locaux des articles ;
 - interface Linux à deux panneaux avec gestion des abonnements ;
 - chronologie et lecteur sur deux écrans distincts sur un affichage mobile ;
+- sélection multiple par appui long dans la chronologie mobile, avec marquage
+  groupé lu/non lu et archivage atomique ;
 - distinction entre contenu fourni par le flux, extrait du Web, résumé et
   contenu absent ;
 - archivage manuel et rétention automatique des articles devenus inutiles ;

@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::collections::HashSet;
 use std::path::Path;
 use std::{error::Error, fmt};
 
@@ -15,6 +16,15 @@ pub const EXTRACTION_RETRY_DAYS: i64 = 7;
 pub const MAX_EXTRACTION_ATTEMPTS_PER_REFRESH: usize = 20;
 pub const LOGO_RETRY_DAYS: i64 = 7;
 pub const MAX_LOGO_ATTEMPTS_PER_REFRESH: usize = 20;
+
+fn unique_article_ids(article_ids: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    article_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|article_id| seen.insert(*article_id))
+        .collect()
+}
 
 /// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
@@ -1155,6 +1165,46 @@ impl Storage {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Changes the read state of several visible articles atomically.
+    ///
+    /// Duplicate identifiers are ignored. Returns `false` without changing any
+    /// article when the list is empty or one identifier is missing or archived.
+    pub async fn set_read_many(&self, article_ids: &[String], is_read: bool) -> Result<bool> {
+        let article_ids = unique_article_ids(article_ids);
+        if article_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer la modification groupée de l'état lu")?;
+        for article_id in article_ids {
+            let result =
+                sqlx::query("UPDATE articles SET is_read = ? WHERE id = ? AND is_archived = 0")
+                    .bind(is_read)
+                    .bind(article_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .with_context(|| {
+                        format!("Impossible de modifier l'état lu de {article_id:?}")
+                    })?;
+            if result.rows_affected() != 1 {
+                transaction
+                    .rollback()
+                    .await
+                    .context("Impossible d'annuler la modification groupée de l'état lu")?;
+                return Ok(false);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider la modification groupée de l'état lu")?;
+        Ok(true)
+    }
+
     /// Changes the favorite state of an article.
     ///
     /// Returns `true` when the article exists and was targeted, even if its
@@ -1206,6 +1256,54 @@ impl Storage {
     /// Archives one article using the current UTC time.
     pub async fn archive_article_now(&self, article_id: &str) -> Result<bool> {
         self.archive_article(article_id, Utc::now()).await
+    }
+
+    /// Archives several visible articles atomically using one timestamp.
+    ///
+    /// Duplicate identifiers are ignored. Returns `false` without changing any
+    /// article when the list is empty or one identifier is missing or archived.
+    pub async fn archive_articles_now(&self, article_ids: &[String]) -> Result<bool> {
+        let article_ids = unique_article_ids(article_ids);
+        if article_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let archived_at = Utc::now();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer l'archivage groupé")?;
+        for article_id in article_ids {
+            let result = sqlx::query(
+                r#"
+                    UPDATE articles
+                    SET is_archived = 1,
+                        archived_at = ?,
+                        archive_reason = 'manual',
+                        content = NULL,
+                        content_kind = 'missing'
+                    WHERE id = ? AND is_archived = 0
+                "#,
+            )
+            .bind(archived_at)
+            .bind(article_id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Impossible d'archiver l'article {article_id:?}"))?;
+            if result.rows_affected() != 1 {
+                transaction
+                    .rollback()
+                    .await
+                    .context("Impossible d'annuler l'archivage groupé")?;
+                return Ok(false);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider l'archivage groupé")?;
+        Ok(true)
     }
 
     /// Archives old read articles that are not favorites and releases their bodies.
@@ -2858,6 +2956,102 @@ mod tests {
         assert!(storage.set_read("astronomy::jupiter", false).await.unwrap());
         assert!(!storage.list_articles().await.unwrap()[0].is_read);
         assert!(!storage.set_read("missing", true).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_read_many_is_atomic_and_ignores_duplicate_ids() {
+        let storage = storage_with_feed().await;
+        let first = article("astronomy::jupiter", "astronomy", None);
+        let second = article("astronomy::saturn", "astronomy", None);
+        storage.upsert_articles(&[first, second]).await.unwrap();
+
+        assert!(
+            storage
+                .set_read_many(
+                    &[
+                        "astronomy::jupiter".to_string(),
+                        "astronomy::jupiter".to_string(),
+                        "astronomy::saturn".to_string(),
+                    ],
+                    true,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .list_articles()
+                .await
+                .unwrap()
+                .iter()
+                .all(|article| article.is_read)
+        );
+
+        assert!(
+            !storage
+                .set_read_many(
+                    &["astronomy::jupiter".to_string(), "missing".to_string()],
+                    false,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .list_articles()
+                .await
+                .unwrap()
+                .iter()
+                .all(|article| article.is_read)
+        );
+        assert!(!storage.set_read_many(&[], false).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn archive_articles_now_is_atomic_and_releases_content() {
+        let storage = storage_with_feed().await;
+        let first = article("astronomy::jupiter", "astronomy", None);
+        let second = article("astronomy::saturn", "astronomy", None);
+        storage.upsert_articles(&[first, second]).await.unwrap();
+
+        assert!(
+            !storage
+                .archive_articles_now(&["astronomy::jupiter".to_string(), "missing".to_string(),])
+                .await
+                .unwrap()
+        );
+        assert_eq!(storage.list_articles().await.unwrap().len(), 2);
+
+        assert!(
+            storage
+                .archive_articles_now(&[
+                    "astronomy::jupiter".to_string(),
+                    "astronomy::saturn".to_string(),
+                    "astronomy::saturn".to_string(),
+                ])
+                .await
+                .unwrap()
+        );
+        assert!(storage.list_articles().await.unwrap().is_empty());
+        for id in ["astronomy::jupiter", "astronomy::saturn"] {
+            let row: (bool, Option<String>, Option<String>, String) = sqlx::query_as(
+                "SELECT is_archived, archive_reason, content, content_kind FROM articles WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                row,
+                (
+                    true,
+                    Some("manual".to_string()),
+                    None,
+                    "missing".to_string()
+                )
+            );
+        }
+        assert!(!storage.archive_articles_now(&[]).await.unwrap());
     }
 
     /// Verifies favorite state can be enabled, disabled, and detects an unknown article.
