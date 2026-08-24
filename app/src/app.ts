@@ -40,6 +40,10 @@ const IMAGE_ZOOM_FADE_MS = 180;
 const TOP_BUTTON_SHOW_RATIO = 1;
 const PULL_REFRESH_THRESHOLD = 72;
 const PULL_REFRESH_MAX_DISTANCE = 96;
+const SWIPE_ARCHIVE_THRESHOLD_RATIO = 0.5;
+const SWIPE_ARCHIVE_EDGE_GUARD = 24;
+const SWIPE_ARCHIVE_INTENT_DISTANCE = 10;
+const SWIPE_ARCHIVE_TRANSITION_MS = 220;
 const TOP_BUTTON_HIDE_RATIO = 0.75;
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
@@ -931,6 +935,8 @@ export class InkRiverApp {
         const archivePending = this.archivingArticleId === article.id;
 
         return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
+          <span class="article-swipe-action" aria-hidden="true">${archiveIcon()}<span data-swipe-archive-label>Glissez pour archiver</span></span>
+          <div class="article-row-foreground">
           <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}">
           <span class="article-list-logo">${renderSourceBadge(article.source, this.feedLogo(article.feedId))}</span>
           <span class="article-list-copy">
@@ -943,6 +949,7 @@ export class InkRiverApp {
             <button type="button" class="article-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="timeline-read" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${readAction} : ${title}`)}" title="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button>
             <button type="button" class="article-icon-button danger" data-action="timeline-archive" data-article-id="${escapeHtml(article.id)}" title="Archiver l’article" aria-label="${escapeHtml(`Archiver l’article : ${title}`)}" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>
           </span>
+          </div>
         </article>`;
       })
       .join("");
@@ -1221,6 +1228,7 @@ export class InkRiverApp {
       { passive: true },
     );
     this.bindPullToRefresh();
+    this.bindSwipeToArchive();
     this.root
       .querySelector<HTMLElement>('[data-action="reader-top"]')
       ?.addEventListener("click", () => this.scrollReaderToTop());
@@ -1428,5 +1436,154 @@ export class InkRiverApp {
       if (shouldRefresh) void this.refresh();
     });
     timeline.addEventListener("touchcancel", reset);
+  }
+
+  private bindSwipeToArchive(): void {
+    const view = this.root.ownerDocument.defaultView;
+    if (!view?.matchMedia?.("(max-width: 720px)").matches) return;
+
+    this.root.querySelectorAll<HTMLElement>("[data-article-row-id]").forEach((row) => {
+      const foreground = row.querySelector<HTMLElement>(".article-row-foreground");
+      const label = row.querySelector<HTMLElement>("[data-swipe-archive-label]");
+      if (!foreground) return;
+
+      let startX: number | null = null;
+      let startY: number | null = null;
+      let distance = 0;
+      let horizontalGesture = false;
+      let suppressClick = false;
+
+      const reset = () => {
+        startX = null;
+        startY = null;
+        distance = 0;
+        horizontalGesture = false;
+        row.classList.remove("swiping", "swipe-ready", "swipe-committing");
+        row.classList.add("swipe-resetting");
+        foreground.style.removeProperty("transform");
+        view.setTimeout(() => row.classList.remove("swipe-resetting"), SWIPE_ARCHIVE_TRANSITION_MS);
+        if (label) label.textContent = "Glissez pour archiver";
+      };
+
+      foreground.addEventListener("click", (event) => {
+        if (!suppressClick) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }, true);
+
+      foreground.addEventListener("touchstart", (event) => {
+        const touch = event.touches[0];
+        const target = event.target;
+        const bounds = row.getBoundingClientRect();
+        if (
+          !touch ||
+          event.touches.length !== 1 ||
+          this.archivingArticleId !== null ||
+          this.refreshing ||
+          touch.clientX <= bounds.left + SWIPE_ARCHIVE_EDGE_GUARD ||
+          (target instanceof Element && target.closest(".article-row-actions"))
+        ) return;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        distance = 0;
+        horizontalGesture = false;
+      }, { passive: true });
+
+      foreground.addEventListener("touchmove", (event) => {
+        const touch = event.touches[0];
+        if (!touch || startX === null || startY === null) return;
+        const horizontalDistance = touch.clientX - startX;
+        const verticalDistance = Math.abs(touch.clientY - startY);
+        if (!horizontalGesture) {
+          if (
+            horizontalDistance < SWIPE_ARCHIVE_INTENT_DISTANCE &&
+            verticalDistance < SWIPE_ARCHIVE_INTENT_DISTANCE
+          ) return;
+          if (horizontalDistance <= verticalDistance || horizontalDistance <= 0) {
+            reset();
+            return;
+          }
+          horizontalGesture = true;
+          row.classList.add("swiping");
+        }
+        event.preventDefault();
+        const width = Math.max(1, row.getBoundingClientRect().width);
+        distance = Math.min(width, horizontalDistance);
+        const ready = distance >= width * SWIPE_ARCHIVE_THRESHOLD_RATIO;
+        foreground.style.transform = `translateX(${distance}px)`;
+        row.classList.toggle("swipe-ready", ready);
+        if (label) label.textContent = ready
+          ? "Relâchez pour archiver"
+          : "Glissez pour archiver";
+      }, { passive: false });
+
+      foreground.addEventListener("touchend", () => {
+        if (!horizontalGesture) {
+          reset();
+          return;
+        }
+        suppressClick = true;
+        view.setTimeout(() => {
+          suppressClick = false;
+        }, 0);
+        const width = Math.max(1, row.getBoundingClientRect().width);
+        if (distance < width * SWIPE_ARCHIVE_THRESHOLD_RATIO) {
+          reset();
+          return;
+        }
+        if (this.archivingArticleId !== null) {
+          reset();
+          return;
+        }
+        row.classList.remove("swiping", "swipe-ready");
+        row.classList.add("swipe-committing");
+        foreground.style.transform = `translateX(${width}px)`;
+        void this.archiveArticleFromSwipe(row.dataset.articleRowId!, row, foreground);
+      });
+      foreground.addEventListener("touchcancel", reset);
+    });
+  }
+
+  private async archiveArticleFromSwipe(
+    articleId: string,
+    row: HTMLElement,
+    foreground: HTMLElement,
+  ): Promise<void> {
+    if (this.archivingArticleId !== null) return;
+    this.archivingArticleId = articleId;
+    this.error = null;
+    this.clearNotice();
+    row.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
+      button.disabled = true;
+    });
+
+    const archiveResult = this.api.archiveArticle(articleId).then(
+      () => ({ error: null }),
+      (error: unknown) => ({ error }),
+    );
+    await new Promise<void>((resolve) => {
+      const finish = (event?: Event) => {
+        if (event && event.target !== foreground) return;
+        clearTimeout(timeout);
+        foreground.removeEventListener("transitionend", finish);
+        resolve();
+      };
+      const timeout = setTimeout(finish, SWIPE_ARCHIVE_TRANSITION_MS);
+      foreground.addEventListener("transitionend", finish);
+    });
+    const { error } = await archiveResult;
+
+    if (error) {
+      this.error = errorMessage(error);
+    } else {
+      this.articles = this.articles.filter((candidate) => candidate.id !== articleId);
+      if (this.selected?.id === articleId) {
+        this.selected = null;
+        this.mobileArticleScreen = "timeline";
+      }
+      this.showNotice("Article archivé.");
+    }
+    this.archivingArticleId = null;
+    this.render();
   }
 }

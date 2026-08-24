@@ -1077,6 +1077,104 @@ describe("InkRiverApp", () => {
     expect(document.activeElement?.getAttribute("data-article-id")).toBe(summary.id);
   });
 
+  it("archives a mobile timeline row after a deliberate half-width swipe", async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((media: string) => ({
+        matches: media === "(max-width: 720px)",
+        media,
+      }) as MediaQueryList),
+    });
+    try {
+      const { root, api, confirmer } = await mounted();
+      const row = root.querySelector<HTMLElement>('[data-article-row-id="space::mars"]')!;
+      const foreground = row.querySelector<HTMLElement>(".article-row-foreground")!;
+      const favorite = row.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!;
+      Object.defineProperty(row, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ left: 0, width: 320 }),
+      });
+
+      dispatchTouch(foreground, "touchstart", 10, 100);
+      dispatchTouch(foreground, "touchmove", 230, 102);
+      dispatchTouch(foreground, "touchend");
+      expect(api.archiveArticle).not.toHaveBeenCalled();
+
+      dispatchTouch(favorite, "touchstart", 50, 100);
+      dispatchTouch(favorite, "touchmove", 230, 102);
+      dispatchTouch(favorite, "touchend");
+      expect(api.archiveArticle).not.toHaveBeenCalled();
+
+      dispatchTouch(foreground, "touchstart", 50, 100);
+      dispatchTouch(foreground, "touchmove", 185, 103);
+      dispatchTouch(foreground, "touchend");
+      expect(api.archiveArticle).not.toHaveBeenCalled();
+      expect(foreground.style.transform).toBe("");
+
+      dispatchTouch(foreground, "touchstart", 50, 100);
+      const move = dispatchTouch(foreground, "touchmove", 220, 103);
+      expect(move.defaultPrevented).toBe(true);
+      expect(row.classList).toContain("swipe-ready");
+      expect(row.textContent).toContain("Relâchez pour archiver");
+      dispatchTouch(foreground, "touchend");
+
+      expect(api.archiveArticle).toHaveBeenCalledWith(summary.id);
+      expect(confirmer).not.toHaveBeenCalled();
+      expect(row.classList).toContain("swipe-committing");
+      foreground.dispatchEvent(new Event("transitionend"));
+      await flushMicrotasks();
+
+      expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+      expect(root.querySelector('[role="status"]')?.textContent).toContain("Article archivé");
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("restores a swiped mobile row when archiving fails", async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((media: string) => ({
+        matches: media === "(max-width: 720px)",
+        media,
+      }) as MediaQueryList),
+    });
+    try {
+      const api = fakeApi({
+        archiveArticle: vi.fn(async () =>
+          Promise.reject({ code: "storage", message: "Archivage impossible" }),
+        ),
+      });
+      const { root } = await mounted(api);
+      const row = root.querySelector<HTMLElement>('[data-article-row-id="space::mars"]')!;
+      const foreground = row.querySelector<HTMLElement>(".article-row-foreground")!;
+      Object.defineProperty(row, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ left: 0, width: 320 }),
+      });
+
+      dispatchTouch(foreground, "touchstart", 50, 100);
+      dispatchTouch(foreground, "touchmove", 220, 102);
+      dispatchTouch(foreground, "touchend");
+      foreground.dispatchEvent(new Event("transitionend"));
+      await flushMicrotasks();
+
+      expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain("Archivage impossible");
+      expect(root.querySelector(".archive-confirmation")).toBeNull();
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
   it("archives a timeline article without closing a different selected article", async () => {
     const api = fakeApi({
       listArticles: vi.fn(async () => [
