@@ -2194,6 +2194,47 @@ describe("InkRiverApp", () => {
     expect(button.tabIndex).toBe(-1);
   });
 
+  it("shows mobile reading position and remaining length in a vertical indicator", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const { root } = await mounted();
+      expect(root.querySelector(".reader-progress")).toBeNull();
+      root.querySelector<HTMLElement>("[data-article-id]")!.click();
+      await flush();
+
+      const reader = root.querySelector<HTMLElement>(".reader")!;
+      const track = root.querySelector<HTMLElement>(".reader-progress")!;
+      const thumb = track.querySelector<HTMLElement>(".reader-progress-thumb")!;
+      Object.defineProperty(reader, "clientHeight", { configurable: true, value: 600 });
+      Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 2400 });
+      Object.defineProperty(track, "clientHeight", { configurable: true, value: 480 });
+
+      reader.scrollTop = 0;
+      reader.dispatchEvent(new Event("scroll"));
+      expect(track.getAttribute("aria-hidden")).toBe("true");
+      expect(track.classList).toContain("visible");
+      expect(thumb.style.height).toBe("120px");
+      expect(thumb.style.top).toBe("0px");
+
+      reader.scrollTop = 900;
+      reader.dispatchEvent(new Event("scroll"));
+      expect(thumb.style.top).toBe("180px");
+
+      reader.scrollTop = 1800;
+      reader.dispatchEvent(new Event("scroll"));
+      expect(thumb.style.top).toBe("360px");
+
+      Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 600 });
+      reader.scrollTop = 0;
+      reader.dispatchEvent(new Event("scroll"));
+      expect(track.classList).not.toContain("visible");
+      expect(thumb.style.height).toBe("");
+      expect(thumb.style.top).toBe("");
+    } finally {
+      restoreViewport();
+    }
+  });
+
   it("scrolls the reader smoothly to the top and respects reduced motion", async () => {
     const { root } = await mounted();
     root.querySelector<HTMLElement>("[data-article-id]")!.click();

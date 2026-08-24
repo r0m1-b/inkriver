@@ -46,6 +46,7 @@ const SWIPE_ARCHIVE_INTENT_DISTANCE = 10;
 const SWIPE_ARCHIVE_TRANSITION_MS = 220;
 const ARTICLE_LONG_PRESS_MS = 500;
 const ARTICLE_LONG_PRESS_MOVE_TOLERANCE = 10;
+const READER_PROGRESS_MIN_THUMB_SIZE = 32;
 const TOP_BUTTON_HIDE_RATIO = 0.75;
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
@@ -316,6 +317,10 @@ export class InkRiverApp {
     }
     this.preferenceStorage = preferenceStorage;
     this.articleTextSize = readArticleTextSize(this.preferenceStorage);
+    this.root.ownerDocument.defaultView?.addEventListener("resize", () => {
+      const reader = this.root.querySelector<HTMLElement>(".reader");
+      if (reader) this.updateReaderProgress(reader);
+    });
     this.root.ownerDocument.defaultView?.addEventListener("message", (event) => {
       const frame = this.root.querySelector<HTMLIFrameElement>(".article-content");
       if (!frame || event.source !== frame.contentWindow) return;
@@ -335,6 +340,8 @@ export class InkRiverApp {
         if (Number.isFinite(height) && height > 0 && height <= MAX_ARTICLE_FRAME_HEIGHT) {
           frame.style.height = `${height}px`;
           this.restoreTextSizeProgress();
+          const reader = this.root.querySelector<HTMLElement>(".reader");
+          if (reader) this.updateReaderProgress(reader);
         }
         return;
       }
@@ -757,6 +764,33 @@ export class InkRiverApp {
     if (!shouldBeVisible && this.root.ownerDocument.activeElement === button) {
       button.blur();
     }
+  }
+
+  private updateReaderProgress(reader: HTMLElement): void {
+    const track = this.root.querySelector<HTMLElement>(".reader-progress");
+    const thumb = track?.querySelector<HTMLElement>(".reader-progress-thumb");
+    if (!track || !thumb) return;
+
+    const maxScroll = Math.max(0, reader.scrollHeight - reader.clientHeight);
+    const trackHeight = track.clientHeight;
+    if (reader.clientHeight <= 0 || trackHeight <= 0 || maxScroll <= 0) {
+      track.classList.remove("visible");
+      thumb.style.removeProperty("height");
+      thumb.style.removeProperty("top");
+      return;
+    }
+
+    const thumbHeight = Math.min(
+      trackHeight,
+      Math.max(
+        READER_PROGRESS_MIN_THUMB_SIZE,
+        trackHeight * (reader.clientHeight / reader.scrollHeight),
+      ),
+    );
+    const progress = Math.min(1, Math.max(0, reader.scrollTop / maxScroll));
+    thumb.style.height = `${thumbHeight}px`;
+    thumb.style.top = `${progress * (trackHeight - thumbHeight)}px`;
+    track.classList.add("visible");
   }
 
   private scrollReaderToTop(): void {
@@ -1229,6 +1263,11 @@ export class InkRiverApp {
     return `<button type="button" class="reader-top-button" data-action="reader-top" title="Revenir en haut" aria-label="Revenir en haut" aria-hidden="true" tabindex="-1">${topIcon()}</button>`;
   }
 
+  private renderReaderProgress(): string {
+    if (!this.selected) return "";
+    return '<div class="reader-progress" aria-hidden="true"><span class="reader-progress-thumb"></span></div>';
+  }
+
   private renderImageZoom(): string {
     if (!this.selected || !this.zoomedImage) return "";
     const label = this.zoomedImage.alt
@@ -1318,7 +1357,7 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell">
       <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span role="${this.noticeKind === "error" ? "alert" : "status"}">${escapeHtml(this.notice)}</span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
+      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
     </div>`;
@@ -1346,7 +1385,10 @@ export class InkRiverApp {
     const reader = this.root.querySelector<HTMLElement>(".reader");
     if (reader && preserveReaderPosition) reader.scrollTop = readerScrollTop;
     this.bindEvents();
-    if (reader) this.updateReaderTopButton(reader);
+    if (reader) {
+      this.updateReaderTopButton(reader);
+      this.updateReaderProgress(reader);
+    }
     this.root
       .querySelector<HTMLElement>('.archive-confirmation [data-action="cancel-archive"]')
       ?.focus();
@@ -1392,7 +1434,10 @@ export class InkRiverApp {
     const reader = this.root.querySelector<HTMLElement>(".reader");
     reader?.addEventListener(
       "scroll",
-      () => this.updateReaderTopButton(reader),
+      () => {
+        this.updateReaderTopButton(reader);
+        this.updateReaderProgress(reader);
+      },
       { passive: true },
     );
     this.bindPullToRefresh();

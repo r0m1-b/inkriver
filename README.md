@@ -30,6 +30,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - use separate timeline and reader screens on narrow mobile displays;
 - select several mobile timeline articles with a long press, then mark them
   read or unread or archive them in one atomic action;
+- show reading position and remaining length with a discreet mobile scroll
+  indicator for long articles;
 - distinguish feed-provided, extracted, excerpt, and missing content;
 - archive articles manually and automatically retain only relevant history;
 - safely extract complete pages for incomplete articles from other feeds;

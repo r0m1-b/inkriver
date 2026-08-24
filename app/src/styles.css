@@ -142,6 +142,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .reader-top-button:hover { color: #fff; border-color: var(--accent-dark); background: var(--accent-dark); }
 .reader-top-button.visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
 .reader-top-button svg { width: 23px; height: 23px; pointer-events: none; }
+.reader-progress { display: none; }
 @media (prefers-reduced-motion: reduce) { .reader-top-button { transition: none; } }
 .article-content { display: block; width: 100%; height: calc(100vh - 330px); min-height: calc(100vh - 330px); overflow: hidden; border: 0; background: transparent; }
 .missing-content { max-width: 720px; margin: 28px auto; padding: 28px; color: var(--muted); background: var(--wash); border-radius: 8px; }
@@ -323,6 +324,9 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .missing-content { margin: 20px 18px; padding: 20px; }
   .reader-footer { flex-wrap: wrap; margin-inline: 18px; padding: 22px 4px calc(44px + env(safe-area-inset-bottom)); }
   .reader-top-button { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .articles-view.mobile-reader .reader-progress { position: fixed; z-index: 6; top: calc(116px + env(safe-area-inset-top)); right: max(3px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom)); display: block; width: 3px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--muted) 15%, transparent); opacity: 0; pointer-events: none; transition: opacity 180ms ease; }
+  .articles-view.mobile-reader .reader-progress.visible { opacity: 1; }
+  .reader-progress-thumb { position: absolute; top: 0; left: 0; display: block; width: 100%; min-height: 32px; border-radius: inherit; background: color-mix(in srgb, var(--accent) 82%, transparent); transition: top 80ms linear; }
   .reader-placeholder { padding: 24px; }
   .reader-placeholder-logo { width: min(420px, 92%); }
   .image-lightbox { position: fixed; inset: 0; padding: 16px; }
@@ -367,4 +371,5 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 @media (prefers-reduced-motion: reduce) {
   .pull-refresh, .pull-refresh-icon svg { transition: none; }
   .pull-refresh.refreshing .pull-refresh-icon svg { animation: none; }
+  .reader-progress, .reader-progress-thumb { transition: none; }
 }
