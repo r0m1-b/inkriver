@@ -128,8 +128,13 @@ rustup target add aarch64-linux-android armv7-linux-androideabi \
   i686-linux-android x86_64-linux-android
 cd app
 npm run tauri android init
+npm run icons
 npm run tauri android dev
 ```
+
+`npm run icons` generates the InkRiver launcher resources directly in the
+generated Android project. Run it again after reinitializing
+`app/src-tauri/gen/android` or changing the source icon.
 
 Vite reads `TAURI_DEV_HOST`, which lets the device reach the development server.
 To produce a test APK after initialization:

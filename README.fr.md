@@ -134,8 +134,14 @@ rustup target add aarch64-linux-android armv7-linux-androideabi \
   i686-linux-android x86_64-linux-android
 cd app
 npm run tauri android init
+npm run icons
 npm run tauri android dev
 ```
+
+`npm run icons` génère les icônes de lancement InkRiver directement dans le
+projet Android produit par Tauri. Relancer cette commande après une nouvelle
+initialisation de `app/src-tauri/gen/android` ou une modification du logo
+source.
 
 Vite lit `TAURI_DEV_HOST`, ce qui permet à l'appareil de joindre le serveur de
 développement. Pour produire un APK de test après l'initialisation :
