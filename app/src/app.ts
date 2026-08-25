@@ -437,6 +437,10 @@ export class InkRiverApp {
     return this.root.ownerDocument.defaultView?.matchMedia?.("(max-width: 720px)").matches ?? false;
   }
 
+  private effectiveArticleTextSize(): ArticleTextSize {
+    return this.isMobileViewport() ? "medium" : this.articleTextSize;
+  }
+
   private toggleArticleSelection(articleId: string): void {
     if (this.batchArticleActionPending) return;
     if (!this.articles.some((article) => article.id === articleId)) return;
@@ -1190,8 +1194,13 @@ export class InkRiverApp {
   }
 
   private renderPullRefresh(): string {
-    const label = this.refreshing ? "Actualisation en cours…" : "Tirez pour actualiser";
-    return `<div class="pull-refresh${this.refreshing ? " refreshing" : ""}" data-pull-refresh aria-hidden="${!this.refreshing}"><span class="pull-refresh-icon">${refreshIcon()}</span><span data-pull-refresh-label>${label}</span></div>`;
+    const status = this.refreshing
+      ? ' role="status" aria-label="Actualisation en cours"'
+      : ' aria-hidden="true"';
+    const label = this.refreshing
+      ? ""
+      : '<span data-pull-refresh-label>Tirez pour actualiser</span>';
+    return `<div class="pull-refresh${this.refreshing ? " refreshing" : ""}" data-pull-refresh${status}><span class="pull-refresh-icon">${refreshIcon()}</span>${label}</div>`;
   }
 
   private feedLogo(feedId: string): string | null {
@@ -1239,7 +1248,8 @@ export class InkRiverApp {
         : '<button class="primary" data-action="open-original">Lire l’original ↗</button>'
       : "";
     const modeClass = mobile ? "mobile-reader-actions" : "desktop-reader-actions";
-    return `<div class="reader-actions ${modeClass}"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}${this.renderTextSizeControls(true)}</div>`;
+    const textSizeControls = mobile ? "" : this.renderTextSizeControls();
+    return `<div class="reader-actions ${modeClass}"><button type="button" class="reader-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="toggle-read" title="${readAction}" aria-label="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button><button type="button" class="reader-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="favorite" title="${favoriteAction}" aria-label="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button><button type="button" class="reader-icon-button danger" data-action="archive-article" title="Archiver l’article" aria-label="Archiver l’article" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>${originalButton}${textSizeControls}</div>`;
   }
 
   public handleBackNavigation(): boolean {
@@ -1287,7 +1297,7 @@ export class InkRiverApp {
     </footer>`;
   }
 
-  private renderTextSizeControls(announceChanges: boolean): string {
+  private renderTextSizeControls(): string {
     const state = this.textSizeControlState();
     return `<div class="text-size-controls" role="group" aria-label="Taille du texte de l’article">
       <button type="button" class="text-size-button" data-action="decrease-text-size" title="${state.decreaseLabel}" aria-label="${state.decreaseLabel}" ${state.canDecrease ? "" : "disabled"}>${textZoomIcon("minus")}</button>
@@ -1416,7 +1426,7 @@ export class InkRiverApp {
       if (articleFrameHeight) frame.style.height = articleFrameHeight;
       frame.srcdoc = buildArticleDocument(
         this.selected.content,
-        this.articleTextSize,
+        this.effectiveArticleTextSize(),
       );
     }
     const reader = this.root.querySelector<HTMLElement>(".reader");

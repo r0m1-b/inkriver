@@ -13,6 +13,8 @@
   --accent: #c94708;
   --accent-dark: #a93600;
   --accent-ink: #fff;
+  --favorite-action: #8a6200;
+  --danger-action: #9b2f27;
   --wash: #e9eef4;
   --timeline-background: #f7f9fb;
   --topbar-ink: #f8fbff;
@@ -225,7 +227,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .feed-actions { display: flex; flex: 0 0 auto; gap: 8px; }
 
 @media (prefers-color-scheme: dark) {
-  :root { color: #eef4fa; background: #061426; --app-background: #061426; --paper: #0d2238; --ink: #eef4fa; --muted: #9babc0; --line: #294158; --accent: #ff7a2f; --accent-dark: #ff955f; --accent-ink: #031d3b; --wash: #173049; --timeline-background: #091a2d; --topbar-ink: #f8fbff; --topbar-muted: #b9c7d7; }
+  :root { color: #eef4fa; background: #061426; --app-background: #061426; --paper: #0d2238; --ink: #eef4fa; --muted: #9babc0; --line: #294158; --accent: #ff7a2f; --accent-dark: #ff955f; --accent-ink: #031d3b; --favorite-action: #e3ad3d; --danger-action: #f07c72; --wash: #173049; --timeline-background: #091a2d; --topbar-ink: #f8fbff; --topbar-muted: #b9c7d7; }
   .article-row.read .article-list-copy > strong { color: var(--muted); }
   .source { color: #ffc3a4; background: #59301f; }
   .source.medium { color: #b8dbc4; background: #294638; }
@@ -274,7 +276,9 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .pull-refresh.visible, .pull-refresh.refreshing { opacity: 1; }
   .pull-refresh.ready { color: var(--accent); }
   .pull-refresh.ready .pull-refresh-icon svg { transform: rotate(180deg); }
-  .pull-refresh.refreshing { transform: translate(-50%, 8px); }
+  .pull-refresh.refreshing { top: 145px; padding: 9px; transform: translate(-50%, 0); }
+  .pull-refresh.refreshing .pull-refresh-icon,
+  .pull-refresh.refreshing .pull-refresh-icon svg { width: 22px; height: 22px; }
   .pull-refresh.refreshing .pull-refresh-icon svg { animation: refresh-spin .8s linear infinite; }
   .pull-refresh-icon { display: grid; place-items: center; width: 20px; height: 20px; }
   .pull-refresh-icon svg { width: 20px; height: 20px; transition: transform 140ms ease; }
@@ -319,12 +323,17 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .reader-article h1 { margin-top: 13px; font-size: clamp(30px, 9vw, 42px); }
   .desktop-reader-actions { display: none; }
   .mobile-reader-actions { position: static; display: flex; flex: 1 1 auto; flex-wrap: nowrap; justify-content: flex-end; gap: 2px; min-width: 0; margin: 0; padding: 0; border-bottom: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
-  .mobile-reader-actions .reader-icon-button,
-  .mobile-reader-actions .text-size-button { width: 44px; height: 44px; }
-  .mobile-reader-actions .text-size-controls { flex: 0 0 auto; }
+  .mobile-reader-actions .reader-icon-button { width: 44px; height: 44px; }
+  .mobile-reader-actions .reader-icon-button[data-action="toggle-read"],
+  .mobile-reader-actions .reader-icon-button[data-action="favorite"],
+  .mobile-reader-actions .reader-icon-button[data-action="archive-article"] { border-color: transparent; background: transparent; }
+  .mobile-reader-actions .reader-icon-button[data-action="toggle-read"] { color: var(--accent); }
+  .mobile-reader-actions .reader-icon-button[data-action="favorite"] { color: var(--favorite-action); }
+  .mobile-reader-actions .reader-icon-button[data-action="archive-article"] { color: var(--danger-action); }
+  .mobile-reader-actions .reader-icon-button[data-action="toggle-read"]:hover { border-color: transparent; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .mobile-reader-actions .reader-icon-button[data-action="favorite"]:hover { border-color: transparent; background: color-mix(in srgb, var(--favorite-action) 12%, transparent); }
+  .mobile-reader-actions .reader-icon-button[data-action="archive-article"]:hover { border-color: transparent; background: color-mix(in srgb, var(--danger-action) 12%, transparent); }
   .reader-icon-button { width: 44px; height: 44px; }
-  .text-size-controls { gap: 1px; margin-left: 0; padding-left: 7px; }
-  .text-size-label { min-width: 42px; }
   .article-content { height: calc(100dvh - 300px); min-height: calc(100dvh - 300px); }
   .missing-content { margin: 20px 18px; padding: 20px; }
   .reader-footer { flex-wrap: wrap; margin-inline: 18px; padding: 22px 4px calc(44px + env(safe-area-inset-bottom)); }

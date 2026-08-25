@@ -217,6 +217,25 @@ describe("InkRiverApp", () => {
     expect(app.handleBackNavigation()).toBe(false);
   });
 
+  it("uses medium article text without zoom controls on mobile", async () => {
+    const restoreViewport = installMobileViewport();
+    localStorage.setItem("inkriver.articleTextSize", "large");
+    try {
+      const { root } = await mounted();
+      root.querySelector<HTMLElement>('[data-action="select-article"]')!.click();
+      await flush();
+
+      const mobileActions = root.querySelector<HTMLElement>(".mobile-reader-actions")!;
+      expect(mobileActions.querySelector('[data-action="decrease-text-size"]')).toBeNull();
+      expect(mobileActions.querySelector('[data-action="increase-text-size"]')).toBeNull();
+      expect(root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc).toContain(
+        'style="--article-font-size:18px"',
+      );
+    } finally {
+      restoreViewport();
+    }
+  });
+
   it("enters mobile multi-selection after a stationary long press", async () => {
     const restoreViewport = installMobileViewport();
     try {
@@ -544,7 +563,11 @@ describe("InkRiverApp", () => {
 
       dispatchTouch(timeline, "touchend");
       expect(api.refreshFeeds).toHaveBeenCalledOnce();
-      expect(root.querySelector("[data-pull-refresh]")?.classList).toContain("refreshing");
+      const refreshingIndicator = root.querySelector<HTMLElement>("[data-pull-refresh]")!;
+      expect(refreshingIndicator.classList).toContain("refreshing");
+      expect(refreshingIndicator.textContent?.trim()).toBe("");
+      expect(refreshingIndicator.getAttribute("role")).toBe("status");
+      expect(refreshingIndicator.getAttribute("aria-label")).toBe("Actualisation en cours");
       await flush();
 
       timeline = root.querySelector<HTMLElement>(".timeline")!;
