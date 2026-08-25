@@ -271,6 +271,63 @@ describe("InkRiverApp", () => {
     }
   });
 
+  it("navigates through the active mobile list with bottom buttons and swipes", async () => {
+    const restoreViewport = installMobileViewport();
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    try {
+      const { root, app } = await mounted(api);
+      expect(root.querySelector(".mobile-reader-navigation")).toBeNull();
+
+      root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+      await flush();
+
+      let navigation = root.querySelector<HTMLElement>(".mobile-reader-navigation")!;
+      expect(navigation.getAttribute("aria-label")).toBe("Navigation entre les articles");
+      expect(navigation.querySelector<HTMLButtonElement>('[data-action="reader-previous"]')?.disabled)
+        .toBe(true);
+      expect(navigation.querySelector<HTMLButtonElement>('[data-action="reader-next"]')?.disabled)
+        .toBe(false);
+
+      navigation.querySelector<HTMLButtonElement>('[data-action="reader-next"]')!.click();
+      await flush();
+      expect(root.querySelector(".reader-article h1")?.textContent).toBe(secondSummary.title);
+      navigation = root.querySelector<HTMLElement>(".mobile-reader-navigation")!;
+      expect(navigation.querySelector<HTMLButtonElement>('[data-action="reader-previous"]')?.disabled)
+        .toBe(false);
+      expect(navigation.querySelector<HTMLButtonElement>('[data-action="reader-next"]')?.disabled)
+        .toBe(true);
+
+      let reader = root.querySelector<HTMLElement>(".reader")!;
+      dispatchTouch(reader, "touchstart", 200, 300);
+      expect(dispatchTouch(reader, "touchmove", 320, 305).defaultPrevented).toBe(true);
+      dispatchTouch(reader, "touchend");
+      await flush();
+      expect(root.querySelector(".reader-article h1")?.textContent).toBe(summary.title);
+
+      const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "inkriver:article-swipe", direction: "next" },
+        source: frame.contentWindow,
+      }));
+      await flush();
+      expect(root.querySelector(".reader-article h1")?.textContent).toBe(secondSummary.title);
+
+      expect(app.handleBackNavigation()).toBe(true);
+      root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+      root.querySelector<HTMLElement>('[data-article-id="space::venus"]')!.click();
+      await flush();
+      navigation = root.querySelector<HTMLElement>(".mobile-reader-navigation")!;
+      expect(navigation.querySelectorAll("button:disabled")).toHaveLength(2);
+    } finally {
+      restoreViewport();
+    }
+  });
+
   it("enters mobile multi-selection after a stationary long press", async () => {
     const restoreViewport = installMobileViewport();
     try {
@@ -1064,6 +1121,7 @@ describe("InkRiverApp", () => {
     expect(root.querySelector<HTMLIFrameElement>(".article-content")?.srcdoc).toContain(
       "Mars prend une teinte orangée",
     );
+    expect(root.querySelector(".mobile-reader-navigation")).toBeNull();
   });
 
   it("does not write the read state when opening an article that is already read", async () => {
@@ -2647,6 +2705,7 @@ describe("view helpers", () => {
     );
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-link"');
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-image"');
+    expect(document).toContain('window.parent.postMessage({type:"inkriver:article-swipe"');
     expect(document).toContain('message.type==="inkriver:article-image-focus"');
     expect(document).toContain('message.type==="inkriver:article-text-size"');
     expect(document).toContain("[16,18,22].includes(message.fontSize)");
@@ -2655,6 +2714,8 @@ describe("view helpers", () => {
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
     expect(document).toContain('document.addEventListener("click"');
     expect(document).toContain('document.addEventListener("keydown"');
+    expect(document).toContain('document.addEventListener("touchstart"');
+    expect(document).toContain('document.addEventListener("touchmove"');
     expect(document.indexOf('closest("img[data-zoomable-image]")')).toBeLessThan(
       document.indexOf('closest("a[data-external-href],a[data-internal-fragment]")'),
     );

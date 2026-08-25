@@ -19,13 +19,14 @@ export type ArticleTextSize = "small" | "medium" | "large";
 const ARTICLE_LINK_MESSAGE = "inkriver:article-link";
 const ARTICLE_HEIGHT_MESSAGE = "inkriver:article-height";
 const ARTICLE_IMAGE_MESSAGE = "inkriver:article-image";
+const ARTICLE_SWIPE_MESSAGE = "inkriver:article-swipe";
 const ARTICLE_IMAGE_FOCUS_MESSAGE = "inkriver:article-image-focus";
 const ARTICLE_TEXT_SIZE_MESSAGE = "inkriver:article-text-size";
 // Keep ARTICLE_BRIDGE_CSP_HASH synchronized with this exact script. The hash is
 // also declared in tauri.conf.json because about:srcdoc inherits the app CSP.
-export const ARTICLE_BRIDGE_SCRIPT = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"inkriver:article-height",height:height},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"inkriver:article-image",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}document.addEventListener("click",function(event){var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"inkriver:article-link",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);window.addEventListener("message",function(event){var message=event.data;if(!message)return;if(message.type==="inkriver:article-image-focus"&&typeof message.imageId==="string"){var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();return;}if(message.type==="inkriver:article-text-size"&&[16,18,22].includes(message.fontSize)){document.documentElement.style.setProperty("--article-font-size",message.fontSize+"px");reportArticleHeight();}});window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
+export const ARTICLE_BRIDGE_SCRIPT = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"inkriver:article-height",height:height},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"inkriver:article-image",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}var readerSwipeStartX=null,readerSwipeStartY=null,readerSwipeDistanceX=0,readerSwipeDistanceY=0,readerSwipeHorizontal=false,readerSwipeSuppressClick=false;function resetReaderSwipe(){readerSwipeStartX=null;readerSwipeStartY=null;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;}document.addEventListener("click",function(event){if(readerSwipeSuppressClick){event.preventDefault();event.stopPropagation();return;}var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"inkriver:article-link",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);document.addEventListener("touchstart",function(event){var touch=event.touches[0];if(!touch||event.touches.length!==1||touch.clientX<=32||touch.clientX>=window.innerWidth-32)return;readerSwipeStartX=touch.clientX;readerSwipeStartY=touch.clientY;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;},{passive:true});document.addEventListener("touchmove",function(event){var touch=event.touches[0];if(!touch||readerSwipeStartX===null||readerSwipeStartY===null)return;readerSwipeDistanceX=touch.clientX-readerSwipeStartX;readerSwipeDistanceY=touch.clientY-readerSwipeStartY;if(!readerSwipeHorizontal){if(Math.abs(readerSwipeDistanceX)<12&&Math.abs(readerSwipeDistanceY)<12)return;if(Math.abs(readerSwipeDistanceX)<=Math.abs(readerSwipeDistanceY)){resetReaderSwipe();return;}readerSwipeHorizontal=true;}event.preventDefault();},{passive:false});document.addEventListener("touchend",function(){if(readerSwipeHorizontal&&Math.abs(readerSwipeDistanceX)>=72&&Math.abs(readerSwipeDistanceX)>Math.abs(readerSwipeDistanceY)*1.25){readerSwipeSuppressClick=true;window.parent.postMessage({type:"inkriver:article-swipe",direction:readerSwipeDistanceX<0?"next":"previous"},"*");setTimeout(function(){readerSwipeSuppressClick=false;},400);}resetReaderSwipe();});document.addEventListener("touchcancel",resetReaderSwipe);window.addEventListener("message",function(event){var message=event.data;if(!message)return;if(message.type==="inkriver:article-image-focus"&&typeof message.imageId==="string"){var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();return;}if(message.type==="inkriver:article-text-size"&&[16,18,22].includes(message.fontSize)){document.documentElement.style.setProperty("--article-font-size",message.fontSize+"px");reportArticleHeight();}});window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
 export const ARTICLE_BRIDGE_CSP_HASH =
-  "sha256-X9uP4ATgOR+t0SnpN8j14L1YqawxW54jpnjiw5UzjEQ=";
+  "sha256-8b0wyZIXBCd8O3mxyLbKe7IpZDocfs69A0osrD/NKfw=";
 const ARTICLE_TEXT_SIZE_STORAGE_KEY = "inkriver.articleTextSize";
 const ARTICLE_TEXT_SIZES: readonly ArticleTextSize[] = ["small", "medium", "large"];
 const ARTICLE_TEXT_SIZE_CONFIG: Record<ArticleTextSize, { label: string; pixels: number }> = {
@@ -44,6 +45,9 @@ const SWIPE_ARCHIVE_THRESHOLD_RATIO = 0.5;
 const SWIPE_ARCHIVE_EDGE_GUARD = 24;
 const SWIPE_ARCHIVE_INTENT_DISTANCE = 10;
 const SWIPE_ARCHIVE_TRANSITION_MS = 220;
+const READER_SWIPE_THRESHOLD = 72;
+const READER_SWIPE_EDGE_GUARD = 32;
+const READER_SWIPE_INTENT_DISTANCE = 12;
 const ARTICLE_LONG_PRESS_MS = 500;
 const ARTICLE_LONG_PRESS_MOVE_TOLERANCE = 10;
 const READER_PROGRESS_MIN_THUMB_SIZE = 32;
@@ -282,6 +286,8 @@ export class InkRiverApp {
   private readonly preferenceStorage: PreferenceStorage | null;
   private mainView: MainView = "articles";
   private mobileArticleScreen: MobileArticleScreen = "timeline";
+  private readerArticleIds: string[] = [];
+  private readerNavigationPending = false;
   private loading = true;
   private refreshing = false;
   private pullRefreshing = false;
@@ -341,6 +347,7 @@ export class InkRiverApp {
         src?: unknown;
         alt?: unknown;
         imageId?: unknown;
+        direction?: unknown;
       } | null;
       if (!message) {
         return;
@@ -357,6 +364,13 @@ export class InkRiverApp {
       }
       if (message.type === ARTICLE_LINK_MESSAGE && typeof message.href === "string") {
         void this.openExternalUrl(message.href, this.selected?.url);
+        return;
+      }
+      if (
+        message.type === ARTICLE_SWIPE_MESSAGE &&
+        (message.direction === "previous" || message.direction === "next")
+      ) {
+        void this.navigateReader(message.direction);
         return;
       }
       if (
@@ -388,7 +402,13 @@ export class InkRiverApp {
     }
   }
 
-  private async selectArticle(articleId: string): Promise<void> {
+  private async selectArticle(
+    articleId: string,
+    preserveNavigationContext = false,
+  ): Promise<void> {
+    if (!preserveNavigationContext) {
+      this.readerArticleIds = this.visibleArticles().map((article) => article.id);
+    }
     if (this.selected?.id === articleId) {
       this.mobileArticleScreen = "reader";
       this.render();
@@ -408,6 +428,37 @@ export class InkRiverApp {
     }
     this.render();
     if (this.selected?.id === articleId) this.scrollSelectedArticleIntoView();
+  }
+
+  private readerNavigationTargets(): { previous: string | null; next: string | null } {
+    if (!this.selected) return { previous: null, next: null };
+    const availableIds = new Set(this.articles.map((article) => article.id));
+    const articleIds = this.readerArticleIds.filter((articleId) => availableIds.has(articleId));
+    const index = articleIds.indexOf(this.selected.id);
+    if (index < 0) return { previous: null, next: null };
+    return {
+      previous: articleIds[index - 1] ?? null,
+      next: articleIds[index + 1] ?? null,
+    };
+  }
+
+  private async navigateReader(direction: "previous" | "next"): Promise<void> {
+    if (
+      !this.isMobileViewport() ||
+      this.mobileArticleScreen !== "reader" ||
+      this.zoomedImage ||
+      this.readerNavigationPending
+    ) return;
+    const articleId = this.readerNavigationTargets()[direction];
+    if (!articleId) return;
+    this.readerNavigationPending = true;
+    this.render();
+    try {
+      await this.selectArticle(articleId, true);
+    } finally {
+      this.readerNavigationPending = false;
+      this.render();
+    }
   }
 
   private scrollSelectedArticleIntoView(): void {
@@ -1247,6 +1298,13 @@ export class InkRiverApp {
     return `<nav class="mobile-reader-toolbar" aria-label="Navigation et actions du lecteur"><button type="button" class="mobile-reader-back" data-action="mobile-reader-back" title="Retour aux articles" aria-label="Retour aux articles">${backIcon()}</button>${this.renderReaderActions(this.selected, true)}</nav>`;
   }
 
+  private renderMobileReaderNavigation(): string {
+    if (!this.selected || !this.isMobileViewport()) return "";
+    const { previous, next } = this.readerNavigationTargets();
+    const disabled = this.readerNavigationPending;
+    return `<nav class="mobile-reader-navigation" aria-label="Navigation entre les articles"><button type="button" data-action="reader-previous" aria-label="Article précédent" ${!previous || disabled ? "disabled" : ""}>${backIcon()}<span>Précédent</span></button><button type="button" data-action="reader-next" aria-label="Article suivant" ${!next || disabled ? "disabled" : ""}><span>Suivant</span>${backIcon()}</button></nav>`;
+  }
+
   private renderReaderActions(article: ArticleDetail, mobile: boolean): string {
     const readPending = this.updatingReadArticleIds.has(article.id);
     const favoritePending = this.updatingFavoriteArticleIds.has(article.id);
@@ -1415,7 +1473,7 @@ export class InkRiverApp {
     this.root.innerHTML = `<div class="shell"${this.pullRefreshing ? ' aria-busy="true"' : ""}>
       <header class="topbar ${this.mainView === "feeds" ? "feeds-topbar" : ""}"><nav class="mobile-feed-topbar" aria-label="Navigation des abonnements"><button type="button" data-action="show-articles" title="Retour aux articles" aria-label="Retour aux articles">${backIcon()}</button><strong>Gestion des abonnements</strong><span aria-hidden="true"></span></nav><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="mobile-top-action mobile-add-subscription" data-action="add-subscription" title="Ajouter un abonnement" aria-label="Ajouter un abonnement">${addIcon()}</button><button type="button" class="mobile-top-action mobile-settings ${this.mainView === "feeds" ? "active" : ""}" data-action="subscriptions" title="Gestion des abonnements" aria-label="Gestion des abonnements" aria-current="${this.mainView === "feeds" ? "page" : "false"}">${settingsIcon()}</button><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span class="notice-content" role="${this.noticeKind === "error" ? "alert" : "status"}">${this.noticeHasCheck ? `<span class="notice-check" aria-hidden="true">${checkIcon()}</span>` : ""}<span>${escapeHtml(this.notice)}</span></span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
-      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
+      <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}${this.renderMobileReaderNavigation()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
       ${this.pullRefreshing ? '<div class="app-interaction-lock" data-app-interaction-lock aria-hidden="true"></div>' : ""}
@@ -1502,6 +1560,7 @@ export class InkRiverApp {
     );
     this.bindPullToRefresh();
     this.bindSwipeToArchive();
+    this.bindReaderNavigation();
     this.root
       .querySelector<HTMLElement>('[data-action="reader-top"]')
       ?.addEventListener("click", () => this.scrollReaderToTop());
@@ -1791,6 +1850,82 @@ export class InkRiverApp {
       if (shouldRefresh) void this.refresh(true);
     });
     timeline.addEventListener("touchcancel", reset);
+  }
+
+  private bindReaderNavigation(): void {
+    this.root
+      .querySelector<HTMLElement>('[data-action="reader-previous"]')
+      ?.addEventListener("click", () => void this.navigateReader("previous"));
+    this.root
+      .querySelector<HTMLElement>('[data-action="reader-next"]')
+      ?.addEventListener("click", () => void this.navigateReader("next"));
+
+    if (
+      !this.isMobileViewport() ||
+      this.mobileArticleScreen !== "reader" ||
+      !this.selected ||
+      this.zoomedImage
+    ) return;
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    const view = this.root.ownerDocument.defaultView;
+    if (!reader || !view) return;
+
+    let startX: number | null = null;
+    let startY: number | null = null;
+    let horizontalGesture = false;
+    let distanceX = 0;
+    let distanceY = 0;
+
+    const reset = () => {
+      startX = null;
+      startY = null;
+      horizontalGesture = false;
+      distanceX = 0;
+      distanceY = 0;
+    };
+
+    reader.addEventListener("touchstart", (event) => {
+      const touch = event.touches[0];
+      const target = event.target;
+      if (
+        !touch ||
+        event.touches.length !== 1 ||
+        touch.clientX <= READER_SWIPE_EDGE_GUARD ||
+        touch.clientX >= view.innerWidth - READER_SWIPE_EDGE_GUARD ||
+        (target instanceof Element && target.closest("button, a, input, select"))
+      ) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+    }, { passive: true });
+
+    reader.addEventListener("touchmove", (event) => {
+      const touch = event.touches[0];
+      if (!touch || startX === null || startY === null) return;
+      distanceX = touch.clientX - startX;
+      distanceY = touch.clientY - startY;
+      if (!horizontalGesture) {
+        if (
+          Math.abs(distanceX) < READER_SWIPE_INTENT_DISTANCE &&
+          Math.abs(distanceY) < READER_SWIPE_INTENT_DISTANCE
+        ) return;
+        if (Math.abs(distanceX) <= Math.abs(distanceY)) {
+          reset();
+          return;
+        }
+        horizontalGesture = true;
+      }
+      event.preventDefault();
+    }, { passive: false });
+
+    reader.addEventListener("touchend", () => {
+      const direction = distanceX < 0 ? "next" : "previous";
+      const shouldNavigate = horizontalGesture &&
+        Math.abs(distanceX) >= READER_SWIPE_THRESHOLD &&
+        Math.abs(distanceX) > Math.abs(distanceY) * 1.25;
+      reset();
+      if (shouldNavigate) void this.navigateReader(direction);
+    });
+    reader.addEventListener("touchcancel", reset);
   }
 
   private bindSwipeToArchive(): void {

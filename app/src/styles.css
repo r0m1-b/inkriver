@@ -137,6 +137,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 
 .reader { min-width: 0; overflow-y: auto; background: var(--paper); }
 .mobile-reader-toolbar { display: none; }
+.mobile-reader-navigation { display: none; }
 .reader-placeholder { height: 100%; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); }
 .reader-placeholder-logo { display: block; width: min(460px, 72%); height: auto; border-radius: 18px; box-shadow: 0 16px 40px rgb(7 26 45 / 10%); }
 .reader-article { min-height: 100%; }
@@ -350,12 +351,19 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .mobile-reader-actions .reader-icon-button[data-action="toggle-read"]:hover { border-color: transparent; background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .mobile-reader-actions .reader-icon-button[data-action="favorite"]:hover { border-color: transparent; background: color-mix(in srgb, var(--favorite-action) 12%, transparent); }
   .mobile-reader-actions .reader-icon-button[data-action="archive-article"]:hover { border-color: transparent; background: color-mix(in srgb, var(--danger-action) 12%, transparent); }
+  .mobile-reader-navigation { position: fixed; z-index: 7; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: 1fr 1fr; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 94%, transparent); box-shadow: 0 -5px 16px rgb(3 29 59 / 10%); backdrop-filter: blur(8px); }
+  .mobile-reader-navigation button { display: flex; align-items: center; justify-content: center; min-width: 0; gap: 7px; padding: 10px 12px; color: var(--accent); border-color: transparent; background: transparent; font-size: 13px; font-weight: 750; }
+  .mobile-reader-navigation button:hover { color: var(--accent-dark); border-color: transparent; background: var(--wash); }
+  .mobile-reader-navigation button:disabled { color: var(--muted); background: transparent; cursor: default; opacity: .42; }
+  .mobile-reader-navigation button + button { border-left: 1px solid var(--line); border-radius: 0 8px 8px 0; }
+  .mobile-reader-navigation svg { flex: 0 0 auto; width: 21px; height: 21px; pointer-events: none; }
+  .mobile-reader-navigation [data-action="reader-next"] svg { transform: rotate(180deg); }
   .reader-icon-button { width: 44px; height: 44px; }
   .article-content { height: calc(100dvh - 300px); min-height: calc(100dvh - 300px); }
   .missing-content { margin: 20px 18px; padding: 20px; }
-  .reader-footer { flex-wrap: wrap; margin-inline: 18px; padding: 22px 4px calc(44px + env(safe-area-inset-bottom)); }
-  .reader-top-button { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); }
-  .articles-view.mobile-reader .reader-progress { position: fixed; z-index: 6; top: calc(116px + env(safe-area-inset-top)); right: max(3px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom)); display: block; width: 3px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--muted) 15%, transparent); opacity: 0; pointer-events: none; transition: opacity 180ms ease; }
+  .reader-footer { flex-wrap: wrap; margin-inline: 18px; padding: 22px 4px calc(94px + env(safe-area-inset-bottom)); }
+  .reader-top-button { position: fixed; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .articles-view.mobile-reader .reader-progress { position: fixed; z-index: 6; top: calc(116px + env(safe-area-inset-top)); right: max(3px, env(safe-area-inset-right)); bottom: calc(68px + env(safe-area-inset-bottom)); display: block; width: 3px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--muted) 15%, transparent); opacity: 0; pointer-events: none; transition: opacity 180ms ease; }
   .articles-view.mobile-reader .reader-progress.visible { opacity: 1; }
   .reader-progress-thumb { position: absolute; top: 0; left: 0; display: block; width: 100%; min-height: 32px; border-radius: inherit; background: color-mix(in srgb, var(--accent) 82%, transparent); transition: top 80ms linear; }
   .reader-placeholder { padding: 24px; }
