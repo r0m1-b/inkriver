@@ -168,10 +168,12 @@ after restarting InkRiver. Disabling and deleting actions are available on this
 page; **Add subscription** opens a separate dialog containing only the add form.
 Use the top **Refresh** action to update every active subscription, or the
 circular refresh action on an active subscription card to update that feed
-only. A newly added subscription is not downloaded automatically. Individual
-refresh errors appear briefly in a red notification and remain available in
-the corresponding card with their complete details. Disabled feeds must be
-reactivated before they can be refreshed.
+only. On mobile, the top bar replaces the navigation labels with a direct add
+button and a settings button; the latter opens subscription management, whose
+back arrow returns to the article list. A newly added subscription is refreshed
+automatically. Individual refresh errors appear briefly in a red notification
+and remain available in the corresponding card with their complete details.
+Disabled feeds must be reactivated before they can be refreshed.
 
 Opening an unread article automatically marks it as read. The reading panel
 shows the current state and lets you explicitly mark the article as read or

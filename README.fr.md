@@ -177,10 +177,13 @@ désactivation et de suppression se trouvent sur cette page ; **Ajouter un
 abonnement** ouvre une fenêtre séparée contenant uniquement le formulaire
 d'ajout. L'action **Actualiser** de l'en-tête met à jour tous les abonnements
 actifs ; l'action circulaire de chaque carte active ne rafraîchit que ce flux.
-Un abonnement nouvellement ajouté n'est jamais téléchargé automatiquement. Les
-erreurs individuelles apparaissent brièvement dans une notification rouge et
-restent consultables en détail dans la carte correspondante. Un flux désactivé
-doit être réactivé avant son actualisation.
+Sur mobile, la barre supérieure remplace les libellés de navigation par un
+bouton d'ajout direct et un bouton de réglages ; ce dernier ouvre la gestion des
+abonnements, dont la flèche de retour ramène aux articles. Un abonnement
+nouvellement ajouté est automatiquement actualisé. Les erreurs individuelles
+apparaissent brièvement dans une notification rouge et restent consultables en
+détail dans la carte correspondante. Un flux désactivé doit être réactivé avant
+son actualisation.
 
 L'ouverture d'un article non lu le marque automatiquement comme lu. Le panneau
 de lecture affiche son état courant et permet de le marquer explicitement comme

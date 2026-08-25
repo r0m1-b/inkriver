@@ -251,6 +251,14 @@ function backIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function addIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M4 12h16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>';
+}
+
+function settingsIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25A3.75 3.75 0 1 1 12 15.75 3.75 3.75 0 0 1 12 8.25Zm7.15 5.18.06-1.43-.06-1.43 2.03-1.58-2-3.46-2.52 1a8.15 8.15 0 0 0-2.47-1.43L13.8 2.4h-4l-.39 2.7a8.15 8.15 0 0 0-2.47 1.43l-2.52-1-2 3.46 2.03 1.58L4.39 12l.06 1.43-2.03 1.58 2 3.46 2.52-1a8.15 8.15 0 0 0 2.47 1.43l.39 2.7h4l.39-2.7a8.15 8.15 0 0 0 2.47-1.43l2.52 1 2-3.46-2.03-1.58Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
 function checkIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
@@ -276,6 +284,7 @@ export class InkRiverApp {
   private mobileArticleScreen: MobileArticleScreen = "timeline";
   private loading = true;
   private refreshing = false;
+  private pullRefreshing = false;
   private refreshingFeedId: string | null = null;
   private readonly updatingReadArticleIds = new Set<string>();
   private readonly updatingFavoriteArticleIds = new Set<string>();
@@ -817,9 +826,10 @@ export class InkRiverApp {
     reader.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
   }
 
-  private async refresh(): Promise<void> {
+  private async refresh(lockApp = false): Promise<void> {
     if (this.refreshing) return;
     this.refreshing = true;
+    this.pullRefreshing = lockApp;
     this.refreshingFeedId = null;
     this.error = null;
     this.clearNotice();
@@ -843,6 +853,7 @@ export class InkRiverApp {
       this.error = errorMessage(error);
     } finally {
       this.refreshing = false;
+      this.pullRefreshing = false;
       this.render();
     }
   }
@@ -930,12 +941,13 @@ export class InkRiverApp {
     const platform = String(formData.get("platform") ?? "") as Platform;
     this.error = null;
     try {
-      await this.api.addFeed(url, platform);
+      const addedFeed = await this.api.addFeed(url, platform);
       this.feeds = await this.api.listFeeds();
-      this.showNotice("Abonnement ajouté. Utilisez le bouton d’actualisation de sa carte pour télécharger ses articles.");
       this.addSubscriptionOpen = false;
-      this.mainView = "feeds";
       form.reset();
+      this.render();
+      await this.refreshFeed(addedFeed.id);
+      return;
     } catch (error) {
       this.error = errorMessage(error);
     }
@@ -1144,9 +1156,8 @@ export class InkRiverApp {
           <span class="article-swipe-action" aria-hidden="true">${archiveIcon()}<span data-swipe-archive-label>Glissez pour archiver</span></span>
           <div class="article-row-foreground">
           <button type="button" class="article-select" data-action="select-article" data-article-id="${escapeHtml(article.id)}"${selectionAttributes}>
-          <span class="article-list-logo">${multiSelected ? `<span class="article-selection-check">${checkIcon()}</span>` : renderSourceBadge(article.source, this.feedLogo(article.feedId))}</span>
           <span class="article-list-copy">
-            <span class="row-top"><span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span><time>${displayDate(article.publishedAt)}</time></span>
+            <span class="row-top"><span class="article-list-source"><span class="article-list-logo">${multiSelected ? `<span class="article-selection-check">${checkIcon()}</span>` : renderSourceBadge(article.source, this.feedLogo(article.feedId))}</span><span class="byline">${escapeHtml(article.author ?? "Auteur inconnu")}</span></span><time>${displayDate(article.publishedAt)}</time></span>
             <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
           </span>
           </button>
@@ -1401,12 +1412,13 @@ export class InkRiverApp {
     const articleFrameHeight = preserveReaderPosition
       ? this.root.querySelector<HTMLIFrameElement>(".article-content")?.style.height
       : undefined;
-    this.root.innerHTML = `<div class="shell">
-      <header class="topbar"><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
+    this.root.innerHTML = `<div class="shell"${this.pullRefreshing ? ' aria-busy="true"' : ""}>
+      <header class="topbar ${this.mainView === "feeds" ? "feeds-topbar" : ""}"><nav class="mobile-feed-topbar" aria-label="Navigation des abonnements"><button type="button" data-action="show-articles" title="Retour aux articles" aria-label="Retour aux articles">${backIcon()}</button><strong>Gestion des abonnements</strong><span aria-hidden="true"></span></nav><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="mobile-top-action mobile-add-subscription" data-action="add-subscription" title="Ajouter un abonnement" aria-label="Ajouter un abonnement">${addIcon()}</button><button type="button" class="mobile-top-action mobile-settings ${this.mainView === "feeds" ? "active" : ""}" data-action="subscriptions" title="Gestion des abonnements" aria-label="Gestion des abonnements" aria-current="${this.mainView === "feeds" ? "page" : "false"}">${settingsIcon()}</button><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span class="notice-content" role="${this.noticeKind === "error" ? "alert" : "status"}">${this.noticeHasCheck ? `<span class="notice-check" aria-hidden="true">${checkIcon()}</span>` : ""}<span>${escapeHtml(this.notice)}</span></span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
       <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
       ${this.renderArchiveConfirmation()}
+      ${this.pullRefreshing ? '<div class="app-interaction-lock" data-app-interaction-lock aria-hidden="true"></div>' : ""}
     </div>`;
     this.noticeAppearing = false;
     this.imageZoomAppearing = false;
@@ -1447,6 +1459,7 @@ export class InkRiverApp {
   }
 
   private bindEvents(): void {
+    if (this.pullRefreshing) return;
     this.root.querySelectorAll<HTMLImageElement>("[data-feed-logo]").forEach((logo) => {
       logo.addEventListener("error", () => {
         const container = logo.closest<HTMLElement>(".source-logo");
@@ -1554,11 +1567,13 @@ export class InkRiverApp {
         this.render();
       });
     });
-    this.root.querySelector<HTMLElement>('[data-action="show-articles"]')?.addEventListener("click", () => {
-      this.mainView = "articles";
-      this.mobileArticleScreen = "timeline";
-      this.render();
-      this.scrollSelectedArticleIntoView();
+    this.root.querySelectorAll<HTMLElement>('[data-action="show-articles"]').forEach((element) => {
+      element.addEventListener("click", () => {
+        this.mainView = "articles";
+        this.mobileArticleScreen = "timeline";
+        this.render();
+        this.scrollSelectedArticleIntoView();
+      });
     });
     this.root.querySelectorAll<HTMLElement>('[data-action="add-subscription"]').forEach((element) => {
       element.addEventListener("click", () => {
@@ -1773,7 +1788,7 @@ export class InkRiverApp {
     timeline.addEventListener("touchend", () => {
       const shouldRefresh = distance >= PULL_REFRESH_THRESHOLD;
       reset();
-      if (shouldRefresh) void this.refresh();
+      if (shouldRefresh) void this.refresh(true);
     });
     timeline.addEventListener("touchcancel", reset);
   }

@@ -179,6 +179,41 @@ describe("InkRiverApp", () => {
     expect(root.querySelector(".brand small")?.textContent).toBe("All your feeds. One flow.");
   });
 
+  it("provides compact mobile subscription actions and a back button", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const { root, api } = await mounted();
+      const addButton = root.querySelector<HTMLButtonElement>(".mobile-add-subscription")!;
+      const settingsButton = root.querySelector<HTMLButtonElement>(".mobile-settings")!;
+
+      expect(addButton.getAttribute("aria-label")).toBe("Ajouter un abonnement");
+      expect(addButton.querySelector("svg")).not.toBeNull();
+      expect(settingsButton.getAttribute("aria-label")).toBe("Gestion des abonnements");
+      expect(settingsButton.querySelector("svg")).not.toBeNull();
+
+      addButton.click();
+      const form = root.querySelector<HTMLFormElement>("#feed-form")!;
+      root.querySelector<HTMLInputElement>('input[name="url"]')!.value = feed.url;
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+      await flush();
+
+      expect(api.addFeed).toHaveBeenCalledWith(feed.url, "other");
+      expect(api.refreshFeed).toHaveBeenCalledWith(feed.id);
+      expect(root.querySelector("main")?.classList).toContain("articles-view");
+
+      root.querySelector<HTMLElement>(".mobile-settings")!.click();
+      const mobileToolbar = root.querySelector<HTMLElement>(".mobile-feed-topbar")!;
+      expect(mobileToolbar.textContent?.trim()).toBe("Gestion des abonnements");
+      const back = mobileToolbar.querySelector<HTMLButtonElement>('[data-action="show-articles"]')!;
+      expect(back.getAttribute("aria-label")).toBe("Retour aux articles");
+      expect(back.querySelector("svg")).not.toBeNull();
+      back.click();
+      expect(root.querySelector("main")?.classList).toContain("articles-view");
+    } finally {
+      restoreViewport();
+    }
+  });
+
   it("renders the cached timeline without refreshing on startup", async () => {
     const { root, api } = await mounted();
     expect(root.textContent).toContain("Observer Mars au crépuscule");
@@ -568,7 +603,14 @@ describe("InkRiverApp", () => {
       expect(refreshingIndicator.textContent?.trim()).toBe("");
       expect(refreshingIndicator.getAttribute("role")).toBe("status");
       expect(refreshingIndicator.getAttribute("aria-label")).toBe("Actualisation en cours");
+      expect(root.querySelector(".shell")?.getAttribute("aria-busy")).toBe("true");
+      expect(root.querySelector("[data-app-interaction-lock]")).not.toBeNull();
+      root.querySelector<HTMLElement>(".mobile-settings")!.click();
+      expect(root.querySelector("main")?.classList).toContain("articles-view");
       await flush();
+
+      expect(root.querySelector(".shell")?.hasAttribute("aria-busy")).toBe(false);
+      expect(root.querySelector("[data-app-interaction-lock]")).toBeNull();
 
       timeline = root.querySelector<HTMLElement>(".timeline")!;
       timeline.scrollTop = 10;
@@ -729,7 +771,7 @@ describe("InkRiverApp", () => {
     expect(firstRow.querySelectorAll("button")).toHaveLength(4);
   });
 
-  it("places the logo beside an author/date row and a multiline article title", async () => {
+  it("places a header-sized logo beside the author while leaving the title full-width", async () => {
     const { root } = await mounted();
     const row = root.querySelector<HTMLElement>('[data-article-row-id="space::mars"]')!;
     const logo = row.querySelector<HTMLElement>(".article-list-logo .source-logo");
@@ -737,7 +779,9 @@ describe("InkRiverApp", () => {
     const title = copy.querySelector<HTMLElement>(":scope > strong")!;
 
     expect(logo).not.toBeNull();
-    expect(row.querySelector(".row-top .source-identity")).toBeNull();
+    expect(row.querySelector(".row-top .source-identity")).not.toBeNull();
+    expect(row.querySelector(".article-select > .article-list-logo")).toBeNull();
+    expect(row.querySelector(".article-list-source > .article-list-logo + .byline")?.textContent).toBe("Claire du Ciel");
     expect(copy.querySelector(".row-top .byline")?.textContent).toBe("Claire du Ciel");
     expect(copy.querySelector(".row-top time")).not.toBeNull();
     expect(title.textContent).toBe("Observer Mars au crépuscule");
@@ -1782,7 +1826,7 @@ describe("InkRiverApp", () => {
     expect(root.querySelector(".feed-error")?.textContent).toContain("Document XML invalide");
   });
 
-  it("adds and deactivates subscriptions without triggering a refresh", async () => {
+  it("adds, refreshes and deactivates subscriptions", async () => {
     const { root, api } = await mounted();
     root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
     expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
@@ -1796,9 +1840,9 @@ describe("InkRiverApp", () => {
     await flush();
     expect(api.addFeed).toHaveBeenCalledWith("https://notes.medium.com/feed", "medium");
     expect(api.refreshFeeds).not.toHaveBeenCalled();
-    expect(api.refreshFeed).not.toHaveBeenCalled();
+    expect(api.refreshFeed).toHaveBeenCalledWith(feed.id);
     expect(root.querySelector('[role="status"]')?.textContent).toContain(
-      "bouton d’actualisation de sa carte",
+      "1 nouvel article",
     );
     root.querySelector<HTMLElement>('[data-action="toggle-feed"]')!.click();
     await flush();
