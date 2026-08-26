@@ -2,19 +2,21 @@
 
 **English** | [Français](README.fr.md)
 
-InkRiver is an RSS/Atom feed reader written in Rust. It brings Medium, Substack,
-and other compatible subscriptions together in a single timeline and makes
-articles available offline.
+InkRiver is a Tauri 2 RSS/Atom reader for Linux and Android. It brings Medium,
+Substack, and other compatible subscriptions together in a single timeline and
+makes articles available offline. Its backend and storage layer are written in
+Rust, while the interface uses Vanilla TypeScript.
 
-The project includes a command-line application and a Tauri 2 desktop
-application for Linux. Both use the same Rust core and SQLite schema. A first
-responsive Android interface is in development on top of the same backend.
+An optional command-line application remains available as a development,
+diagnostic, and automation tool. The graphical application and CLI share the
+same Rust core and SQLite schema, but they do not use the same database or
+subscription configuration by default.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Current features
 
-- load multiple feeds from `feeds.toml`;
+- add, refresh, disable, and delete subscriptions from the graphical interface;
 - support Medium, Substack, and other RSS/Atom feeds;
 - download feeds asynchronously with `reqwest` and Tokio;
 - sanitize remote HTML before storing it;
@@ -25,7 +27,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - maintain local read and favorite states in the Rust core;
 - display articles from newest to oldest;
 - read cached articles even when some feeds are unavailable;
-- use separate commands to refresh, list, read, and update article states;
+- optionally use CLI commands to refresh, list, read, and update article states;
 - use a two-pane Linux interface with subscription management;
 - use separate timeline and reader screens on narrow mobile displays;
 - select several mobile timeline articles with a long press, then mark them
@@ -46,7 +48,7 @@ The project requires:
 - a C compiler to build the bundled SQLite library;
 - Git to clone the repository.
 
-Install the system tools required by the CLI with:
+Install the system tools required by the Rust core and optional CLI with:
 
 ```bash
 sudo apt update
@@ -77,24 +79,7 @@ sudo apt install sqlite3
 
 ## Install the project
 
-From a local checkout:
-
-```bash
-cargo build
-```
-
-Cargo downloads the crates declared in `Cargo.toml` and creates the development
-binary at `target/debug/inkriver`.
-
-For an optimized build:
-
-```bash
-cargo build --release
-```
-
-The resulting binary is located at `target/release/inkriver`.
-
-Then install the frontend dependencies:
+From a local checkout, install the frontend dependencies first:
 
 ```bash
 cd app
@@ -102,6 +87,27 @@ npm install
 ```
 
 `app/package-lock.json` pins the resolved versions and should remain committed.
+
+From the repository root, the whole Rust workspace can be checked or built with:
+
+```bash
+cargo build --workspace
+```
+
+This builds the shared core, the Tauri adapter, and the optional CLI. Building
+the CLI alone creates `target/debug/inkriver`:
+
+```bash
+cargo build --bin inkriver
+```
+
+For an optimized CLI build:
+
+```bash
+cargo build --release --bin inkriver
+```
+
+The resulting optional CLI binary is located at `target/release/inkriver`.
 
 ## Prepare Android development
 
@@ -137,11 +143,16 @@ generated Android project. Run it again after reinitializing
 `app/src-tauri/gen/android` or changing the source icon.
 
 Vite reads `TAURI_DEV_HOST`, which lets the device reach the development server.
-To produce a test APK after initialization:
+To produce and install a signed debug APK after initialization:
 
 ```bash
-npm run tauri android build -- --apk
+npm run tauri android build -- --debug
+adb install -r \
+  src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ```
+
+The generated `.aab` is intended for Android distribution tooling and is not
+installed directly with `adb`.
 
 The Android WebView uses the same Tauri commands, Rust core, migrations, and
 SQLite storage layer as Linux. Its database is created in the application's
@@ -230,7 +241,11 @@ npm run tauri build -- --bundles deb,appimage
 Packages are generated under `target/release/bundle/deb/` and
 `target/release/bundle/appimage/`.
 
-## Configure subscriptions
+## Configure the optional CLI
+
+The installed Linux and Android applications manage their subscriptions in the
+graphical interface and store them in their private SQLite database. The
+following `feeds.toml` configuration is used only by the optional CLI.
 
 Create a `feeds.toml` file at the project root:
 
@@ -261,7 +276,10 @@ Configuration rules:
 `feeds.toml` is intentionally ignored by Git because it contains the
 developer's personal configuration.
 
-## Use the CLI
+## Use the optional CLI
+
+The CLI is not launched by, and is not required for, the Linux or Android
+application. It is useful for headless diagnostics, development, and scripts.
 
 Display the help and available commands:
 
@@ -343,9 +361,12 @@ installation.
 
 ### Installation and creation
 
-The database does not require a separate installation step. On the first
-`cargo run -- refresh` or `cargo run -- list`, SQLx automatically creates this
-file at the project root:
+The database does not require a separate installation step. The Linux and
+Android applications create and migrate `inkriver.db` automatically in their
+own private AppData directory. Each installation therefore has its own data.
+
+The optional CLI instead creates this separate development database at the
+project root on the first `cargo run -- refresh` or `cargo run -- list`:
 
 ```text
 inkriver.db
@@ -559,16 +580,15 @@ app/src-tauri/  Tauri adapter, commands, and configuration
 
 ## Current limitations
 
-- the numbers displayed by `list` are not stable between timelines, unlike
-  article identifiers;
+- the optional CLI remains part of the main Rust package instead of a separate
+  workspace crate;
 - content requiring authentication or a paid subscription is not supported;
-- the responsive Android interface still needs validation on a real device or
-  emulator;
-- the generated Android project and APK require a configured JDK, SDK, and NDK;
+- Android builds still require a configured JDK, SDK, and NDK, and a signed
+  release workflow has not been configured yet;
+- synchronization between Linux and Android databases is not implemented yet;
 - the CLI's `inkriver.db` is still stored in the development repository.
 
-The next step is to initialize, run, and refine the Android application on a
-device. In the installed application, SQLite remains the source of truth in the
+In every installed application, SQLite remains the source of truth in the
 private AppData directory for the `io.github.r0m1-b.inkriver` bundle.
 
 ## License
@@ -577,12 +597,12 @@ InkRiver is distributed under the [MIT License](LICENSE).
 
 ## Quick troubleshooting
 
-### `feeds.toml` cannot be found
+### CLI: `feeds.toml` cannot be found
 
 Create the file at the project root. Its path does not depend on the directory
 from which the binary is launched. The file is only required by `refresh`.
 
-### The TOML configuration is rejected
+### CLI: the TOML configuration is rejected
 
 Check the quotation marks, `[[feeds]]` blocks, unique identifiers, and accepted
 `platform` values.

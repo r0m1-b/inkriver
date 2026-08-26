@@ -2,20 +2,23 @@
 
 [English](README.md) | **Français**
 
-InkRiver est un lecteur de flux RSS/Atom écrit en Rust. Son objectif est de réunir
-les abonnements Medium, Substack et les autres flux compatibles dans une même
-chronologie, puis de rendre les articles disponibles hors ligne.
+InkRiver est un lecteur de flux RSS/Atom Tauri 2 pour Linux et Android. Son
+objectif est de réunir les abonnements Medium, Substack et les autres flux
+compatibles dans une même chronologie, puis de rendre les articles disponibles
+hors ligne. Son backend et son stockage sont écrits en Rust, tandis que
+l'interface utilise Vanilla TypeScript.
 
-Le projet comprend un programme en ligne de commande et une interface Tauri 2
-pour Linux. Les deux utilisent le même cœur Rust et le même schéma SQLite. Une
-première interface responsive Android est en cours de développement sur ce même
-backend.
+Un programme en ligne de commande optionnel reste disponible comme outil de
+développement, de diagnostic et d'automatisation. L'application graphique et le
+CLI partagent le même cœur Rust et le même schéma SQLite, mais n'utilisent par
+défaut ni la même base ni la même configuration d'abonnements.
 
 Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
 
 ## Fonctionnalités actuelles
 
-- chargement de plusieurs flux depuis `feeds.toml` ;
+- ajout, actualisation, désactivation et suppression des abonnements depuis
+  l'interface graphique ;
 - prise en charge de Medium, Substack et des autres flux RSS/Atom ;
 - téléchargement asynchrone avec `reqwest` et Tokio ;
 - nettoyage du HTML reçu avant son stockage ;
@@ -26,8 +29,8 @@ Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
 - états locaux « lu » et « favori » dans le cœur Rust ;
 - affichage des articles du plus récent au plus ancien ;
 - lecture du cache même lorsque certains flux sont indisponibles ;
-- commandes distinctes pour rafraîchir, lister, lire et modifier les états
-  locaux des articles ;
+- commandes CLI optionnelles pour rafraîchir, lister, lire et modifier les
+  états locaux des articles ;
 - interface Linux à deux panneaux avec gestion des abonnements ;
 - chronologie et lecteur sur deux écrans distincts sur un affichage mobile ;
 - sélection multiple par appui long dans la chronologie mobile, avec marquage
@@ -50,7 +53,7 @@ Le projet nécessite :
 - un compilateur C pour construire la copie embarquée de SQLite ;
 - Git pour récupérer le dépôt.
 
-Les outils système du CLI peuvent être installés avec :
+Les outils système du cœur Rust et du CLI optionnel peuvent être installés avec :
 
 ```bash
 sudo apt update
@@ -81,24 +84,8 @@ sudo apt install sqlite3
 
 ## Installation du projet
 
-Depuis une copie locale du dépôt :
-
-```bash
-cargo build
-```
-
-Cargo télécharge les crates déclarées dans `Cargo.toml` et produit le binaire de
-développement dans `target/debug/inkriver`.
-
-Pour une compilation optimisée :
-
-```bash
-cargo build --release
-```
-
-Le binaire se trouve alors dans `target/release/inkriver`.
-
-Installer ensuite les dépendances du frontend :
+Depuis une copie locale du dépôt, installer d'abord les dépendances du
+frontend :
 
 ```bash
 cd app
@@ -107,6 +94,27 @@ npm install
 
 Le fichier `app/package-lock.json` fixe les versions résolues et doit rester
 committé.
+
+Depuis la racine du dépôt, vérifier ou compiler tout le workspace Rust avec :
+
+```bash
+cargo build --workspace
+```
+
+Cette commande compile le cœur partagé, l'adaptation Tauri et le CLI optionnel.
+Pour ne compiler que le CLI dans `target/debug/inkriver` :
+
+```bash
+cargo build --bin inkriver
+```
+
+Pour une compilation optimisée du CLI :
+
+```bash
+cargo build --release --bin inkriver
+```
+
+Le binaire CLI optionnel se trouve alors dans `target/release/inkriver`.
 
 ## Préparer le développement Android
 
@@ -144,11 +152,17 @@ initialisation de `app/src-tauri/gen/android` ou une modification du logo
 source.
 
 Vite lit `TAURI_DEV_HOST`, ce qui permet à l'appareil de joindre le serveur de
-développement. Pour produire un APK de test après l'initialisation :
+développement. Pour produire puis installer un APK de debug signé après
+l'initialisation :
 
 ```bash
-npm run tauri android build -- --apk
+npm run tauri android build -- --debug
+adb install -r \
+  src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ```
+
+Le fichier `.aab` également généré est destiné aux outils de distribution
+Android et ne s'installe pas directement avec `adb`.
 
 La WebView Android utilise les mêmes commandes Tauri, le même cœur Rust, les
 mêmes migrations et la même couche SQLite que Linux. Sa base est créée dans le
@@ -244,7 +258,11 @@ npm run tauri build -- --bundles deb,appimage
 Les paquets sont produits sous `target/release/bundle/deb/` et
 `target/release/bundle/appimage/`.
 
-## Configurer les abonnements
+## Configurer le CLI optionnel
+
+Les applications Linux et Android installées gèrent leurs abonnements dans
+l'interface graphique et les stockent dans leur base SQLite privée. La
+configuration `feeds.toml` suivante concerne uniquement le CLI optionnel.
 
 Créer un fichier `feeds.toml` à la racine du projet :
 
@@ -275,7 +293,11 @@ Règles de configuration :
 `feeds.toml` est volontairement ignoré par Git : il représente la configuration
 personnelle du développeur.
 
-## Utiliser InkRiver
+## Utiliser le CLI optionnel
+
+Le CLI n'est ni lancé par l'application Linux ou Android, ni nécessaire à son
+fonctionnement. Il reste utile pour les diagnostics sans interface, le
+développement et les scripts.
 
 Afficher l'aide et les commandes disponibles :
 
@@ -358,9 +380,12 @@ installation système portable.
 
 ### Installation et création
 
-Il n'existe aucune étape d'installation séparée pour la base. Au premier
-`cargo run -- refresh` ou `cargo run -- list`, SQLx crée automatiquement à la
-racine du projet :
+Il n'existe aucune étape d'installation séparée pour la base. Les applications
+Linux et Android créent et migrent automatiquement `inkriver.db` dans leur
+propre répertoire AppData privé. Chaque installation possède donc ses données.
+
+Le CLI optionnel crée quant à lui cette base de développement distincte à la
+racine du projet au premier `cargo run -- refresh` ou `cargo run -- list` :
 
 ```text
 inkriver.db
@@ -579,20 +604,17 @@ app/src-tauri/   adaptation, commandes et configuration Tauri
 
 ## Limites actuelles
 
-- les numéros affichés par `list` ne sont pas persistants entre deux
-  chronologies, contrairement aux identifiants ;
+- le CLI optionnel appartient encore au paquet Rust principal au lieu d'être
+  isolé dans un crate du workspace ;
 - les contenus nécessitant une connexion ou un abonnement payant ne sont pas
   pris en charge ;
-- l'interface responsive Android doit encore être validée sur un appareil réel
-  ou un émulateur ;
-- la génération du projet Android et de l'APK nécessite un JDK, un SDK et un NDK
-  configurés ;
+- les builds Android nécessitent encore un JDK, un SDK et un NDK configurés, et
+  le processus de release signée n'est pas encore en place ;
+- la synchronisation des bases Linux et Android n'est pas encore implémentée ;
 - `inkriver.db` du CLI se trouve encore dans le dépôt de développement.
 
-L'étape suivante consiste à initialiser, exécuter et affiner l'application
-Android sur un appareil. Dans l'application installée, SQLite reste la source
-de vérité dans le répertoire AppData privé du bundle
-`io.github.r0m1-b.inkriver`.
+Dans chaque application installée, SQLite reste la source de vérité dans le
+répertoire AppData privé du bundle `io.github.r0m1-b.inkriver`.
 
 ## Licence
 
@@ -600,13 +622,13 @@ InkRiver est distribué sous la [licence MIT](LICENSE).
 
 ## Dépannage rapide
 
-### `feeds.toml` est introuvable
+### CLI : `feeds.toml` est introuvable
 
 Créer le fichier à la racine du projet. Le chemin ne dépend pas du répertoire
 depuis lequel le binaire est lancé. Ce fichier n'est nécessaire que pour
 `refresh`.
 
-### La configuration TOML est refusée
+### CLI : la configuration TOML est refusée
 
 Vérifier les guillemets, les blocs `[[feeds]]`, les identifiants uniques et les
 valeurs autorisées de `platform`.
