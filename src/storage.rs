@@ -1,6 +1,7 @@
 use crate::article::{Article, ContentKind, Source};
 use crate::config::{FeedConfig, FeedUrlError, Platform, detect_platform, normalize_feed_url};
 use crate::feed::FeedMetadata;
+use crate::sync::{HybridLogicalClock, SYNC_PROTOCOL_VERSION, SyncEvent, SyncIdentity};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
@@ -16,6 +17,7 @@ pub const EXTRACTION_RETRY_DAYS: i64 = 7;
 pub const MAX_EXTRACTION_ATTEMPTS_PER_REFRESH: usize = 20;
 pub const LOGO_RETRY_DAYS: i64 = 7;
 pub const MAX_LOGO_ATTEMPTS_PER_REFRESH: usize = 20;
+pub const MAX_SYNC_EVENTS_PER_READ: usize = 1_000;
 
 fn unique_article_ids(article_ids: &[String]) -> Vec<&str> {
     let mut seen = HashSet::new();
@@ -24,6 +26,13 @@ fn unique_article_ids(article_ids: &[String]) -> Vec<&str> {
         .map(String::as_str)
         .filter(|article_id| seen.insert(*article_id))
         .collect()
+}
+
+fn article_entry_key<'a>(article_id: &'a str, feed_id: &str) -> &'a str {
+    article_id
+        .strip_prefix(feed_id)
+        .and_then(|suffix| suffix.strip_prefix("::"))
+        .unwrap_or(article_id)
 }
 
 /// Owns the SQLite connection pool used by the InkRiver core.
@@ -230,6 +239,34 @@ type StoredArticleRow = (
     bool,
 );
 
+type SyncEventRow = (String, i64, i64, i64, i64, String, String);
+
+fn sync_event_from_row(row: SyncEventRow) -> Result<SyncEvent> {
+    let (
+        device_id,
+        sequence,
+        physical_milliseconds,
+        logical_counter,
+        protocol_version,
+        kind,
+        payload_json,
+    ) = row;
+    let payload = serde_json::from_str(&payload_json)
+        .with_context(|| format!("Invalid JSON in synchronization event {device_id}:{sequence}"))?;
+
+    Ok(SyncEvent {
+        device_id,
+        sequence,
+        clock: HybridLogicalClock {
+            physical_milliseconds,
+            logical_counter,
+        },
+        protocol_version,
+        kind,
+        payload,
+    })
+}
+
 fn stored_article_from_row(row: StoredArticleRow) -> Result<StoredArticle> {
     let (
         id,
@@ -293,7 +330,181 @@ impl Storage {
             .await
             .context("Impossible d'appliquer les migrations SQLite")?;
 
+        let generated_device_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+                INSERT OR IGNORE INTO sync_local_state (
+                    singleton, device_id, next_sequence,
+                    hlc_physical_ms, hlc_counter
+                ) VALUES (1, ?, 1, 0, 0)
+            "#,
+        )
+        .bind(generated_device_id)
+        .execute(&pool)
+        .await
+        .context("Impossible d'initialiser l'identité de synchronisation")?;
+
         Ok(Self { pool })
+    }
+
+    /// Returns the stable identity and journal allocation state of this installation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the singleton synchronization state is missing or
+    /// cannot be read.
+    pub async fn sync_identity(&self) -> Result<SyncIdentity> {
+        let (device_id, next_sequence, physical_milliseconds, logical_counter): (
+            String,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            r#"
+                SELECT device_id, next_sequence, hlc_physical_ms, hlc_counter
+                FROM sync_local_state
+                WHERE singleton = 1
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Impossible de charger l'identité de synchronisation")?;
+
+        Ok(SyncIdentity {
+            device_id,
+            next_sequence,
+            clock: HybridLogicalClock {
+                physical_milliseconds,
+                logical_counter,
+            },
+        })
+    }
+
+    /// Atomically allocates a sequence and hybrid time, then appends one local event.
+    ///
+    /// The allocation and insert share one SQLite transaction. A failed insert
+    /// therefore consumes neither a sequence nor a logical-clock tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid kind, an unserializable payload, or any
+    /// SQLite failure. Event kinds are intentionally open until `SYNC-003`
+    /// introduces the typed business payloads.
+    pub async fn append_local_sync_event(
+        &self,
+        kind: &str,
+        payload: &serde_json::Value,
+        observed_at: DateTime<Utc>,
+    ) -> Result<SyncEvent> {
+        if kind.is_empty() || kind.len() > 64 || kind.trim() != kind {
+            anyhow::bail!("Synchronization event kind must contain 1 to 64 trimmed characters");
+        }
+        let payload_json = serde_json::to_string(payload)
+            .context("Impossible de sérialiser l'événement de synchronisation")?;
+        let wall_milliseconds = observed_at.timestamp_millis().max(0);
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer l'écriture du journal de synchronisation")?;
+
+        let (device_id, sequence, physical_milliseconds, logical_counter): (String, i64, i64, i64) =
+            sqlx::query_as(
+                r#"
+                UPDATE sync_local_state
+                SET next_sequence = next_sequence + 1,
+                    hlc_counter = CASE
+                        WHEN ? > hlc_physical_ms THEN 0
+                        ELSE hlc_counter + 1
+                    END,
+                    hlc_physical_ms = MAX(hlc_physical_ms, ?)
+                WHERE singleton = 1
+                RETURNING device_id, next_sequence - 1,
+                          hlc_physical_ms, hlc_counter
+            "#,
+            )
+            .bind(wall_milliseconds)
+            .bind(wall_milliseconds)
+            .fetch_one(&mut *transaction)
+            .await
+            .context("Impossible d'allouer la version de l'événement de synchronisation")?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO sync_events (
+                    device_id, sequence, hlc_physical_ms, hlc_counter,
+                    protocol_version, event_kind, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&device_id)
+        .bind(sequence)
+        .bind(physical_milliseconds)
+        .bind(logical_counter)
+        .bind(SYNC_PROTOCOL_VERSION)
+        .bind(kind)
+        .bind(&payload_json)
+        .execute(&mut *transaction)
+        .await
+        .context("Impossible d'ajouter l'événement au journal de synchronisation")?;
+
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider l'événement de synchronisation")?;
+
+        Ok(SyncEvent {
+            device_id,
+            sequence,
+            clock: HybridLogicalClock {
+                physical_milliseconds,
+                logical_counter,
+            },
+            protocol_version: SYNC_PROTOCOL_VERSION,
+            kind: kind.to_string(),
+            payload: payload.clone(),
+        })
+    }
+
+    /// Reads this installation's immutable journal after an exclusive sequence.
+    ///
+    /// Results are ordered by sequence and one call is capped at 1,000 rows so
+    /// future transports cannot accidentally load an unbounded journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when rows cannot be read or contain invalid JSON.
+    pub async fn local_sync_events_after(
+        &self,
+        after_sequence: i64,
+        limit: usize,
+    ) -> Result<Vec<SyncEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_SYNC_EVENTS_PER_READ) as i64;
+        let rows: Vec<SyncEventRow> = sqlx::query_as(
+            r#"
+                SELECT events.device_id, events.sequence,
+                       events.hlc_physical_ms, events.hlc_counter,
+                       events.protocol_version, events.event_kind,
+                       events.payload_json
+                FROM sync_events AS events
+                INNER JOIN sync_local_state AS local
+                    ON local.device_id = events.device_id
+                WHERE local.singleton = 1
+                  AND events.sequence > ?
+                ORDER BY events.sequence ASC
+                LIMIT ?
+            "#,
+        )
+        .bind(after_sequence.max(0))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de lire le journal local de synchronisation")?;
+
+        rows.into_iter().map(sync_event_from_row).collect()
     }
 
     /// Imports the configured subscriptions as the active feed set.
@@ -844,11 +1055,12 @@ impl Storage {
                 r#"
                     INSERT INTO articles (
                         id, feed_id, title, author, published_at, url, content,
-                        content_kind, source
+                        content_kind, source, entry_key
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         feed_id = excluded.feed_id,
+                        entry_key = COALESCE(articles.entry_key, excluded.entry_key),
                         title = COALESCE(excluded.title, articles.title),
                         author = COALESCE(excluded.author, articles.author),
                         published_at = COALESCE(excluded.published_at, articles.published_at),
@@ -878,6 +1090,7 @@ impl Storage {
             .bind(&article.content)
             .bind(article.content_kind.as_str())
             .bind(article.source.as_str())
+            .bind(article_entry_key(&article.id, &article.feed_id))
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("Impossible d'enregistrer l'article {:?}", article.id))?;
@@ -1447,6 +1660,9 @@ mod tests {
                 .unwrap();
         assert!(table_names.contains(&"feeds".to_string()));
         assert!(table_names.contains(&"articles".to_string()));
+        assert!(table_names.contains(&"sync_local_state".to_string()));
+        assert!(table_names.contains(&"sync_events".to_string()));
+        assert!(table_names.contains(&"sync_pending_events".to_string()));
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&storage.pool)
@@ -1467,9 +1683,206 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 6);
+        assert_eq!(migration_count, 7);
 
         storage.close().await;
+    }
+
+    /// Verifies that one generated device identity and its journal clock survive
+    /// closing and reopening the same SQLite database.
+    #[tokio::test]
+    async fn synchronization_identity_and_clock_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("inkriver.db");
+        let storage = Storage::open(&database_path).await.unwrap();
+        let initial = storage.sync_identity().await.unwrap();
+        assert!(uuid::Uuid::parse_str(&initial.device_id).is_ok());
+        assert_eq!(initial.next_sequence, 1);
+        assert_eq!(
+            initial.clock,
+            HybridLogicalClock {
+                physical_milliseconds: 0,
+                logical_counter: 0,
+            }
+        );
+
+        let first_time = Utc.timestamp_millis_opt(2_000).single().unwrap();
+        let first = storage
+            .append_local_sync_event(
+                "test_created",
+                &serde_json::json!({ "value": 1 }),
+                first_time,
+            )
+            .await
+            .unwrap();
+        storage.close().await;
+
+        let storage = Storage::open(&database_path).await.unwrap();
+        let reopened = storage.sync_identity().await.unwrap();
+        assert_eq!(reopened.device_id, initial.device_id);
+        assert_eq!(reopened.next_sequence, 2);
+        assert_eq!(reopened.clock, first.clock);
+
+        let older_wall_time = Utc.timestamp_millis_opt(1_000).single().unwrap();
+        let second = storage
+            .append_local_sync_event(
+                "test_updated",
+                &serde_json::json!({ "value": 2 }),
+                older_wall_time,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.clock.physical_milliseconds, 2_000);
+        assert_eq!(second.clock.logical_counter, 1);
+    }
+
+    /// Verifies ordered, bounded journal reads and hybrid-clock progression.
+    #[tokio::test]
+    async fn local_sync_journal_allocates_unique_sequences_and_reads_after_cursor() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let times = [1_000, 900, 1_000, 1_100];
+        let expected_clocks = [(1_000, 0), (1_000, 1), (1_000, 2), (1_100, 0)];
+
+        for (index, time) in times.into_iter().enumerate() {
+            let event = storage
+                .append_local_sync_event(
+                    "test_state_set",
+                    &serde_json::json!({ "index": index }),
+                    Utc.timestamp_millis_opt(time).single().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(event.sequence, index as i64 + 1);
+            assert_eq!(
+                (
+                    event.clock.physical_milliseconds,
+                    event.clock.logical_counter
+                ),
+                expected_clocks[index]
+            );
+            assert_eq!(event.protocol_version, SYNC_PROTOCOL_VERSION);
+        }
+
+        let page = storage.local_sync_events_after(1, 2).await.unwrap();
+        assert_eq!(
+            page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(page[0].payload, serde_json::json!({ "index": 1 }));
+        assert!(
+            storage
+                .local_sync_events_after(0, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let duplicate = sqlx::query(
+            r#"
+                INSERT INTO sync_events (
+                    device_id, sequence, hlc_physical_ms, hlc_counter,
+                    protocol_version, event_kind, payload_json
+                ) VALUES (?, 1, 0, 0, 1, 'duplicate', '{}')
+            "#,
+        )
+        .bind(&page[0].device_id)
+        .execute(&storage.pool)
+        .await;
+        assert!(duplicate.is_err());
+    }
+
+    /// Verifies concurrent writers cannot allocate the same local sequence.
+    #[tokio::test]
+    async fn concurrent_sync_appends_allocate_unique_contiguous_sequences() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("inkriver.db"))
+            .await
+            .unwrap();
+        let observed_at = Utc.timestamp_millis_opt(10_000).single().unwrap();
+        let appends = (0..16).map(|index| {
+            let payload = serde_json::json!({ "index": index });
+            let storage = &storage;
+            async move {
+                storage
+                    .append_local_sync_event("concurrent_test", &payload, observed_at)
+                    .await
+            }
+        });
+
+        let mut sequences = futures_util::future::join_all(appends)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+        sequences.sort_unstable();
+        assert_eq!(sequences, (1..=16).collect::<Vec<_>>());
+        assert_eq!(storage.sync_identity().await.unwrap().next_sequence, 17);
+    }
+
+    /// Verifies that a failed journal insert rolls back both sequence and clock.
+    #[tokio::test]
+    async fn failed_sync_append_does_not_consume_sequence_or_clock() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        sqlx::raw_sql(
+            r#"
+                CREATE TRIGGER reject_test_sync_event
+                BEFORE INSERT ON sync_events
+                WHEN NEW.event_kind = 'rejected'
+                BEGIN
+                    SELECT RAISE(ABORT, 'rejected by test');
+                END;
+            "#,
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        let time = Utc.timestamp_millis_opt(5_000).single().unwrap();
+        assert!(
+            storage
+                .append_local_sync_event("rejected", &serde_json::json!({}), time)
+                .await
+                .is_err()
+        );
+        let after_failure = storage.sync_identity().await.unwrap();
+        assert_eq!(after_failure.next_sequence, 1);
+        assert_eq!(after_failure.clock.physical_milliseconds, 0);
+        assert_eq!(after_failure.clock.logical_counter, 0);
+
+        let accepted = storage
+            .append_local_sync_event("accepted", &serde_json::json!({}), time)
+            .await
+            .unwrap();
+        assert_eq!(accepted.sequence, 1);
+        assert_eq!(accepted.clock.physical_milliseconds, 5_000);
+        assert_eq!(accepted.clock.logical_counter, 0);
+    }
+
+    /// Verifies input validation happens before journal allocation.
+    #[tokio::test]
+    async fn invalid_sync_event_kind_leaves_the_journal_untouched() {
+        let storage = Storage::open_in_memory().await.unwrap();
+
+        assert!(
+            storage
+                .append_local_sync_event(
+                    " event ",
+                    &serde_json::json!({}),
+                    Utc.timestamp_millis_opt(1_000).single().unwrap(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(storage.sync_identity().await.unwrap().next_sequence, 1);
+        assert!(
+            storage
+                .local_sync_events_after(0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Verifies feed metadata and refresh errors survive reloads and a later
@@ -1837,6 +2250,167 @@ mod tests {
                 Some("manual".to_string())
             )
         );
+    }
+
+    /// Verifies the synchronization migration preserves all existing feed and
+    /// article state while deriving a feed-independent entry key.
+    #[tokio::test]
+    async fn synchronization_migration_preserves_existing_data_and_backfills_entry_keys() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080001_initial_schema.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608080002_article_content_kind.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608120001_feed_details.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608140001_article_archiving.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608160001_article_extraction.sql"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations/202608220001_feed_logos.sql"
+            )),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            r#"
+                INSERT INTO feeds (
+                    id, platform, url, is_active, title, description, author,
+                    logo_png
+                ) VALUES (
+                    'feed%id', 'other', 'https://example.com/feed', 0,
+                    'Existing feed', 'Existing description', 'Existing author',
+                    X'89504E47'
+                )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+                INSERT INTO articles (
+                    id, feed_id, title, author, published_at, url, content,
+                    source, is_read, is_favorite, content_kind, is_archived,
+                    archived_at, archive_reason, extraction_attempt_count
+                ) VALUES (
+                    'feed%id::publisher-guid', 'feed%id', 'Existing article',
+                    'Existing author', '2026-08-20T12:00:00Z',
+                    'https://example.com/article', '<p>Existing body</p>',
+                    'other', 1, 1, 'full', 1, '2026-08-21T12:00:00Z',
+                    'manual', 3
+                )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608260001_sync_journal.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        type PreservedSyncMigrationRow = (
+            String,
+            String,
+            String,
+            bool,
+            bool,
+            bool,
+            Option<String>,
+            i64,
+        );
+        let row: PreservedSyncMigrationRow = sqlx::query_as(
+            r#"
+                SELECT id, feed_id, entry_key, is_read, is_favorite,
+                       is_archived, archive_reason, extraction_attempt_count
+                FROM articles
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                "feed%id::publisher-guid".to_string(),
+                "feed%id".to_string(),
+                "publisher-guid".to_string(),
+                true,
+                true,
+                true,
+                Some("manual".to_string()),
+                3,
+            )
+        );
+
+        let feed_state: (String, bool, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT title, is_active, logo_png FROM feeds")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            feed_state,
+            (
+                "Existing feed".to_string(),
+                false,
+                Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            )
+        );
+
+        let sync_tables: i64 = sqlx::query_scalar(
+            r#"
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type = 'table' AND name IN (
+                    'sync_local_state', 'sync_events', 'sync_import_cursors',
+                    'sync_pending_events', 'sync_subscription_aliases',
+                    'sync_entity_versions', 'sync_tombstones',
+                    'sync_article_identities'
+                )
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sync_tables, 8);
+
+        let duplicate_entry_key = sqlx::query(
+            r#"
+                INSERT INTO articles (
+                    id, feed_id, entry_key, source, content_kind
+                ) VALUES (
+                    'different-id', 'feed%id', 'publisher-guid', 'other', 'missing'
+                )
+            "#,
+        )
+        .execute(&pool)
+        .await;
+        assert!(duplicate_entry_key.is_err());
     }
 
     /// Verifies logo discovery is scoped to successful Other feeds, observes
@@ -2398,11 +2972,17 @@ mod tests {
         assert_eq!(
             storage.list_articles().await.unwrap(),
             vec![StoredArticle {
-                article: expected,
+                article: expected.clone(),
                 is_read: false,
                 is_favorite: false,
             }]
         );
+        let entry_key: String = sqlx::query_scalar("SELECT entry_key FROM articles WHERE id = ?")
+            .bind(&expected.id)
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(entry_key, "jupiter");
     }
 
     /// Verifies repeated collection updates one row without erasing richer old values.

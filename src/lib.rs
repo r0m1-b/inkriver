@@ -10,6 +10,7 @@ pub mod page_http;
 pub mod refresh;
 pub mod service;
 pub mod storage;
+pub mod sync;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
