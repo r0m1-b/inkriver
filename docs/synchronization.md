@@ -119,6 +119,7 @@ replicated operations.
 | --- | --- | --- |
 | Add or re-add a subscription | `subscription_created` | Contains the normalized URL, current platform hint and optional parent tombstone. |
 | Activate or deactivate a subscription | `subscription_active_set` | A field-level last-writer-wins register. |
+| Change a retained subscription's platform hint | `subscription_platform_set` | Emitted when reactivation also changes the user-overridden provider hint. |
 | Delete a subscription | `subscription_deleted` | Permanent tombstone for that incarnation. |
 | Mark an article read or unread | `article_read_set` | Opening an unread article counts as user intent and produces `true`. |
 | Add or remove a favorite | `article_favorite_set` | Independent from the read register. |
@@ -172,6 +173,7 @@ subscription_created {
 }
 
 subscription_active_set { subscription_id, is_active }
+subscription_platform_set { subscription_id, platform_hint }
 subscription_deleted    { subscription_id }
 
 article_read_set     { article_ref, is_read }
@@ -190,10 +192,10 @@ are not last-writer-wins registers and do not generate events when refreshed.
 
 ## Merge registers and tombstones
 
-Read state, favorite state and subscription activation are independent
-last-writer-wins registers. Only events for the same logical entity and field
-compete. The greatest total `version` wins, so concurrent changes to different
-fields are both preserved.
+Read state, favorite state, subscription activation and the platform hint are
+independent last-writer-wins registers. Only events for the same logical entity
+and field compete. The greatest total `version` wins, so concurrent changes to
+different fields are both preserved.
 
 Deletion and manual archiving are permanent tombstones in protocol version 1:
 
@@ -219,7 +221,7 @@ restore its body. A manual archive is never removed this way.
 | Add the same normalized URL on two offline devices | One subscription; smallest UUID is canonical and the other is an alias. |
 | Add two different normalized URLs | Both subscriptions remain. |
 | Activate vs deactivate the same subscription | The value with the greatest version wins. |
-| Change platform hints on aliased concurrent additions | The hint from the greatest create-event version wins. |
+| Change platform hints on aliased concurrent additions or a retained subscription | The hint from the greatest create or platform-set event version wins. |
 | Activate/deactivate vs delete | Deletion wins for that incarnation. |
 | Stale add vs an already issued delete | Deletion wins; the stale device cannot resurrect the incarnation. |
 | Re-add after observing deletion | A new incarnation is created through `parent_tombstone`. |
@@ -273,6 +275,11 @@ When two existing installations are joined, both bootstrap histories are
 merged using the same alias, version and conflict rules; neither database file
 is considered authoritative as a whole.
 
+Synchronization remains disabled by default after migration. Until the user
+explicitly enables it, existing business operations preserve their previous
+behavior and produce no journal events. Activation and the complete bootstrap
+commit atomically and can be requested repeatedly without duplicating events.
+
 ## Required invariants
 
 1. `(device_id, sequence)` is globally unique within one synchronization group.
@@ -312,9 +319,10 @@ per-field versions, subscription aliases, tombstones and pending dependencies.
 It also adds an article entry key that is independent from the current
 namespaced SQLite ID.
 
-`SYNC-003` must route every replicated mutation through transaction-aware
-storage operations and bootstrap existing installations. `SYNC-004` must test
-the conflict matrix by importing every relevant permutation into independent
+`SYNC-003` routes every replicated local mutation through transaction-aware
+storage operations and bootstraps existing installations. `SYNC-004` must
+implement remote application without producing outgoing events and test the
+conflict matrix by importing every relevant permutation into independent
 databases.
 
 `SYNC-005` should implement a local-directory segment transport first. That

@@ -1,6 +1,6 @@
 use crate::article::Source;
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -18,7 +18,7 @@ pub struct FeedConfig {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     Medium,

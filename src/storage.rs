@@ -1,12 +1,15 @@
 use crate::article::{Article, ContentKind, Source};
 use crate::config::{FeedConfig, FeedUrlError, Platform, detect_platform, normalize_feed_url};
 use crate::feed::FeedMetadata;
-use crate::sync::{HybridLogicalClock, SYNC_PROTOCOL_VERSION, SyncEvent, SyncIdentity};
+use crate::sync::{
+    HybridLogicalClock, SYNC_PROTOCOL_VERSION, SyncArticleRef, SyncEvent, SyncEventId,
+    SyncEventPayload, SyncIdentity,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::collections::HashSet;
 use std::path::Path;
 use std::{error::Error, fmt};
@@ -240,6 +243,31 @@ type StoredArticleRow = (
 );
 
 type SyncEventRow = (String, i64, i64, i64, i64, String, String);
+type SyncArticleRefRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<DateTime<Utc>>,
+);
+
+fn sync_article_ref_from_row(row: SyncArticleRefRow) -> SyncArticleRef {
+    let (subscription_id, entry_key, title, url, author, published_at) = row;
+    SyncArticleRef {
+        subscription_id,
+        entry_key,
+        title,
+        url,
+        author,
+        published_at: published_at.map(|date| date.to_rfc3339()),
+    }
+}
+
+fn sync_article_entity_key(article: &SyncArticleRef) -> Result<String> {
+    serde_json::to_string(&(&article.subscription_id, &article.entry_key))
+        .context("Impossible de sérialiser l'identité logique de l'article")
+}
 
 fn sync_event_from_row(row: SyncEventRow) -> Result<SyncEvent> {
     let (
@@ -251,8 +279,14 @@ fn sync_event_from_row(row: SyncEventRow) -> Result<SyncEvent> {
         kind,
         payload_json,
     ) = row;
-    let payload = serde_json::from_str(&payload_json)
+    let payload: SyncEventPayload = serde_json::from_str(&payload_json)
         .with_context(|| format!("Invalid JSON in synchronization event {device_id}:{sequence}"))?;
+    if payload.kind() != kind {
+        anyhow::bail!(
+            "Synchronization event kind mismatch for {device_id}:{sequence}: column={kind}, payload={}",
+            payload.kind()
+        );
+    }
 
     Ok(SyncEvent {
         device_id,
@@ -354,14 +388,16 @@ impl Storage {
     /// Returns an error when the singleton synchronization state is missing or
     /// cannot be read.
     pub async fn sync_identity(&self) -> Result<SyncIdentity> {
-        let (device_id, next_sequence, physical_milliseconds, logical_counter): (
+        let (device_id, next_sequence, physical_milliseconds, logical_counter, is_enabled): (
             String,
             i64,
             i64,
             i64,
+            bool,
         ) = sqlx::query_as(
             r#"
-                SELECT device_id, next_sequence, hlc_physical_ms, hlc_counter
+                SELECT device_id, next_sequence, hlc_physical_ms, hlc_counter,
+                       is_enabled
                 FROM sync_local_state
                 WHERE singleton = 1
             "#,
@@ -377,55 +413,45 @@ impl Storage {
                 physical_milliseconds,
                 logical_counter,
             },
+            is_enabled,
         })
     }
 
-    /// Atomically allocates a sequence and hybrid time, then appends one local event.
-    ///
-    /// The allocation and insert share one SQLite transaction. A failed insert
-    /// therefore consumes neither a sequence nor a logical-clock tick.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an invalid kind, an unserializable payload, or any
-    /// SQLite failure. Event kinds are intentionally open until `SYNC-003`
-    /// introduces the typed business payloads.
-    pub async fn append_local_sync_event(
-        &self,
-        kind: &str,
-        payload: &serde_json::Value,
+    async fn sync_is_enabled_in(transaction: &mut Transaction<'_, Sqlite>) -> Result<bool> {
+        sqlx::query_scalar("SELECT is_enabled FROM sync_local_state WHERE singleton = 1")
+            .fetch_one(&mut **transaction)
+            .await
+            .context("Impossible de lire l'activation de la synchronisation")
+    }
+
+    async fn append_local_sync_event_in(
+        transaction: &mut Transaction<'_, Sqlite>,
+        payload: &SyncEventPayload,
         observed_at: DateTime<Utc>,
     ) -> Result<SyncEvent> {
-        if kind.is_empty() || kind.len() > 64 || kind.trim() != kind {
-            anyhow::bail!("Synchronization event kind must contain 1 to 64 trimmed characters");
-        }
+        let kind = payload.kind();
         let payload_json = serde_json::to_string(payload)
             .context("Impossible de sérialiser l'événement de synchronisation")?;
         let wall_milliseconds = observed_at.timestamp_millis().max(0);
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .context("Impossible de démarrer l'écriture du journal de synchronisation")?;
 
         let (device_id, sequence, physical_milliseconds, logical_counter): (String, i64, i64, i64) =
             sqlx::query_as(
                 r#"
-                UPDATE sync_local_state
-                SET next_sequence = next_sequence + 1,
-                    hlc_counter = CASE
-                        WHEN ? > hlc_physical_ms THEN 0
-                        ELSE hlc_counter + 1
-                    END,
-                    hlc_physical_ms = MAX(hlc_physical_ms, ?)
-                WHERE singleton = 1
-                RETURNING device_id, next_sequence - 1,
-                          hlc_physical_ms, hlc_counter
-            "#,
+                    UPDATE sync_local_state
+                    SET next_sequence = next_sequence + 1,
+                        hlc_counter = CASE
+                            WHEN ? > hlc_physical_ms THEN 0
+                            ELSE hlc_counter + 1
+                        END,
+                        hlc_physical_ms = MAX(hlc_physical_ms, ?)
+                    WHERE singleton = 1
+                    RETURNING device_id, next_sequence - 1,
+                              hlc_physical_ms, hlc_counter
+                "#,
             )
             .bind(wall_milliseconds)
             .bind(wall_milliseconds)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await
             .context("Impossible d'allouer la version de l'événement de synchronisation")?;
 
@@ -444,14 +470,9 @@ impl Storage {
         .bind(SYNC_PROTOCOL_VERSION)
         .bind(kind)
         .bind(&payload_json)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .context("Impossible d'ajouter l'événement au journal de synchronisation")?;
-
-        transaction
-            .commit()
-            .await
-            .context("Impossible de valider l'événement de synchronisation")?;
 
         Ok(SyncEvent {
             device_id,
@@ -464,6 +485,200 @@ impl Storage {
             kind: kind.to_string(),
             payload: payload.clone(),
         })
+    }
+
+    /// Atomically allocates a sequence and hybrid time, then appends one local event.
+    ///
+    /// The allocation and insert share one SQLite transaction. A failed insert
+    /// therefore consumes neither a sequence nor a logical-clock tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization or SQLite persistence fails.
+    pub async fn append_local_sync_event(
+        &self,
+        payload: &SyncEventPayload,
+        observed_at: DateTime<Utc>,
+    ) -> Result<SyncEvent> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer l'écriture du journal de synchronisation")?;
+        let event =
+            Self::append_local_sync_event_in(&mut transaction, payload, observed_at).await?;
+
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider l'événement de synchronisation")?;
+
+        Ok(event)
+    }
+
+    /// Enables synchronization and snapshots the current replicated state once.
+    ///
+    /// Existing feeds and article states are journaled in the same transaction
+    /// that flips the activation flag. Repeated calls are idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the complete bootstrap cannot be committed.
+    pub async fn enable_sync(&self) -> Result<bool> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer l'activation de la synchronisation")?;
+        let claimed: Option<bool> = sqlx::query_scalar(
+            r#"
+                UPDATE sync_local_state
+                SET is_enabled = 1
+                WHERE singleton = 1 AND is_enabled = 0
+                RETURNING is_enabled
+            "#,
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("Impossible d'activer la synchronisation")?;
+        if claimed.is_none() {
+            transaction
+                .commit()
+                .await
+                .context("Impossible de terminer l'activation de la synchronisation")?;
+            return Ok(false);
+        }
+
+        let observed_at = Utc::now();
+        let feeds: Vec<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, platform, url, is_active FROM feeds ORDER BY id")
+                .fetch_all(&mut *transaction)
+                .await
+                .context("Impossible de charger les abonnements pour le bootstrap")?;
+        for (id, platform, url, is_active) in feeds {
+            let platform_hint =
+                Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::SubscriptionCreated {
+                    subscription_id: id.clone(),
+                    normalized_url: url.clone(),
+                    platform_hint,
+                    is_active,
+                    parent_tombstone: None,
+                },
+                observed_at,
+            )
+            .await?;
+            sqlx::query(
+                r#"
+                    INSERT OR IGNORE INTO sync_subscription_aliases (
+                        alias_id, canonical_id, normalized_url
+                    ) VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(&id)
+            .bind(&id)
+            .bind(&url)
+            .execute(&mut *transaction)
+            .await
+            .context("Impossible d'initialiser l'identité de l'abonnement")?;
+        }
+
+        type BootstrapArticleRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            bool,
+            bool,
+            bool,
+            Option<String>,
+        );
+        let articles: Vec<BootstrapArticleRow> = sqlx::query_as(
+            r#"
+                SELECT id, feed_id, entry_key, title, url, author, published_at,
+                       is_read, is_favorite, is_archived, archive_reason
+                FROM articles
+                ORDER BY feed_id, entry_key
+            "#,
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de charger les articles pour le bootstrap")?;
+        for (
+            article_id,
+            subscription_id,
+            entry_key,
+            title,
+            url,
+            author,
+            published_at,
+            is_read,
+            is_favorite,
+            is_archived,
+            archive_reason,
+        ) in articles
+        {
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_article_identities (
+                        subscription_id, entry_key, article_id
+                    ) VALUES (?, ?, ?)
+                    ON CONFLICT(subscription_id, entry_key) DO UPDATE SET
+                        article_id = excluded.article_id
+                "#,
+            )
+            .bind(&subscription_id)
+            .bind(&entry_key)
+            .bind(&article_id)
+            .execute(&mut *transaction)
+            .await
+            .context("Impossible d'initialiser l'identité logique de l'article")?;
+            let article = SyncArticleRef {
+                subscription_id,
+                entry_key,
+                title,
+                url,
+                author,
+                published_at: published_at.map(|date| date.to_rfc3339()),
+            };
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::ArticleReadSet {
+                    article: article.clone(),
+                    is_read,
+                },
+                observed_at,
+            )
+            .await?;
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::ArticleFavoriteSet {
+                    article: article.clone(),
+                    is_favorite,
+                },
+                observed_at,
+            )
+            .await?;
+            if is_archived && archive_reason.as_deref() == Some("manual") {
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::ArticleArchived { article },
+                    observed_at,
+                )
+                .await?;
+            }
+        }
+
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider le bootstrap de synchronisation")?;
+        Ok(true)
     }
 
     /// Reads this installation's immutable journal after an exclusive sequence.
@@ -604,22 +819,65 @@ impl Storage {
     ) -> std::result::Result<StoredFeed, SubscriptionError> {
         let url = normalize_feed_url(raw_url).map_err(SubscriptionError::InvalidUrl)?;
         let platform = platform_override.unwrap_or_else(|| detect_platform(&url));
-        let existing: Option<(String, bool)> = sqlx::query_as(
-            "SELECT id, is_active FROM feeds WHERE url = ? ORDER BY is_active DESC, id LIMIT 1",
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        let existing: Option<(String, bool, String)> = sqlx::query_as(
+            r#"
+                SELECT id, is_active, platform
+                FROM feeds
+                WHERE url = ?
+                ORDER BY is_active DESC, id
+                LIMIT 1
+            "#,
         )
         .bind(&url)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| SubscriptionError::Database(error.to_string()))?;
 
-        if let Some((id, is_active)) = existing {
+        if let Some((id, is_active, previous_platform)) = existing {
             if is_active {
                 return Err(SubscriptionError::DuplicateActiveUrl(url));
             }
             sqlx::query("UPDATE feeds SET platform = ?, is_active = 1 WHERE id = ?")
                 .bind(platform.as_str())
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            if Self::sync_is_enabled_in(&mut transaction)
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?
+            {
+                let observed_at = Utc::now();
+                if previous_platform != platform.as_str() {
+                    Self::append_local_sync_event_in(
+                        &mut transaction,
+                        &SyncEventPayload::SubscriptionPlatformSet {
+                            subscription_id: id.clone(),
+                            platform_hint: platform,
+                        },
+                        observed_at,
+                    )
+                    .await
+                    .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+                }
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::SubscriptionActiveSet {
+                        subscription_id: id.clone(),
+                        is_active: true,
+                    },
+                    observed_at,
+                )
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            }
+            transaction
+                .commit()
                 .await
                 .map_err(|error| SubscriptionError::Database(error.to_string()))?;
             return self
@@ -636,7 +894,7 @@ impl Storage {
             .bind(&id)
             .bind(platform.as_str())
             .bind(&url)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|error| {
                 if error.as_database_error().is_some_and(|database_error| {
@@ -648,6 +906,72 @@ impl Storage {
                     SubscriptionError::Database(error.to_string())
                 }
             })?;
+
+        if Self::sync_is_enabled_in(&mut transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+        {
+            let parent_tombstone: Option<(String, i64)> = sqlx::query_as(
+                r#"
+                    SELECT tombstone.event_device_id, tombstone.event_sequence
+                    FROM sync_subscription_aliases AS alias
+                    INNER JOIN sync_tombstones AS tombstone
+                        ON tombstone.entity_kind = 'subscription'
+                       AND tombstone.entity_key = alias.canonical_id
+                    INNER JOIN sync_events AS event
+                        ON event.device_id = tombstone.event_device_id
+                       AND event.sequence = tombstone.event_sequence
+                    WHERE alias.normalized_url = ?
+                    ORDER BY event.hlc_physical_ms DESC,
+                             event.hlc_counter DESC,
+                             event.device_id DESC,
+                             event.sequence DESC
+                    LIMIT 1
+                "#,
+            )
+            .bind(&url)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            let parent_tombstone = parent_tombstone.map(|(device_id, sequence)| SyncEventId {
+                device_id,
+                sequence,
+            });
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::SubscriptionCreated {
+                    subscription_id: id.clone(),
+                    normalized_url: url.clone(),
+                    platform_hint: platform,
+                    is_active: true,
+                    parent_tombstone: parent_tombstone.clone(),
+                },
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_subscription_aliases (
+                        alias_id, canonical_id, normalized_url,
+                        parent_tombstone_device_id, parent_tombstone_sequence
+                    ) VALUES (?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&id)
+            .bind(&id)
+            .bind(&url)
+            .bind(parent_tombstone.as_ref().map(|event| &event.device_id))
+            .bind(parent_tombstone.as_ref().map(|event| event.sequence))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
 
         Ok(StoredFeed {
             id,
@@ -670,10 +994,15 @@ impl Storage {
         feed_id: &str,
         is_active: bool,
     ) -> std::result::Result<StoredFeed, SubscriptionError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
         let feed: Option<(String, String)> =
             sqlx::query_as("SELECT id, url FROM feeds WHERE id = ?")
                 .bind(feed_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *transaction)
                 .await
                 .map_err(|error| SubscriptionError::Database(error.to_string()))?;
         let (id, url) = feed.ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
@@ -684,7 +1013,7 @@ impl Storage {
             )
             .bind(&url)
             .bind(&id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
             if duplicate {
@@ -695,7 +1024,26 @@ impl Storage {
         sqlx::query("UPDATE feeds SET is_active = ? WHERE id = ?")
             .bind(is_active)
             .bind(&id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        if Self::sync_is_enabled_in(&mut transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+        {
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::SubscriptionActiveSet {
+                    subscription_id: id.clone(),
+                    is_active,
+                },
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        }
+        transaction
+            .commit()
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
         self.list_feeds()
@@ -721,24 +1069,68 @@ impl Storage {
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
 
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM feeds WHERE id = ?)")
-            .bind(feed_id)
-            .fetch_one(&mut *transaction)
+        let feed: Option<(String, String)> =
+            sqlx::query_as("SELECT id, url FROM feeds WHERE id = ?")
+                .bind(feed_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        let (feed_id, url) =
+            feed.ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))?;
+
+        if Self::sync_is_enabled_in(&mut transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+        {
+            sqlx::query(
+                r#"
+                    INSERT OR IGNORE INTO sync_subscription_aliases (
+                        alias_id, canonical_id, normalized_url
+                    ) VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(&feed_id)
+            .bind(&feed_id)
+            .bind(&url)
+            .execute(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
-        if !exists {
-            return Err(SubscriptionError::NotFound(feed_id.to_string()));
+            let event = Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::SubscriptionDeleted {
+                    subscription_id: feed_id.clone(),
+                },
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_tombstones (
+                        entity_kind, entity_key, event_device_id, event_sequence
+                    ) VALUES ('subscription', ?, ?, ?)
+                    ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
+                        event_device_id = excluded.event_device_id,
+                        event_sequence = excluded.event_sequence
+                "#,
+            )
+            .bind(&feed_id)
+            .bind(&event.device_id)
+            .bind(event.sequence)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
         }
 
         let deleted_articles = sqlx::query("DELETE FROM articles WHERE feed_id = ?")
-            .bind(feed_id)
+            .bind(&feed_id)
             .execute(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?
             .rows_affected() as usize;
 
         sqlx::query("DELETE FROM feeds WHERE id = ?")
-            .bind(feed_id)
+            .bind(&feed_id)
             .execute(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
@@ -749,7 +1141,7 @@ impl Storage {
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
 
         Ok(DeleteFeedResult {
-            feed_id: feed_id.to_string(),
+            feed_id,
             deleted_articles,
         })
     }
@@ -1037,6 +1429,7 @@ impl Storage {
         let mut stats = UpsertStats::default();
 
         for article in articles {
+            let entry_key = article_entry_key(&article.id, &article.feed_id);
             let existing_archived: Option<bool> =
                 sqlx::query_scalar("SELECT is_archived FROM articles WHERE id = ?")
                     .bind(&article.id)
@@ -1090,10 +1483,30 @@ impl Storage {
             .bind(&article.content)
             .bind(article.content_kind.as_str())
             .bind(article.source.as_str())
-            .bind(article_entry_key(&article.id, &article.feed_id))
+            .bind(entry_key)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("Impossible d'enregistrer l'article {:?}", article.id))?;
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_article_identities (
+                        subscription_id, entry_key, article_id
+                    ) VALUES (?, ?, ?)
+                    ON CONFLICT(subscription_id, entry_key) DO UPDATE SET
+                        article_id = excluded.article_id
+                "#,
+            )
+            .bind(&article.feed_id)
+            .bind(entry_key)
+            .bind(&article.id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| {
+                format!(
+                    "Impossible d'enregistrer l'identité logique de l'article {:?}",
+                    article.id
+                )
+            })?;
 
             if already_exists {
                 stats.updated += 1;
@@ -1367,15 +1780,48 @@ impl Storage {
     ///
     /// Returns an error when SQLite cannot execute the update.
     pub async fn set_read(&self, article_id: &str, is_read: bool) -> Result<bool> {
-        let result =
-            sqlx::query("UPDATE articles SET is_read = ? WHERE id = ? AND is_archived = 0")
-                .bind(is_read)
-                .bind(article_id)
-                .execute(&self.pool)
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer la modification de l'état lu")?;
+        let row: Option<SyncArticleRefRow> = sqlx::query_as(
+            r#"
+                UPDATE articles
+                SET is_read = ?
+                WHERE id = ? AND is_archived = 0
+                RETURNING feed_id, COALESCE(entry_key, id), title, url, author,
+                          published_at
+            "#,
+        )
+        .bind(is_read)
+        .bind(article_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .with_context(|| format!("Impossible de modifier l'état lu de {article_id:?}"))?;
+        let Some(row) = row else {
+            transaction
+                .rollback()
                 .await
-                .with_context(|| format!("Impossible de modifier l'état lu de {article_id:?}"))?;
-
-        Ok(result.rows_affected() == 1)
+                .context("Impossible d'annuler la modification de l'état lu")?;
+            return Ok(false);
+        };
+        if Self::sync_is_enabled_in(&mut transaction).await? {
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::ArticleReadSet {
+                    article: sync_article_ref_from_row(row),
+                    is_read,
+                },
+                Utc::now(),
+            )
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider la modification de l'état lu")?;
+        Ok(true)
     }
 
     /// Changes the read state of several visible articles atomically.
@@ -1393,22 +1839,40 @@ impl Storage {
             .begin()
             .await
             .context("Impossible de démarrer la modification groupée de l'état lu")?;
+        let sync_enabled = Self::sync_is_enabled_in(&mut transaction).await?;
+        let observed_at = Utc::now();
         for article_id in article_ids {
-            let result =
-                sqlx::query("UPDATE articles SET is_read = ? WHERE id = ? AND is_archived = 0")
-                    .bind(is_read)
-                    .bind(article_id)
-                    .execute(&mut *transaction)
-                    .await
-                    .with_context(|| {
-                        format!("Impossible de modifier l'état lu de {article_id:?}")
-                    })?;
-            if result.rows_affected() != 1 {
+            let row: Option<SyncArticleRefRow> = sqlx::query_as(
+                r#"
+                    UPDATE articles
+                    SET is_read = ?
+                    WHERE id = ? AND is_archived = 0
+                    RETURNING feed_id, COALESCE(entry_key, id), title, url,
+                              author, published_at
+                "#,
+            )
+            .bind(is_read)
+            .bind(article_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .with_context(|| format!("Impossible de modifier l'état lu de {article_id:?}"))?;
+            let Some(row) = row else {
                 transaction
                     .rollback()
                     .await
                     .context("Impossible d'annuler la modification groupée de l'état lu")?;
                 return Ok(false);
+            };
+            if sync_enabled {
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::ArticleReadSet {
+                        article: sync_article_ref_from_row(row),
+                        is_read,
+                    },
+                    observed_at,
+                )
+                .await?;
             }
         }
         transaction
@@ -1427,15 +1891,48 @@ impl Storage {
     ///
     /// Returns an error when SQLite cannot execute the update.
     pub async fn set_favorite(&self, article_id: &str, is_favorite: bool) -> Result<bool> {
-        let result =
-            sqlx::query("UPDATE articles SET is_favorite = ? WHERE id = ? AND is_archived = 0")
-                .bind(is_favorite)
-                .bind(article_id)
-                .execute(&self.pool)
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer la modification du favori")?;
+        let row: Option<SyncArticleRefRow> = sqlx::query_as(
+            r#"
+                UPDATE articles
+                SET is_favorite = ?
+                WHERE id = ? AND is_archived = 0
+                RETURNING feed_id, COALESCE(entry_key, id), title, url, author,
+                          published_at
+            "#,
+        )
+        .bind(is_favorite)
+        .bind(article_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .with_context(|| format!("Impossible de modifier le favori {article_id:?}"))?;
+        let Some(row) = row else {
+            transaction
+                .rollback()
                 .await
-                .with_context(|| format!("Impossible de modifier le favori {article_id:?}"))?;
-
-        Ok(result.rows_affected() == 1)
+                .context("Impossible d'annuler la modification du favori")?;
+            return Ok(false);
+        };
+        if Self::sync_is_enabled_in(&mut transaction).await? {
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::ArticleFavoriteSet {
+                    article: sync_article_ref_from_row(row),
+                    is_favorite,
+                },
+                Utc::now(),
+            )
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider la modification du favori")?;
+        Ok(true)
     }
 
     /// Archives one visible article and releases its cached body.
@@ -1446,7 +1943,12 @@ impl Storage {
         article_id: &str,
         archived_at: DateTime<Utc>,
     ) -> Result<bool> {
-        let result = sqlx::query(
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer l'archivage de l'article")?;
+        let row: Option<SyncArticleRefRow> = sqlx::query_as(
             r#"
                 UPDATE articles
                 SET is_archived = 1,
@@ -1455,15 +1957,54 @@ impl Storage {
                     content = NULL,
                     content_kind = 'missing'
                 WHERE id = ? AND is_archived = 0
+                RETURNING feed_id, COALESCE(entry_key, id), title, url, author,
+                          published_at
             "#,
         )
         .bind(archived_at)
         .bind(article_id)
-        .execute(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .with_context(|| format!("Impossible d'archiver l'article {article_id:?}"))?;
-
-        Ok(result.rows_affected() == 1)
+        let Some(row) = row else {
+            transaction
+                .rollback()
+                .await
+                .context("Impossible d'annuler l'archivage de l'article")?;
+            return Ok(false);
+        };
+        if Self::sync_is_enabled_in(&mut transaction).await? {
+            let article = sync_article_ref_from_row(row);
+            let event = Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::ArticleArchived {
+                    article: article.clone(),
+                },
+                archived_at,
+            )
+            .await?;
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_tombstones (
+                        entity_kind, entity_key, event_device_id, event_sequence
+                    ) VALUES ('article', ?, ?, ?)
+                    ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
+                        event_device_id = excluded.event_device_id,
+                        event_sequence = excluded.event_sequence
+                "#,
+            )
+            .bind(sync_article_entity_key(&article)?)
+            .bind(&event.device_id)
+            .bind(event.sequence)
+            .execute(&mut *transaction)
+            .await
+            .context("Impossible d'enregistrer la pierre tombale de l'article")?;
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider l'archivage de l'article")?;
+        Ok(true)
     }
 
     /// Archives one article using the current UTC time.
@@ -1487,8 +2028,9 @@ impl Storage {
             .begin()
             .await
             .context("Impossible de démarrer l'archivage groupé")?;
+        let sync_enabled = Self::sync_is_enabled_in(&mut transaction).await?;
         for article_id in article_ids {
-            let result = sqlx::query(
+            let row: Option<SyncArticleRefRow> = sqlx::query_as(
                 r#"
                     UPDATE articles
                     SET is_archived = 1,
@@ -1497,19 +2039,46 @@ impl Storage {
                         content = NULL,
                         content_kind = 'missing'
                     WHERE id = ? AND is_archived = 0
+                    RETURNING feed_id, COALESCE(entry_key, id), title, url,
+                              author, published_at
                 "#,
             )
             .bind(archived_at)
             .bind(article_id)
-            .execute(&mut *transaction)
+            .fetch_optional(&mut *transaction)
             .await
             .with_context(|| format!("Impossible d'archiver l'article {article_id:?}"))?;
-            if result.rows_affected() != 1 {
+            let Some(row) = row else {
                 transaction
                     .rollback()
                     .await
                     .context("Impossible d'annuler l'archivage groupé")?;
                 return Ok(false);
+            };
+            if sync_enabled {
+                let article = sync_article_ref_from_row(row);
+                let event = Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::ArticleArchived {
+                        article: article.clone(),
+                    },
+                    archived_at,
+                )
+                .await?;
+                sqlx::query(
+                    r#"
+                        INSERT INTO sync_tombstones (
+                            entity_kind, entity_key,
+                            event_device_id, event_sequence
+                        ) VALUES ('article', ?, ?, ?)
+                    "#,
+                )
+                .bind(sync_article_entity_key(&article)?)
+                .bind(&event.device_id)
+                .bind(event.sequence)
+                .execute(&mut *transaction)
+                .await
+                .context("Impossible d'enregistrer la pierre tombale de l'article")?;
             }
         }
         transaction
@@ -1630,6 +2199,17 @@ mod tests {
         }
     }
 
+    fn sync_article_ref(id: &str) -> SyncArticleRef {
+        SyncArticleRef {
+            subscription_id: "astronomy".to_string(),
+            entry_key: id.to_string(),
+            title: Some(format!("Title for {id}")),
+            url: Some(format!("https://articles.example/{id}")),
+            author: Some("Test Author".to_string()),
+            published_at: None,
+        }
+    }
+
     async fn storage_with_feed() -> Storage {
         let storage = Storage::open_in_memory().await.unwrap();
         storage
@@ -1683,7 +2263,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 7);
+        assert_eq!(migration_count, 8);
 
         storage.close().await;
     }
@@ -1698,6 +2278,7 @@ mod tests {
         let initial = storage.sync_identity().await.unwrap();
         assert!(uuid::Uuid::parse_str(&initial.device_id).is_ok());
         assert_eq!(initial.next_sequence, 1);
+        assert!(!initial.is_enabled);
         assert_eq!(
             initial.clock,
             HybridLogicalClock {
@@ -1709,8 +2290,10 @@ mod tests {
         let first_time = Utc.timestamp_millis_opt(2_000).single().unwrap();
         let first = storage
             .append_local_sync_event(
-                "test_created",
-                &serde_json::json!({ "value": 1 }),
+                &SyncEventPayload::SubscriptionActiveSet {
+                    subscription_id: "feed".to_string(),
+                    is_active: true,
+                },
                 first_time,
             )
             .await
@@ -1726,8 +2309,10 @@ mod tests {
         let older_wall_time = Utc.timestamp_millis_opt(1_000).single().unwrap();
         let second = storage
             .append_local_sync_event(
-                "test_updated",
-                &serde_json::json!({ "value": 2 }),
+                &SyncEventPayload::SubscriptionActiveSet {
+                    subscription_id: "feed".to_string(),
+                    is_active: false,
+                },
                 older_wall_time,
             )
             .await
@@ -1747,8 +2332,10 @@ mod tests {
         for (index, time) in times.into_iter().enumerate() {
             let event = storage
                 .append_local_sync_event(
-                    "test_state_set",
-                    &serde_json::json!({ "index": index }),
+                    &SyncEventPayload::ArticleReadSet {
+                        article: sync_article_ref(&index.to_string()),
+                        is_read: index % 2 == 0,
+                    },
                     Utc.timestamp_millis_opt(time).single().unwrap(),
                 )
                 .await
@@ -1769,7 +2356,13 @@ mod tests {
             page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
             vec![2, 3]
         );
-        assert_eq!(page[0].payload, serde_json::json!({ "index": 1 }));
+        assert_eq!(
+            page[0].payload,
+            SyncEventPayload::ArticleReadSet {
+                article: sync_article_ref("1"),
+                is_read: false,
+            }
+        );
         assert!(
             storage
                 .local_sync_events_after(0, 0)
@@ -1801,13 +2394,12 @@ mod tests {
             .unwrap();
         let observed_at = Utc.timestamp_millis_opt(10_000).single().unwrap();
         let appends = (0..16).map(|index| {
-            let payload = serde_json::json!({ "index": index });
+            let payload = SyncEventPayload::SubscriptionActiveSet {
+                subscription_id: format!("feed-{index}"),
+                is_active: true,
+            };
             let storage = &storage;
-            async move {
-                storage
-                    .append_local_sync_event("concurrent_test", &payload, observed_at)
-                    .await
-            }
+            async move { storage.append_local_sync_event(&payload, observed_at).await }
         });
 
         let mut sequences = futures_util::future::join_all(appends)
@@ -1829,7 +2421,7 @@ mod tests {
             r#"
                 CREATE TRIGGER reject_test_sync_event
                 BEFORE INSERT ON sync_events
-                WHEN NEW.event_kind = 'rejected'
+                WHEN NEW.event_kind = 'subscription_deleted'
                 BEGIN
                     SELECT RAISE(ABORT, 'rejected by test');
                 END;
@@ -1842,7 +2434,12 @@ mod tests {
         let time = Utc.timestamp_millis_opt(5_000).single().unwrap();
         assert!(
             storage
-                .append_local_sync_event("rejected", &serde_json::json!({}), time)
+                .append_local_sync_event(
+                    &SyncEventPayload::SubscriptionDeleted {
+                        subscription_id: "feed".to_string(),
+                    },
+                    time,
+                )
                 .await
                 .is_err()
         );
@@ -1852,7 +2449,13 @@ mod tests {
         assert_eq!(after_failure.clock.logical_counter, 0);
 
         let accepted = storage
-            .append_local_sync_event("accepted", &serde_json::json!({}), time)
+            .append_local_sync_event(
+                &SyncEventPayload::SubscriptionActiveSet {
+                    subscription_id: "feed".to_string(),
+                    is_active: true,
+                },
+                time,
+            )
             .await
             .unwrap();
         assert_eq!(accepted.sequence, 1);
@@ -1860,29 +2463,419 @@ mod tests {
         assert_eq!(accepted.clock.logical_counter, 0);
     }
 
-    /// Verifies input validation happens before journal allocation.
+    /// Verifies a corrupted discriminator cannot be silently deserialized.
     #[tokio::test]
-    async fn invalid_sync_event_kind_leaves_the_journal_untouched() {
+    async fn sync_journal_reader_rejects_a_kind_payload_mismatch() {
         let storage = Storage::open_in_memory().await.unwrap();
+        let identity = storage.sync_identity().await.unwrap();
+        let payload = serde_json::to_string(&SyncEventPayload::SubscriptionDeleted {
+            subscription_id: "feed".to_string(),
+        })
+        .unwrap();
+        sqlx::query(
+            r#"
+                INSERT INTO sync_events (
+                    device_id, sequence, hlc_physical_ms, hlc_counter,
+                    protocol_version, event_kind, payload_json
+                ) VALUES (?, 1, 1000, 0, 1, 'subscription_active_set', ?)
+            "#,
+        )
+        .bind(identity.device_id)
+        .bind(payload)
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        assert!(storage.local_sync_events_after(0, 10).await.is_err());
+    }
+
+    /// Verifies existing behavior remains unchanged and silent before a sync
+    /// configuration explicitly enables journaling.
+    #[tokio::test]
+    async fn business_mutations_do_not_journal_before_sync_is_enabled() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let feed = storage
+            .add_feed("https://example.com/feed", None)
+            .await
+            .unwrap();
+        storage
+            .upsert_articles(&[article("article", &feed.id, None)])
+            .await
+            .unwrap();
+        storage.set_read("article", true).await.unwrap();
+        storage.set_favorite("article", true).await.unwrap();
+        storage.archive_article_now("article").await.unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
 
         assert!(
             storage
-                .append_local_sync_event(
-                    " event ",
-                    &serde_json::json!({}),
-                    Utc.timestamp_millis_opt(1_000).single().unwrap(),
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(storage.sync_identity().await.unwrap().next_sequence, 1);
-        assert!(
-            storage
-                .local_sync_events_after(0, 10)
+                .local_sync_events_after(0, 100)
                 .await
                 .unwrap()
                 .is_empty()
         );
+        let identity = storage.sync_identity().await.unwrap();
+        assert_eq!(identity.next_sequence, 1);
+        assert!(!identity.is_enabled);
+    }
+
+    /// Verifies enabling sync snapshots retained feeds and article state once,
+    /// excluding automatic-retention tombstones.
+    #[tokio::test]
+    async fn enabling_sync_bootstraps_existing_state_once() {
+        let storage = storage_with_feed().await;
+        let now = Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap();
+        let old_date = now - chrono::Duration::days(60);
+        storage
+            .upsert_articles(&[
+                article("astronomy::manual", "astronomy", Some(old_date)),
+                article("astronomy::retention", "astronomy", Some(old_date)),
+            ])
+            .await
+            .unwrap();
+        storage.set_read("astronomy::manual", true).await.unwrap();
+        storage
+            .set_favorite("astronomy::manual", true)
+            .await
+            .unwrap();
+        storage
+            .archive_article("astronomy::manual", now)
+            .await
+            .unwrap();
+        storage
+            .set_read("astronomy::retention", true)
+            .await
+            .unwrap();
+        assert_eq!(storage.archive_expired_read_articles(now).await.unwrap(), 1);
+
+        assert!(storage.enable_sync().await.unwrap());
+        assert!(!storage.enable_sync().await.unwrap());
+        let events = storage.local_sync_events_after(0, 100).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "subscription_created",
+                "article_read_set",
+                "article_favorite_set",
+                "article_archived",
+                "article_read_set",
+                "article_favorite_set",
+            ]
+        );
+        assert!(matches!(
+            &events[0].payload,
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id,
+                normalized_url,
+                platform_hint: Platform::Substack,
+                is_active: true,
+                parent_tombstone: None,
+            } if subscription_id == "astronomy"
+                && normalized_url == "https://astronomy.example/feed"
+        ));
+        assert!(matches!(
+            &events[3].payload,
+            SyncEventPayload::ArticleArchived { article }
+                if article.entry_key == "manual" && article.subscription_id == "astronomy"
+        ));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                SyncEventPayload::ArticleArchived { article }
+                    if article.entry_key == "retention"
+            )
+        }));
+        let identity = storage.sync_identity().await.unwrap();
+        assert!(identity.is_enabled);
+        assert_eq!(identity.next_sequence, 7);
+        let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_subscription_aliases")
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        let article_identities: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sync_article_identities")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        assert_eq!((aliases, article_identities), (1, 2));
+    }
+
+    /// Verifies subscription lifecycle events, including explicit re-creation
+    /// after a synchronized deletion tombstone.
+    #[tokio::test]
+    async fn subscription_mutations_produce_typed_events_and_parent_tombstones() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+
+        let original = storage
+            .add_feed("https://example.com/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&original.id, false).await.unwrap();
+        let reactivated = storage
+            .add_feed("https://example.com/feed", Some(Platform::Medium))
+            .await
+            .unwrap();
+        assert_eq!(reactivated.id, original.id);
+        storage.delete_feed(&original.id).await.unwrap();
+        let replacement = storage
+            .add_feed("https://example.com/feed", None)
+            .await
+            .unwrap();
+        assert_ne!(replacement.id, original.id);
+
+        let events = storage.local_sync_events_after(0, 100).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "subscription_created",
+                "subscription_active_set",
+                "subscription_platform_set",
+                "subscription_active_set",
+                "subscription_deleted",
+                "subscription_created",
+            ]
+        );
+        let deletion = &events[4];
+        assert!(matches!(
+            &events[5].payload,
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id,
+                parent_tombstone: Some(parent),
+                ..
+            } if subscription_id == &replacement.id
+                && parent.device_id == deletion.device_id
+                && parent.sequence == deletion.sequence
+        ));
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_tombstones WHERE entity_kind = 'subscription'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, 1);
+    }
+
+    /// Verifies explicit article mutations emit one event per logical article,
+    /// while RSS upserts remain local cache operations.
+    #[tokio::test]
+    async fn article_mutations_produce_typed_events_but_upserts_do_not() {
+        let storage = storage_with_feed().await;
+        storage.enable_sync().await.unwrap();
+        let baseline = storage.sync_identity().await.unwrap().next_sequence - 1;
+        storage
+            .upsert_articles(&[article("astronomy::mars", "astronomy", None)])
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .local_sync_events_after(baseline, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        storage.set_read("astronomy::mars", true).await.unwrap();
+        storage.set_favorite("astronomy::mars", true).await.unwrap();
+        storage
+            .archive_article(
+                "astronomy::mars",
+                Utc.with_ymd_and_hms(2026, 8, 26, 18, 0, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let events = storage.local_sync_events_after(baseline, 10).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "article_read_set",
+                "article_favorite_set",
+                "article_archived",
+            ]
+        );
+        for event in &events {
+            let article = match &event.payload {
+                SyncEventPayload::ArticleReadSet { article, .. }
+                | SyncEventPayload::ArticleFavoriteSet { article, .. }
+                | SyncEventPayload::ArticleArchived { article } => article,
+                _ => panic!("unexpected subscription event"),
+            };
+            assert_eq!(article.subscription_id, "astronomy");
+            assert_eq!(article.entry_key, "mars");
+            assert_eq!(article.title.as_deref(), Some("Title for astronomy::mars"));
+        }
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_tombstones WHERE entity_kind = 'article'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, 1);
+    }
+
+    /// Verifies automatic cache retention and CLI configuration imports never
+    /// masquerade as synchronized user intent.
+    #[tokio::test]
+    async fn retention_and_cli_import_remain_unjournaled_after_sync_is_enabled() {
+        let storage = storage_with_feed().await;
+        storage.enable_sync().await.unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 27, 12, 0, 0).unwrap();
+        storage
+            .upsert_articles(&[article(
+                "astronomy::old",
+                "astronomy",
+                Some(now - chrono::Duration::days(60)),
+            )])
+            .await
+            .unwrap();
+        storage.set_read("astronomy::old", true).await.unwrap();
+        let baseline = storage.sync_identity().await.unwrap().next_sequence - 1;
+
+        assert_eq!(storage.archive_expired_read_articles(now).await.unwrap(), 1);
+        storage
+            .import_feeds(&[feed("bread", Platform::Other, "https://bread.example/feed")])
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .local_sync_events_after(baseline, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let retention_tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_tombstones WHERE entity_kind = 'article'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(retention_tombstones, 0);
+    }
+
+    /// Verifies grouped mutations deduplicate IDs, create one event per article,
+    /// and roll back every state and event when one target is missing.
+    #[tokio::test]
+    async fn grouped_mutations_are_atomically_journaled_per_article() {
+        let storage = storage_with_feed().await;
+        storage
+            .upsert_articles(&[
+                article("astronomy::mars", "astronomy", None),
+                article("astronomy::venus", "astronomy", None),
+            ])
+            .await
+            .unwrap();
+        storage.enable_sync().await.unwrap();
+        let baseline = storage.sync_identity().await.unwrap().next_sequence - 1;
+
+        assert!(
+            storage
+                .set_read_many(
+                    &[
+                        "astronomy::mars".to_string(),
+                        "astronomy::mars".to_string(),
+                        "astronomy::venus".to_string(),
+                    ],
+                    true,
+                )
+                .await
+                .unwrap()
+        );
+        let read_events = storage.local_sync_events_after(baseline, 10).await.unwrap();
+        assert_eq!(read_events.len(), 2);
+        assert!(
+            read_events
+                .iter()
+                .all(|event| event.kind == "article_read_set")
+        );
+
+        let before_failure = storage.sync_identity().await.unwrap().next_sequence;
+        assert!(
+            !storage
+                .set_read_many(
+                    &["astronomy::mars".to_string(), "missing".to_string(),],
+                    false,
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            storage.sync_identity().await.unwrap().next_sequence,
+            before_failure
+        );
+        assert!(
+            storage
+                .get_article("astronomy::mars")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_read
+        );
+
+        assert!(
+            storage
+                .archive_articles_now(&[
+                    "astronomy::mars".to_string(),
+                    "astronomy::venus".to_string(),
+                ])
+                .await
+                .unwrap()
+        );
+        let all_events = storage.local_sync_events_after(baseline, 10).await.unwrap();
+        assert_eq!(all_events.len(), 4);
+        assert_eq!(
+            all_events
+                .iter()
+                .filter(|event| event.kind == "article_archived")
+                .count(),
+            2
+        );
+    }
+
+    /// Verifies a journal failure rolls the corresponding business write back.
+    #[tokio::test]
+    async fn business_state_and_event_roll_back_together() {
+        let storage = storage_with_feed().await;
+        storage
+            .upsert_articles(&[article("astronomy::mars", "astronomy", None)])
+            .await
+            .unwrap();
+        storage.enable_sync().await.unwrap();
+        let before = storage.sync_identity().await.unwrap();
+        sqlx::raw_sql(
+            r#"
+                CREATE TRIGGER reject_favorite_sync_event
+                BEFORE INSERT ON sync_events
+                WHEN NEW.event_kind = 'article_favorite_set'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated journal failure');
+                END;
+            "#,
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        assert!(storage.set_favorite("astronomy::mars", true).await.is_err());
+        let article = storage
+            .get_article("astronomy::mars")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!article.is_favorite);
+        let after = storage.sync_identity().await.unwrap();
+        assert_eq!(after.next_sequence, before.next_sequence);
+        assert_eq!(after.clock, before.clock);
     }
 
     /// Verifies feed metadata and refresh errors survive reloads and a later
@@ -2399,6 +3392,60 @@ mod tests {
         .unwrap();
         assert_eq!(sync_tables, 8);
 
+        sqlx::query(
+            r#"
+                INSERT INTO sync_local_state (
+                    singleton, device_id, next_sequence,
+                    hlc_physical_ms, hlc_counter
+                ) VALUES (1, 'existing-device', 2, 1234, 0)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+                INSERT INTO sync_events (
+                    device_id, sequence, hlc_physical_ms, hlc_counter,
+                    protocol_version, event_kind, payload_json
+                ) VALUES (
+                    'existing-device', 1, 1234, 0, 1,
+                    'article_read_set', '{}'
+                )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608260002_sync_event_production.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let migrated_sync_state: (String, i64, i64, bool) = sqlx::query_as(
+            r#"
+                SELECT device_id, next_sequence, hlc_physical_ms, is_enabled
+                FROM sync_local_state
+                WHERE singleton = 1
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            migrated_sync_state,
+            ("existing-device".to_string(), 2, 1234, false)
+        );
+        let preserved_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(preserved_events, 1);
+
         let duplicate_entry_key = sqlx::query(
             r#"
                 INSERT INTO articles (
@@ -2884,6 +3931,8 @@ mod tests {
             .upsert_articles(&[article("astronomy::mars", "astronomy", None)])
             .await
             .unwrap();
+        storage.enable_sync().await.unwrap();
+        let before = storage.sync_identity().await.unwrap();
         sqlx::query(
             r#"
                 CREATE TRIGGER reject_feed_deletion
@@ -2903,6 +3952,16 @@ mod tests {
         ));
         assert_eq!(storage.list_feeds().await.unwrap().len(), 1);
         assert_eq!(storage.list_articles().await.unwrap().len(), 1);
+        let after = storage.sync_identity().await.unwrap();
+        assert_eq!(after.next_sequence, before.next_sequence);
+        assert_eq!(after.clock, before.clock);
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_tombstones WHERE entity_kind = 'subscription'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, 0);
     }
 
     #[tokio::test]
