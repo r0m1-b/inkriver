@@ -879,17 +879,20 @@ impl Storage {
         rows.into_iter().map(sync_event_from_row).collect()
     }
 
-    pub(crate) async fn local_sync_export_cursor(&self) -> Result<i64> {
-        sqlx::query_scalar(
-            "SELECT last_exported_sequence FROM sync_local_state WHERE singleton = 1",
+    pub(crate) async fn local_sync_export_cursor(&self, key_id: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT last_exported_sequence FROM sync_export_cursors WHERE key_id = ?",
         )
-        .fetch_one(&self.pool)
+        .bind(key_id)
+        .fetch_optional(&self.pool)
         .await
-        .context("Impossible de lire le curseur d'export de synchronisation")
+        .context("Impossible de lire le curseur d'export de synchronisation")?
+        .unwrap_or(0))
     }
 
     pub(crate) async fn mark_local_sync_events_exported(
         &self,
+        key_id: &str,
         expected_cursor: i64,
         exported_through: i64,
     ) -> Result<()> {
@@ -898,16 +901,30 @@ impl Storage {
         }
         let result = sqlx::query(
             r#"
-                UPDATE sync_local_state
-                SET last_exported_sequence = ?
-                WHERE singleton = 1
-                  AND last_exported_sequence = ?
-                  AND ? < next_sequence
+                INSERT INTO sync_export_cursors (key_id, last_exported_sequence)
+                SELECT ?, ?
+                WHERE (
+                        ? = 0
+                        OR EXISTS (
+                            SELECT 1 FROM sync_export_cursors
+                            WHERE key_id = ? AND last_exported_sequence = ?
+                        )
+                      )
+                  AND ? < (SELECT next_sequence FROM sync_local_state WHERE singleton = 1)
+                ON CONFLICT(key_id) DO UPDATE
+                SET last_exported_sequence = excluded.last_exported_sequence
+                WHERE sync_export_cursors.last_exported_sequence = ?
+                  AND excluded.last_exported_sequence
+                      < (SELECT next_sequence FROM sync_local_state WHERE singleton = 1)
             "#,
         )
+        .bind(key_id)
         .bind(exported_through)
         .bind(expected_cursor)
+        .bind(key_id)
+        .bind(expected_cursor)
         .bind(exported_through)
+        .bind(expected_cursor)
         .execute(&self.pool)
         .await
         .context("Impossible d'avancer le curseur d'export de synchronisation")?;
@@ -2509,7 +2526,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 9);
+        assert_eq!(migration_count, 10);
 
         storage.close().await;
     }
@@ -4263,6 +4280,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(segment_state, ("existing-device".to_string(), 2, 0));
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608270002_encrypted_sync_segments.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let encrypted_export_cursors: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sync_export_cursors")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(encrypted_export_cursors, 0);
 
         let duplicate_entry_key = sqlx::query(
             r#"
