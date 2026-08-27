@@ -12,6 +12,7 @@ pub mod service;
 pub mod storage;
 pub mod sync;
 mod sync_merge;
+pub mod sync_segments;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;

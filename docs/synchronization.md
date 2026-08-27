@@ -322,6 +322,42 @@ losing concurrent deletion are relinked to the winning deletion tombstone.
 Article snapshots create metadata-only rows when needed, fill only absent
 metadata and never replace locally cached HTML.
 
+## Local directory segments
+
+`SYNC-005` provides the first transport-independent exchange harness through
+`export_sync_directory` and `import_sync_directory`. Its layout can be copied
+manually or synchronized as-is by Syncthing:
+
+```text
+<shared root>/
+  v1/
+    <device UUID>/
+      00000000000000000001-00000000000000000250.json
+```
+
+Each JSON segment identifies its format and protocol version, one device, a
+contiguous sequence range and at most 250 complete events. A file is limited to
+2 MiB. One directory import validates at most 1,000 segment files and imports
+the next 1,000 events at most in one SQLite transaction; repeated calls
+progress through a larger retained history using per-device cursors. Unknown
+versions, unexpected non-hidden entries, symbolic links, malformed JSON,
+inconsistent paths, non-contiguous ranges and excessive input are rejected
+before merge.
+
+The final field is a SHA-256 checksum over a canonical serialization of the
+header and events. It detects accidental corruption but is deliberately not an
+authentication mechanism. **Version-one directory segments are plaintext and
+must be treated as sensitive:** they contain feed URLs, article metadata and
+user state. `SYNC-006` will encrypt and authenticate this same logical payload
+before the transport is suitable for an untrusted remote location.
+
+Export reads only local events after a persistent contiguous cursor. Segments
+are published without overwriting existing paths, and the SQLite cursor moves
+only after the corresponding immutable file exists. If a process stops between
+those two operations, a later export verifies and reuses the identical file.
+Neither the SQLite database nor its WAL/SHM files is ever inspected or copied
+by the directory transport.
+
 ## Explicitly outside version 1
 
 - synchronizing SQLite, WAL or SHM files;
@@ -350,7 +386,7 @@ remote events without producing outgoing events; permutation tests cover
 independent registers, permanent article archives and concurrent subscription
 identities.
 
-`SYNC-005` should implement a local-directory segment transport first. That
-transport provides an offline test harness and can be used directly with
-Syncthing. `SYNC-007` then adds WebDAV as the first transport managed entirely
-from the InkRiver interface.
+`SYNC-005` implements the local-directory segment transport used by the offline
+Linux–Android simulation and usable directly with Syncthing. `SYNC-006` must
+encrypt and authenticate these logical segments. `SYNC-007` then adds WebDAV
+as the first transport managed entirely from the InkRiver interface.

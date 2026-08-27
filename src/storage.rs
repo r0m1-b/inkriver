@@ -879,6 +879,55 @@ impl Storage {
         rows.into_iter().map(sync_event_from_row).collect()
     }
 
+    pub(crate) async fn local_sync_export_cursor(&self) -> Result<i64> {
+        sqlx::query_scalar(
+            "SELECT last_exported_sequence FROM sync_local_state WHERE singleton = 1",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Impossible de lire le curseur d'export de synchronisation")
+    }
+
+    pub(crate) async fn mark_local_sync_events_exported(
+        &self,
+        expected_cursor: i64,
+        exported_through: i64,
+    ) -> Result<()> {
+        if exported_through < expected_cursor {
+            anyhow::bail!("Le curseur d'export ne peut pas reculer");
+        }
+        let result = sqlx::query(
+            r#"
+                UPDATE sync_local_state
+                SET last_exported_sequence = ?
+                WHERE singleton = 1
+                  AND last_exported_sequence = ?
+                  AND ? < next_sequence
+            "#,
+        )
+        .bind(exported_through)
+        .bind(expected_cursor)
+        .bind(exported_through)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'avancer le curseur d'export de synchronisation")?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("Le journal local a changé pendant son export");
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn sync_import_cursor(&self, remote_device_id: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT contiguous_sequence FROM sync_import_cursors WHERE remote_device_id = ?",
+        )
+        .bind(remote_device_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Impossible de lire le curseur d'un appareil distant")?
+        .unwrap_or(0))
+    }
+
     /// Validates and atomically imports remote synchronization events.
     ///
     /// Remote application writes projections directly and therefore never
@@ -2460,7 +2509,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 8);
+        assert_eq!(migration_count, 9);
 
         storage.close().await;
     }
@@ -4195,6 +4244,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(preserved_events, 1);
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202608270001_sync_segments.sql"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let segment_state: (String, i64, i64) = sqlx::query_as(
+            r#"
+                SELECT device_id, next_sequence, last_exported_sequence
+                FROM sync_local_state
+                WHERE singleton = 1
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(segment_state, ("existing-device".to_string(), 2, 0));
 
         let duplicate_entry_key = sqlx::query(
             r#"

@@ -23,7 +23,7 @@ pub struct SyncIdentity {
 
 /// Stable reference to one event in an immutable per-device journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncEventId {
     pub device_id: String,
     pub sequence: i64,
@@ -31,7 +31,7 @@ pub struct SyncEventId {
 
 /// Minimal article identity and display metadata carried by state events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncArticleRef {
     pub subscription_id: String,
     pub entry_key: String,
@@ -43,7 +43,7 @@ pub struct SyncArticleRef {
 
 /// Version-one business events exchanged by InkRiver installations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SyncEventPayload {
     SubscriptionCreated {
         subscription_id: String,
@@ -93,7 +93,7 @@ impl SyncEventPayload {
 
 /// Immutable event envelope persisted in the local synchronization journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncEvent {
     pub device_id: String,
     pub sequence: i64,
