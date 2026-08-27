@@ -1,6 +1,6 @@
 # InkRiver synchronization contract
 
-Status: accepted design for `SYNC-001`
+Status: implemented through `SYNC-004`
 
 Protocol version: draft `1`
 
@@ -297,6 +297,31 @@ commit atomically and can be requested repeatedly without duplicating events.
 10. Malformed, oversized, unauthenticated or unsupported events have no local
     effect.
 
+## Import and deterministic projection
+
+`SYNC-004` implements the merge engine independently from any transport:
+
+- one import accepts at most 1,000 typed protocol-v1 events;
+- envelopes, identifiers, clocks, normalized feed URLs, article URLs, dates
+  and bounded text fields are validated before SQLite is modified;
+- an existing `(device_id, sequence)` is accepted only when its complete event
+  is identical; a collision rolls the whole batch back;
+- received events, hybrid-clock advancement, import cursors, pending
+  dependencies, register versions, tombstones and business projections share
+  one transaction;
+- pending events are retried in total-version order until no dependency can be
+  resolved during the current import;
+- remote projections use direct internal writes and never call journaled user
+  mutations, preventing event echoes;
+- the import report exposes counters only: received, imported, duplicate,
+  applied and pending events.
+
+Subscription aliases are regrouped whenever a concurrent create or deletion
+changes their canonical identity. Re-additions that initially reference a
+losing concurrent deletion are relinked to the winning deletion tombstone.
+Article snapshots create metadata-only rows when needed, fill only absent
+metadata and never replace locally cached HTML.
+
 ## Explicitly outside version 1
 
 - synchronizing SQLite, WAL or SHM files;
@@ -320,10 +345,10 @@ It also adds an article entry key that is independent from the current
 namespaced SQLite ID.
 
 `SYNC-003` routes every replicated local mutation through transaction-aware
-storage operations and bootstraps existing installations. `SYNC-004` must
-implement remote application without producing outgoing events and test the
-conflict matrix by importing every relevant permutation into independent
-databases.
+storage operations and bootstraps existing installations. `SYNC-004` applies
+remote events without producing outgoing events; permutation tests cover
+independent registers, permanent article archives and concurrent subscription
+identities.
 
 `SYNC-005` should implement a local-directory segment transport first. That
 transport provides an offline test harness and can be used directly with

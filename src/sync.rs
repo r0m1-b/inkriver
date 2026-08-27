@@ -92,7 +92,8 @@ impl SyncEventPayload {
 }
 
 /// Immutable event envelope persisted in the local synchronization journal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncEvent {
     pub device_id: String,
     pub sequence: i64,
@@ -100,6 +101,17 @@ pub struct SyncEvent {
     pub protocol_version: i64,
     pub kind: String,
     pub payload: SyncEventPayload,
+}
+
+/// Non-sensitive counters produced by one transactional event import.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncImportReport {
+    pub received: usize,
+    pub imported: usize,
+    pub duplicates: usize,
+    pub applied: usize,
+    pub pending: usize,
 }
 
 #[cfg(test)]

@@ -3,8 +3,9 @@ use crate::config::{FeedConfig, FeedUrlError, Platform, detect_platform, normali
 use crate::feed::FeedMetadata;
 use crate::sync::{
     HybridLogicalClock, SYNC_PROTOCOL_VERSION, SyncArticleRef, SyncEvent, SyncEventId,
-    SyncEventPayload, SyncIdentity,
+    SyncEventPayload, SyncIdentity, SyncImportReport,
 };
+use crate::sync_merge;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::migrate::Migrator;
@@ -264,9 +265,73 @@ fn sync_article_ref_from_row(row: SyncArticleRefRow) -> SyncArticleRef {
     }
 }
 
-fn sync_article_entity_key(article: &SyncArticleRef) -> Result<String> {
-    serde_json::to_string(&(&article.subscription_id, &article.entry_key))
-        .context("Impossible de sérialiser l'identité logique de l'article")
+async fn canonical_sync_subscription_id_in(
+    transaction: &mut Transaction<'_, Sqlite>,
+    subscription_id: &str,
+) -> Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT canonical_id FROM sync_subscription_aliases WHERE alias_id = ?")
+            .bind(subscription_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .context("Impossible de résoudre l'identité canonique de l'abonnement")?
+            .unwrap_or_else(|| subscription_id.to_string()),
+    )
+}
+
+async fn store_local_sync_version_in(
+    transaction: &mut Transaction<'_, Sqlite>,
+    entity_kind: &str,
+    entity_key: &str,
+    field_name: &str,
+    event: &SyncEvent,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            INSERT INTO sync_entity_versions (
+                entity_kind, entity_key, field_name,
+                event_device_id, event_sequence
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(entity_kind, entity_key, field_name) DO UPDATE SET
+                event_device_id = excluded.event_device_id,
+                event_sequence = excluded.event_sequence
+        "#,
+    )
+    .bind(entity_kind)
+    .bind(entity_key)
+    .bind(field_name)
+    .bind(&event.device_id)
+    .bind(event.sequence)
+    .execute(&mut **transaction)
+    .await
+    .context("Impossible d'enregistrer la version locale synchronisée")?;
+    Ok(())
+}
+
+async fn store_local_sync_tombstone_in(
+    transaction: &mut Transaction<'_, Sqlite>,
+    entity_kind: &str,
+    entity_key: &str,
+    event: &SyncEvent,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+            INSERT INTO sync_tombstones (
+                entity_kind, entity_key, event_device_id, event_sequence
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
+                event_device_id = excluded.event_device_id,
+                event_sequence = excluded.event_sequence
+        "#,
+    )
+    .bind(entity_kind)
+    .bind(entity_key)
+    .bind(&event.device_id)
+    .bind(event.sequence)
+    .execute(&mut **transaction)
+    .await
+    .context("Impossible d'enregistrer la pierre tombale locale")?;
+    Ok(())
 }
 
 fn sync_event_from_row(row: SyncEventRow) -> Result<SyncEvent> {
@@ -474,7 +539,7 @@ impl Storage {
         .await
         .context("Impossible d'ajouter l'événement au journal de synchronisation")?;
 
-        Ok(SyncEvent {
+        let event = SyncEvent {
             device_id,
             sequence,
             clock: HybridLogicalClock {
@@ -484,7 +549,99 @@ impl Storage {
             protocol_version: SYNC_PROTOCOL_VERSION,
             kind: kind.to_string(),
             payload: payload.clone(),
-        })
+        };
+        Self::record_local_sync_projection_metadata(transaction, &event).await?;
+        Ok(event)
+    }
+
+    async fn record_local_sync_projection_metadata(
+        transaction: &mut Transaction<'_, Sqlite>,
+        event: &SyncEvent,
+    ) -> Result<()> {
+        match &event.payload {
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id, ..
+            } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, subscription_id).await?;
+                store_local_sync_version_in(
+                    transaction,
+                    "subscription",
+                    &canonical,
+                    "active",
+                    event,
+                )
+                .await?;
+                store_local_sync_version_in(
+                    transaction,
+                    "subscription",
+                    &canonical,
+                    "platform",
+                    event,
+                )
+                .await?;
+            }
+            SyncEventPayload::SubscriptionActiveSet {
+                subscription_id, ..
+            } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, subscription_id).await?;
+                store_local_sync_version_in(
+                    transaction,
+                    "subscription",
+                    &canonical,
+                    "active",
+                    event,
+                )
+                .await?;
+            }
+            SyncEventPayload::SubscriptionPlatformSet {
+                subscription_id, ..
+            } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, subscription_id).await?;
+                store_local_sync_version_in(
+                    transaction,
+                    "subscription",
+                    &canonical,
+                    "platform",
+                    event,
+                )
+                .await?;
+            }
+            SyncEventPayload::SubscriptionDeleted { subscription_id } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, subscription_id).await?;
+                store_local_sync_tombstone_in(transaction, "subscription", &canonical, event)
+                    .await?;
+            }
+            SyncEventPayload::ArticleReadSet { article, .. } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, &article.subscription_id)
+                        .await?;
+                let key = serde_json::to_string(&(&canonical, &article.entry_key))
+                    .context("Impossible de sérialiser l'identité logique de l'article")?;
+                store_local_sync_version_in(transaction, "article", &key, "read", event).await?;
+            }
+            SyncEventPayload::ArticleFavoriteSet { article, .. } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, &article.subscription_id)
+                        .await?;
+                let key = serde_json::to_string(&(&canonical, &article.entry_key))
+                    .context("Impossible de sérialiser l'identité logique de l'article")?;
+                store_local_sync_version_in(transaction, "article", &key, "favorite", event)
+                    .await?;
+            }
+            SyncEventPayload::ArticleArchived { article } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, &article.subscription_id)
+                        .await?;
+                let key = serde_json::to_string(&(&canonical, &article.entry_key))
+                    .context("Impossible de sérialiser l'identité logique de l'article")?;
+                store_local_sync_tombstone_in(transaction, "article", &key, event).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Atomically allocates a sequence and hybrid time, then appends one local event.
@@ -720,6 +877,23 @@ impl Storage {
         .context("Impossible de lire le journal local de synchronisation")?;
 
         rows.into_iter().map(sync_event_from_row).collect()
+    }
+
+    /// Validates and atomically imports remote synchronization events.
+    ///
+    /// Remote application writes projections directly and therefore never
+    /// creates outgoing local events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the database when validation or any
+    /// SQLite operation fails.
+    pub async fn import_sync_events(
+        &self,
+        events: &[SyncEvent],
+        observed_at: DateTime<Utc>,
+    ) -> Result<SyncImportReport> {
+        sync_merge::import_sync_events(&self.pool, events, observed_at).await
     }
 
     /// Imports the configured subscriptions as the active feed set.
@@ -1095,29 +1269,13 @@ impl Storage {
             .execute(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
-            let event = Self::append_local_sync_event_in(
+            Self::append_local_sync_event_in(
                 &mut transaction,
                 &SyncEventPayload::SubscriptionDeleted {
                     subscription_id: feed_id.clone(),
                 },
                 Utc::now(),
             )
-            .await
-            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
-            sqlx::query(
-                r#"
-                    INSERT INTO sync_tombstones (
-                        entity_kind, entity_key, event_device_id, event_sequence
-                    ) VALUES ('subscription', ?, ?, ?)
-                    ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
-                        event_device_id = excluded.event_device_id,
-                        event_sequence = excluded.event_sequence
-                "#,
-            )
-            .bind(&feed_id)
-            .bind(&event.device_id)
-            .bind(event.sequence)
-            .execute(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
         }
@@ -1430,6 +1588,8 @@ impl Storage {
 
         for article in articles {
             let entry_key = article_entry_key(&article.id, &article.feed_id);
+            let sync_subscription_id =
+                canonical_sync_subscription_id_in(&mut transaction, &article.feed_id).await?;
             let existing_archived: Option<bool> =
                 sqlx::query_scalar("SELECT is_archived FROM articles WHERE id = ?")
                     .bind(&article.id)
@@ -1496,7 +1656,7 @@ impl Storage {
                         article_id = excluded.article_id
                 "#,
             )
-            .bind(&article.feed_id)
+            .bind(&sync_subscription_id)
             .bind(entry_key)
             .bind(&article.id)
             .execute(&mut *transaction)
@@ -1975,30 +2135,12 @@ impl Storage {
         };
         if Self::sync_is_enabled_in(&mut transaction).await? {
             let article = sync_article_ref_from_row(row);
-            let event = Self::append_local_sync_event_in(
+            Self::append_local_sync_event_in(
                 &mut transaction,
-                &SyncEventPayload::ArticleArchived {
-                    article: article.clone(),
-                },
+                &SyncEventPayload::ArticleArchived { article },
                 archived_at,
             )
             .await?;
-            sqlx::query(
-                r#"
-                    INSERT INTO sync_tombstones (
-                        entity_kind, entity_key, event_device_id, event_sequence
-                    ) VALUES ('article', ?, ?, ?)
-                    ON CONFLICT(entity_kind, entity_key) DO UPDATE SET
-                        event_device_id = excluded.event_device_id,
-                        event_sequence = excluded.event_sequence
-                "#,
-            )
-            .bind(sync_article_entity_key(&article)?)
-            .bind(&event.device_id)
-            .bind(event.sequence)
-            .execute(&mut *transaction)
-            .await
-            .context("Impossible d'enregistrer la pierre tombale de l'article")?;
         }
         transaction
             .commit()
@@ -2057,28 +2199,12 @@ impl Storage {
             };
             if sync_enabled {
                 let article = sync_article_ref_from_row(row);
-                let event = Self::append_local_sync_event_in(
+                Self::append_local_sync_event_in(
                     &mut transaction,
-                    &SyncEventPayload::ArticleArchived {
-                        article: article.clone(),
-                    },
+                    &SyncEventPayload::ArticleArchived { article },
                     archived_at,
                 )
                 .await?;
-                sqlx::query(
-                    r#"
-                        INSERT INTO sync_tombstones (
-                            entity_kind, entity_key,
-                            event_device_id, event_sequence
-                        ) VALUES ('article', ?, ?, ?)
-                    "#,
-                )
-                .bind(sync_article_entity_key(&article)?)
-                .bind(&event.device_id)
-                .bind(event.sequence)
-                .execute(&mut *transaction)
-                .await
-                .context("Impossible d'enregistrer la pierre tombale de l'article")?;
             }
         }
         transaction
@@ -2208,6 +2334,77 @@ mod tests {
             author: Some("Test Author".to_string()),
             published_at: None,
         }
+    }
+
+    fn remote_event(
+        device_id: &str,
+        sequence: i64,
+        physical_milliseconds: i64,
+        payload: SyncEventPayload,
+    ) -> SyncEvent {
+        SyncEvent {
+            device_id: device_id.to_string(),
+            sequence,
+            clock: HybridLogicalClock {
+                physical_milliseconds,
+                logical_counter: 0,
+            },
+            protocol_version: SYNC_PROTOCOL_VERSION,
+            kind: payload.kind().to_string(),
+            payload,
+        }
+    }
+
+    fn remote_subscription_created(
+        device_id: &str,
+        sequence: i64,
+        physical_milliseconds: i64,
+        subscription_id: &str,
+    ) -> SyncEvent {
+        remote_event(
+            device_id,
+            sequence,
+            physical_milliseconds,
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id: subscription_id.to_string(),
+                normalized_url: "https://sync.example/feed".to_string(),
+                platform_hint: Platform::Other,
+                is_active: true,
+                parent_tombstone: None,
+            },
+        )
+    }
+
+    fn event_permutations(events: &[SyncEvent]) -> Vec<Vec<SyncEvent>> {
+        fn visit(
+            events: &[SyncEvent],
+            used: &mut [bool],
+            current: &mut Vec<SyncEvent>,
+            result: &mut Vec<Vec<SyncEvent>>,
+        ) {
+            if current.len() == events.len() {
+                result.push(current.clone());
+                return;
+            }
+            for index in 0..events.len() {
+                if !used[index] {
+                    used[index] = true;
+                    current.push(events[index].clone());
+                    visit(events, used, current, result);
+                    current.pop();
+                    used[index] = false;
+                }
+            }
+        }
+
+        let mut result = Vec::new();
+        visit(
+            events,
+            &mut vec![false; events.len()],
+            &mut Vec::new(),
+            &mut result,
+        );
+        result
     }
 
     async fn storage_with_feed() -> Storage {
@@ -2876,6 +3073,559 @@ mod tests {
         let after = storage.sync_identity().await.unwrap();
         assert_eq!(after.next_sequence, before.next_sequence);
         assert_eq!(after.clock, before.clock);
+    }
+
+    /// Verifies a state event can arrive before its dependencies, is retried,
+    /// advances the contiguous cursor, and never creates a local outgoing event.
+    #[tokio::test]
+    async fn sync_import_retries_pending_dependencies_without_echoing_events() {
+        const DEVICE: &str = "00000000-0000-4000-8000-00000000000a";
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let article = SyncArticleRef {
+            subscription_id: "remote-feed".to_string(),
+            entry_key: "first-post".to_string(),
+            title: Some("A remote article".to_string()),
+            url: Some("https://sync.example/first-post".to_string()),
+            author: Some("Remote Author".to_string()),
+            published_at: Some("2026-08-27T12:00:00Z".to_string()),
+        };
+        let state = remote_event(
+            DEVICE,
+            2,
+            2_000,
+            SyncEventPayload::ArticleReadSet {
+                article: article.clone(),
+                is_read: true,
+            },
+        );
+        let first = storage
+            .import_sync_events(&[state], Utc.timestamp_millis_opt(3_000).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            SyncImportReport {
+                received: 1,
+                imported: 1,
+                duplicates: 0,
+                applied: 0,
+                pending: 1,
+            }
+        );
+        assert!(storage.list_articles().await.unwrap().is_empty());
+
+        let create = remote_subscription_created(DEVICE, 1, 1_000, "remote-feed");
+        let second = storage
+            .import_sync_events(&[create], Utc.timestamp_millis_opt(3_100).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(second.imported, 1);
+        assert_eq!(second.applied, 2);
+        assert_eq!(second.pending, 0);
+        let stored = storage.list_articles().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].article.title.as_deref(), Some("A remote article"));
+        assert!(stored[0].is_read);
+        assert!(
+            storage
+                .local_sync_events_after(0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let cursor: i64 = sqlx::query_scalar(
+            "SELECT contiguous_sequence FROM sync_import_cursors WHERE remote_device_id = ?",
+        )
+        .bind(DEVICE)
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(cursor, 2);
+    }
+
+    /// Verifies independent registers use total event versions and converge for
+    /// every arrival order of the same event set.
+    #[tokio::test]
+    async fn sync_import_converges_for_every_register_event_permutation() {
+        const DEVICE_A: &str = "00000000-0000-4000-8000-00000000000a";
+        const DEVICE_B: &str = "00000000-0000-4000-8000-00000000000b";
+        let article = SyncArticleRef {
+            subscription_id: "shared-feed".to_string(),
+            entry_key: "entry".to_string(),
+            title: Some("Convergent article".to_string()),
+            url: None,
+            author: None,
+            published_at: None,
+        };
+        let events = vec![
+            remote_subscription_created(DEVICE_A, 1, 100, "shared-feed"),
+            remote_event(
+                DEVICE_A,
+                2,
+                200,
+                SyncEventPayload::ArticleReadSet {
+                    article: article.clone(),
+                    is_read: true,
+                },
+            ),
+            remote_event(
+                DEVICE_B,
+                1,
+                300,
+                SyncEventPayload::ArticleReadSet {
+                    article: article.clone(),
+                    is_read: false,
+                },
+            ),
+            remote_event(
+                DEVICE_A,
+                3,
+                250,
+                SyncEventPayload::ArticleFavoriteSet {
+                    article,
+                    is_favorite: true,
+                },
+            ),
+        ];
+
+        for permutation in event_permutations(&events) {
+            let storage = Storage::open_in_memory().await.unwrap();
+            storage.enable_sync().await.unwrap();
+            for event in permutation {
+                storage
+                    .import_sync_events(&[event], Utc.timestamp_millis_opt(1_000).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let articles = storage.list_articles().await.unwrap();
+            assert_eq!(articles.len(), 1);
+            assert!(!articles[0].is_read);
+            assert!(articles[0].is_favorite);
+            assert_eq!(
+                articles[0].article.title.as_deref(),
+                Some("Convergent article")
+            );
+        }
+    }
+
+    /// Verifies a manual archive tombstone dominates article registers in all
+    /// arrival orders, even when the archive is received before the article.
+    #[tokio::test]
+    async fn sync_import_archive_tombstone_converges_for_every_permutation() {
+        const DEVICE_A: &str = "00000000-0000-4000-8000-00000000000a";
+        const DEVICE_B: &str = "00000000-0000-4000-8000-00000000000b";
+        let article = SyncArticleRef {
+            subscription_id: "shared-feed".to_string(),
+            entry_key: "archived-entry".to_string(),
+            title: Some("Archived everywhere".to_string()),
+            url: None,
+            author: None,
+            published_at: None,
+        };
+        let events = vec![
+            remote_subscription_created(DEVICE_A, 1, 100, "shared-feed"),
+            remote_event(
+                DEVICE_A,
+                2,
+                200,
+                SyncEventPayload::ArticleReadSet {
+                    article: article.clone(),
+                    is_read: false,
+                },
+            ),
+            remote_event(
+                DEVICE_B,
+                1,
+                150,
+                SyncEventPayload::ArticleArchived {
+                    article: article.clone(),
+                },
+            ),
+            remote_event(
+                DEVICE_A,
+                3,
+                300,
+                SyncEventPayload::ArticleFavoriteSet {
+                    article,
+                    is_favorite: true,
+                },
+            ),
+        ];
+
+        for permutation in event_permutations(&events) {
+            let storage = Storage::open_in_memory().await.unwrap();
+            storage.enable_sync().await.unwrap();
+            for event in permutation {
+                storage
+                    .import_sync_events(&[event], Utc.timestamp_millis_opt(1_000).unwrap())
+                    .await
+                    .unwrap();
+            }
+            assert!(storage.list_articles().await.unwrap().is_empty());
+            let archived: (bool, Option<String>, Option<String>) =
+                sqlx::query_as("SELECT is_archived, archive_reason, content FROM articles")
+                    .fetch_one(&storage.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(archived, (true, Some("manual".to_string()), None));
+        }
+    }
+
+    /// Verifies local mutations participate in the same version registers as
+    /// imported events, while remote application creates no outgoing echo.
+    #[tokio::test]
+    async fn sync_import_compares_remote_events_with_local_register_versions() {
+        const DEVICE: &str = "00000000-0000-4000-8000-00000000000a";
+        let storage = storage_with_feed().await;
+        storage
+            .upsert_articles(&[article("astronomy::mars", "astronomy", None)])
+            .await
+            .unwrap();
+        storage.enable_sync().await.unwrap();
+        let baseline = storage.sync_identity().await.unwrap();
+        let reference = sync_article_ref("mars");
+        let older = remote_event(
+            DEVICE,
+            1,
+            1,
+            SyncEventPayload::ArticleReadSet {
+                article: reference.clone(),
+                is_read: true,
+            },
+        );
+        storage
+            .import_sync_events(
+                &[older],
+                Utc.timestamp_millis_opt(baseline.clock.physical_milliseconds)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !storage
+                .get_article("astronomy::mars")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_read
+        );
+
+        let newer = remote_event(
+            DEVICE,
+            2,
+            baseline.clock.physical_milliseconds + 10_000,
+            SyncEventPayload::ArticleReadSet {
+                article: reference,
+                is_read: true,
+            },
+        );
+        storage
+            .import_sync_events(
+                &[newer],
+                Utc.timestamp_millis_opt(baseline.clock.physical_milliseconds)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .get_article("astronomy::mars")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_read
+        );
+        assert_eq!(
+            storage.local_sync_events_after(0, 100).await.unwrap().len(),
+            baseline.next_sequence as usize - 1
+        );
+    }
+
+    /// Verifies concurrent additions of one URL collapse to the smallest alias
+    /// and produce only one subscription projection regardless of arrival order.
+    #[tokio::test]
+    async fn sync_import_deduplicates_concurrent_subscription_additions() {
+        const DEVICE_A: &str = "00000000-0000-4000-8000-00000000000a";
+        const DEVICE_B: &str = "00000000-0000-4000-8000-00000000000b";
+        let events = [
+            remote_subscription_created(DEVICE_A, 1, 100, "subscription-a"),
+            remote_subscription_created(DEVICE_B, 1, 200, "subscription-b"),
+        ];
+
+        for order in [events.to_vec(), vec![events[1].clone(), events[0].clone()]] {
+            let storage = Storage::open_in_memory().await.unwrap();
+            storage.enable_sync().await.unwrap();
+            storage
+                .import_sync_events(&order, Utc.timestamp_millis_opt(1_000).unwrap())
+                .await
+                .unwrap();
+            let feeds = storage.list_feeds().await.unwrap();
+            assert_eq!(feeds.len(), 1);
+            assert_eq!(feeds[0].url, "https://sync.example/feed");
+            let aliases: Vec<(String, String)> = sqlx::query_as(
+                "SELECT alias_id, canonical_id FROM sync_subscription_aliases ORDER BY alias_id",
+            )
+            .fetch_all(&storage.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                aliases,
+                vec![
+                    ("subscription-a".to_string(), "subscription-a".to_string()),
+                    ("subscription-b".to_string(), "subscription-a".to_string()),
+                ]
+            );
+        }
+    }
+
+    /// Verifies a deletion dominates later register events and an explicit
+    /// re-addition linked to its tombstone creates a fresh incarnation.
+    #[tokio::test]
+    async fn sync_import_applies_permanent_deletion_and_explicit_readdition() {
+        const DEVICE: &str = "00000000-0000-4000-8000-00000000000a";
+        let create = remote_subscription_created(DEVICE, 1, 100, "old-feed");
+        let deletion = remote_event(
+            DEVICE,
+            2,
+            200,
+            SyncEventPayload::SubscriptionDeleted {
+                subscription_id: "old-feed".to_string(),
+            },
+        );
+        let stale_activation = remote_event(
+            DEVICE,
+            3,
+            300,
+            SyncEventPayload::SubscriptionActiveSet {
+                subscription_id: "old-feed".to_string(),
+                is_active: true,
+            },
+        );
+        let replacement = remote_event(
+            DEVICE,
+            4,
+            400,
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id: "new-feed".to_string(),
+                normalized_url: "https://sync.example/feed".to_string(),
+                platform_hint: Platform::Other,
+                is_active: true,
+                parent_tombstone: Some(SyncEventId {
+                    device_id: DEVICE.to_string(),
+                    sequence: 2,
+                }),
+            },
+        );
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        storage
+            .import_sync_events(
+                &[stale_activation, replacement, deletion, create],
+                Utc.timestamp_millis_opt(1_000).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let feeds = storage.list_feeds().await.unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].id, "new-feed");
+        assert!(feeds[0].is_active);
+        let old_tombstone: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_tombstones WHERE entity_kind = 'subscription' AND entity_key = 'old-feed'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(old_tombstone, 1);
+    }
+
+    /// Verifies re-additions referencing concurrent deletions are regrouped
+    /// under the winning deletion tombstone.
+    #[tokio::test]
+    async fn sync_import_recanonicalizes_concurrent_deletion_parents() {
+        const DEVICE_A: &str = "00000000-0000-4000-8000-00000000000a";
+        const DEVICE_B: &str = "00000000-0000-4000-8000-00000000000b";
+        let create = remote_subscription_created(DEVICE_A, 1, 100, "old-feed");
+        let deletion_a = remote_event(
+            DEVICE_A,
+            2,
+            200,
+            SyncEventPayload::SubscriptionDeleted {
+                subscription_id: "old-feed".to_string(),
+            },
+        );
+        let deletion_b = remote_event(
+            DEVICE_B,
+            1,
+            300,
+            SyncEventPayload::SubscriptionDeleted {
+                subscription_id: "old-feed".to_string(),
+            },
+        );
+        let readd_a = remote_event(
+            DEVICE_A,
+            3,
+            250,
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id: "readd-a".to_string(),
+                normalized_url: "https://sync.example/feed".to_string(),
+                platform_hint: Platform::Other,
+                is_active: true,
+                parent_tombstone: Some(SyncEventId {
+                    device_id: DEVICE_A.to_string(),
+                    sequence: 2,
+                }),
+            },
+        );
+        let readd_b = remote_event(
+            DEVICE_B,
+            2,
+            350,
+            SyncEventPayload::SubscriptionCreated {
+                subscription_id: "readd-b".to_string(),
+                normalized_url: "https://sync.example/feed".to_string(),
+                platform_hint: Platform::Other,
+                is_active: true,
+                parent_tombstone: Some(SyncEventId {
+                    device_id: DEVICE_B.to_string(),
+                    sequence: 1,
+                }),
+            },
+        );
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        for event in [create, deletion_a, readd_a, deletion_b, readd_b] {
+            storage
+                .import_sync_events(&[event], Utc.timestamp_millis_opt(1_000).unwrap())
+                .await
+                .unwrap();
+        }
+
+        let feeds = storage.list_feeds().await.unwrap();
+        assert_eq!(feeds.len(), 1);
+        let readds: Vec<(String, String, String, i64)> = sqlx::query_as(
+            r#"
+                SELECT alias_id, canonical_id, parent_tombstone_device_id,
+                       parent_tombstone_sequence
+                FROM sync_subscription_aliases
+                WHERE alias_id LIKE 'readd-%'
+                ORDER BY alias_id
+            "#,
+        )
+        .fetch_all(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            readds,
+            vec![
+                (
+                    "readd-a".to_string(),
+                    "readd-a".to_string(),
+                    DEVICE_B.to_string(),
+                    1,
+                ),
+                (
+                    "readd-b".to_string(),
+                    "readd-a".to_string(),
+                    DEVICE_B.to_string(),
+                    1,
+                ),
+            ]
+        );
+    }
+
+    /// Verifies duplicates are idempotent and a conflicting identity rolls the
+    /// complete batch back without advancing the local clock.
+    #[tokio::test]
+    async fn sync_import_is_idempotent_and_rejects_identity_collisions_atomically() {
+        const DEVICE: &str = "00000000-0000-4000-8000-00000000000a";
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let create = remote_subscription_created(DEVICE, 1, 100, "remote-feed");
+        storage
+            .import_sync_events(
+                std::slice::from_ref(&create),
+                Utc.timestamp_millis_opt(1_000).unwrap(),
+            )
+            .await
+            .unwrap();
+        let duplicate = storage
+            .import_sync_events(
+                std::slice::from_ref(&create),
+                Utc.timestamp_millis_opt(2_000).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.duplicates, 1);
+        assert_eq!(duplicate.imported, 0);
+        assert_eq!(storage.list_feeds().await.unwrap().len(), 1);
+
+        let before = storage.sync_identity().await.unwrap();
+        let extra = remote_event(
+            DEVICE,
+            2,
+            150,
+            SyncEventPayload::SubscriptionActiveSet {
+                subscription_id: "remote-feed".to_string(),
+                is_active: false,
+            },
+        );
+        let collision = remote_subscription_created(DEVICE, 1, 100, "different-feed");
+        assert!(
+            storage
+                .import_sync_events(
+                    &[extra, collision],
+                    Utc.timestamp_millis_opt(3_000).unwrap(),
+                )
+                .await
+                .is_err()
+        );
+        let after = storage.sync_identity().await.unwrap();
+        assert_eq!(after.clock, before.clock);
+        let imported_extra: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_events WHERE device_id = ? AND sequence = 2",
+        )
+        .bind(DEVICE)
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(imported_extra, 0);
+    }
+
+    /// Verifies malformed envelopes and imports attempted before activation
+    /// leave both the journal and business projections untouched.
+    #[tokio::test]
+    async fn sync_import_validates_before_changing_state() {
+        const DEVICE: &str = "00000000-0000-4000-8000-00000000000a";
+        let storage = Storage::open_in_memory().await.unwrap();
+        let event = remote_subscription_created(DEVICE, 1, 100, "remote-feed");
+        assert!(
+            storage
+                .import_sync_events(
+                    std::slice::from_ref(&event),
+                    Utc.timestamp_millis_opt(1_000).unwrap(),
+                )
+                .await
+                .is_err()
+        );
+        storage.enable_sync().await.unwrap();
+        let mut invalid = event;
+        invalid.kind = "article_read_set".to_string();
+        assert!(
+            storage
+                .import_sync_events(&[invalid], Utc.timestamp_millis_opt(1_000).unwrap())
+                .await
+                .is_err()
+        );
+        assert!(storage.list_feeds().await.unwrap().is_empty());
+        let remote_events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sync_events WHERE device_id = ?")
+                .bind(DEVICE)
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        assert_eq!(remote_events, 0);
     }
 
     /// Verifies feed metadata and refresh errors survive reloads and a later
