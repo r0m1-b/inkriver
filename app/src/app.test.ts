@@ -2875,6 +2875,86 @@ describe("InkRiverApp", () => {
     expect(root.textContent).toContain("1 en attente");
   });
 
+  it("keeps automatic synchronization opt-in and stores the per-device setting", async () => {
+    const configured = {
+      ...emptySyncRuntime,
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [],
+    };
+    const api = fakeApi({ syncPairingStatus: vi.fn(async () => configured) });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    const checkbox = root.querySelector<HTMLInputElement>('[data-action="automatic-sync"]')!;
+    expect(checkbox.checked).toBe(false);
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(localStorage.getItem("inkriver.automaticSyncEnabled")).toBe("true");
+    expect(root.textContent).toContain("Synchronisation automatique activée");
+    const enabledCheckbox = root.querySelector<HTMLInputElement>('[data-action="automatic-sync"]')!;
+    enabledCheckbox.checked = false;
+    enabledCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  it("synchronizes automatically at startup and reloads cached projections", async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("inkriver.automaticSyncEnabled", "true");
+      const configured = {
+        ...emptySyncRuntime,
+        configured: true,
+        webdavBaseUrl: "https://cloud.example/dav/inkriver",
+        webdavUsername: "alice",
+        keyId: "key-123",
+        devices: [],
+      };
+      const api = fakeApi({ syncPairingStatus: vi.fn(async () => configured) });
+      await mounted(api);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks();
+      expect(api.synchronizeNow).toHaveBeenCalledOnce();
+      expect(api.listArticles).toHaveBeenCalledTimes(2);
+      expect(api.listFeeds).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(7_200_000);
+      expect(api.synchronizeNow).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("debounces automatic synchronization after a local article change", async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("inkriver.automaticSyncEnabled", "true");
+      const configured = {
+        ...emptySyncRuntime,
+        configured: true,
+        webdavBaseUrl: "https://cloud.example/dav/inkriver",
+        webdavUsername: "alice",
+        keyId: "key-123",
+        devices: [],
+      };
+      const api = fakeApi({ syncPairingStatus: vi.fn(async () => configured) });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-action="timeline-favorite"]')!.click();
+      await flushMicrotasks();
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(api.synchronizeNow).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushMicrotasks();
+      expect(api.synchronizeNow).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("deletes only the local synchronization configuration after confirmation", async () => {
     const configured = {
       ...emptySyncRuntime,

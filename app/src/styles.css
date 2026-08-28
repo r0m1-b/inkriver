@@ -247,6 +247,11 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .sync-status dt { margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 750; text-transform: uppercase; }
 .sync-status dd { margin: 0; overflow-wrap: anywhere; }
 .sync-primary-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.sync-automation-setting { display: flex; align-items: flex-start; gap: 11px; margin-top: 16px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--wash); cursor: pointer; }
+.sync-automation-setting input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--accent); }
+.sync-automation-setting span { display: grid; gap: 3px; }
+.sync-automation-setting strong { font-size: 14px; }
+.sync-automation-setting small { color: var(--muted); line-height: 1.4; }
 .sync-history { display: grid; gap: 10px; margin-top: 18px; }
 .sync-last-attempt { margin: 0; color: var(--muted); }
 .sync-last-result, .sync-persisted-error { display: grid; grid-template-columns: 1fr auto; gap: 5px 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); }

@@ -617,9 +617,15 @@ abonnements permet de créer un groupe, d'afficher son QR code, de le rejoindre
 avec la caméra Android ou une invitation manuelle, puis de renommer ou révoquer
 logiquement les appareils. Une action manuelle effectue un cycle borné d'envoi,
 de téléchargement et de fusion, puis recharge les projections locales. La
-synchronisation automatique n'est pas encore implémentée. La dernière
-tentative, les compteurs du dernier succès, l'état partiel et l'erreur détaillée
-sont persistés après redémarrage. Supprimer la configuration locale conserve
+synchronisation automatique est activable séparément sur chaque appareil. Elle
+tente alors un cycle au démarrage ou au retour au premier plan, ainsi que cinq
+secondes après une modification locale. Elle ne démarre pas lorsque la WebView
+se déclare hors ligne ou masquée, regroupe les changements rapprochés et
+s'arrête après quatre nouvelles tentatives de plus en plus espacées, jusqu'à un
+nouveau changement ou événement réseau/premier plan. L'action manuelle reste
+toujours disponible. La dernière tentative, les compteurs du dernier succès,
+l'état partiel et l'erreur détaillée sont persistés après redémarrage. Supprimer
+la configuration locale conserve
 les abonnements, les articles et les fichiers WebDAV distants. L'appairage exclut volontairement le mot de passe
 WebDAV : le nouvel appareil importe par QR la clé de groupe et les réglages non
 secrets, puis demande ce mot de passe séparément. Le paquet obtenu est conservé
@@ -637,8 +643,9 @@ et n'est plus digne de confiance, il faudra utiliser la future rotation de clé.
   pris en charge ;
 - les builds Android nécessitent encore un JDK, un SDK et un NDK configurés, et
   le processus de release signée n'est pas encore en place ;
-- la synchronisation reste manuelle ; sa planification automatique reste à
-  implémenter ;
+- la synchronisation automatique dépend des signaux réseau et de premier plan
+  de la WebView ; aucun travail Android en arrière-plan n'est volontairement
+  lancé ;
 - `inkriver.db` du CLI se trouve encore dans le dépôt de développement.
 
 Dans chaque application installée, SQLite reste la source de vérité dans le

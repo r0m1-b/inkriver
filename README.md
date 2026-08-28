@@ -40,8 +40,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - safely open the original article when a feed only provides an excerpt.
 - pair Linux and Android devices through a QR code while keeping the WebDAV
   password separate and storing synchronization secrets in the native vault.
-- manually exchange encrypted changes through the configured WebDAV server
-  without leaving or replacing the current cached view.
+- manually or automatically exchange encrypted changes through the configured
+  WebDAV server without leaving or replacing the current cached view.
 
 ## Ubuntu prerequisites
 
@@ -591,10 +591,15 @@ WebDAV transport, native secret storage, and a versioned device-pairing format.
 The **Synchronization** dialog in subscription management can create a group,
 display its QR code, join it by Android camera or manual invitation, and rename
 or logically revoke devices. A manual action performs one bounded upload,
-download, and merge cycle and then reloads the local projections. Automatic
-synchronization is not implemented yet. The last attempt, successful counters,
-pending state, and detailed error are persisted across restarts. Removing the
-local configuration keeps subscriptions, articles, and remote WebDAV files.
+download, and merge cycle and then reloads the local projections. Per-device
+automatic synchronization is opt-in: once enabled, InkRiver attempts a cycle
+at startup or foreground resume and five seconds after local changes. It never
+starts while the WebView reports offline or hidden, coalesces consecutive
+changes, and stops after four increasingly delayed retries until a new local,
+online, or foreground event occurs. The manual action always remains available.
+The last attempt, successful counters, pending state, and detailed error are
+persisted across restarts. Removing the local configuration keeps
+subscriptions, articles, and remote WebDAV files.
 Pairing deliberately excludes the WebDAV password: a new device imports the
 group key and non-secret endpoint settings from the QR, then asks for that
 password separately. Linux stores the resulting bundle in Secret Service;
@@ -610,8 +615,9 @@ must be handled by the future key-rotation workflow if it is no longer trusted.
 - content requiring authentication or a paid subscription is not supported;
 - Android builds still require a configured JDK, SDK, and NDK, and a signed
   release workflow has not been configured yet;
-- synchronization is manual only; automatic scheduling remains to be
-  implemented;
+- automatic synchronization depends on WebView connectivity and foreground
+  lifecycle signals; Android background synchronization is deliberately not
+  attempted;
 - the CLI's `inkriver.db` is still stored in the development repository.
 
 In every installed application, SQLite remains the source of truth in the

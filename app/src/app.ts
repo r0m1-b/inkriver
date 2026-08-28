@@ -1,4 +1,9 @@
 import type { InkRiverApi } from "./api";
+import {
+  AutomaticSyncScheduler,
+  readAutomaticSyncEnabled,
+  writeAutomaticSyncEnabled,
+} from "./sync_automation";
 import type {
   ApiError,
   ArticleDetail,
@@ -287,6 +292,8 @@ export class InkRiverApp {
   private articleTextSize: ArticleTextSize = "medium";
   private pendingTextSizeProgress: number | null = null;
   private readonly preferenceStorage: PreferenceStorage | null;
+  private automaticSyncEnabled = false;
+  private readonly automaticSyncScheduler: AutomaticSyncScheduler;
   private mainView: MainView = "articles";
   private mobileArticleScreen: MobileArticleScreen = "timeline";
   private readerArticleIds: string[] = [];
@@ -343,7 +350,26 @@ export class InkRiverApp {
     }
     this.preferenceStorage = preferenceStorage;
     this.articleTextSize = readArticleTextSize(this.preferenceStorage);
-    this.root.ownerDocument.defaultView?.addEventListener("resize", () => {
+    this.automaticSyncEnabled = readAutomaticSyncEnabled(this.preferenceStorage);
+    const document = this.root.ownerDocument;
+    const view = document.defaultView;
+    this.automaticSyncScheduler = new AutomaticSyncScheduler(
+      this.automaticSyncEnabled,
+      () => this.synchronizeAutomatically(),
+      {
+        isOnline: () => view?.navigator.onLine !== false,
+        isVisible: () => document.visibilityState !== "hidden",
+        setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimer: (timer) => clearTimeout(timer),
+      },
+    );
+    view?.addEventListener("online", () => {
+      this.automaticSyncScheduler.networkBecameAvailable();
+    });
+    document.addEventListener("visibilitychange", () => {
+      this.automaticSyncScheduler.visibilityChanged();
+    });
+    view?.addEventListener("resize", () => {
       const reader = this.root.querySelector<HTMLElement>(".reader");
       if (reader) this.updateReaderProgress(reader);
     });
@@ -409,6 +435,7 @@ export class InkRiverApp {
     } finally {
       this.loading = false;
       this.render();
+      this.automaticSyncScheduler.startup();
     }
   }
 
@@ -555,6 +582,7 @@ export class InkRiverApp {
       });
       if (this.selected && selectedIds.has(this.selected.id)) this.selected.isRead = isRead;
       this.selectedArticleIds.clear();
+      this.automaticSyncScheduler.localChange();
       this.showNotice(
         `${articleIds.length} article${articleIds.length > 1 ? "s" : ""} marqué${articleIds.length > 1 ? "s" : ""} comme ${isRead ? "lu" : "non lu"}${articleIds.length > 1 ? "s" : ""}.`,
       );
@@ -657,6 +685,7 @@ export class InkRiverApp {
       if (this.selected?.id === articleId) this.selected.isFavorite = isFavorite;
       const summary = this.articles.find((article) => article.id === articleId);
       if (summary) summary.isFavorite = isFavorite;
+      this.automaticSyncScheduler.localChange();
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
@@ -680,6 +709,7 @@ export class InkRiverApp {
       if (this.selected?.id === articleId) this.selected.isRead = isRead;
       const summary = this.articles.find((article) => article.id === articleId);
       if (summary) summary.isRead = isRead;
+      this.automaticSyncScheduler.localChange();
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
@@ -1008,6 +1038,7 @@ export class InkRiverApp {
       form.reset();
       this.render();
       await this.refreshFeed(addedFeed.id);
+      this.automaticSyncScheduler.localChange();
       return;
     } catch (error) {
       this.error = errorMessage(error);
@@ -1020,6 +1051,7 @@ export class InkRiverApp {
     try {
       await this.api.setFeedActive(feedId, isActive);
       this.feeds = await this.api.listFeeds();
+      this.automaticSyncScheduler.localChange();
     } catch (error) {
       this.error = errorMessage(error);
     }
@@ -1048,6 +1080,7 @@ export class InkRiverApp {
         this.api.listArticles(),
       ]);
       const label = result.deletedArticles > 1 ? "articles supprimés" : "article supprimé";
+      this.automaticSyncScheduler.localChange();
       this.showNotice(`Abonnement supprimé avec ${result.deletedArticles} ${label}.`);
     } catch (error) {
       this.error = errorMessage(error);
@@ -1144,6 +1177,7 @@ export class InkRiverApp {
         this.selected = null;
         this.mobileArticleScreen = "timeline";
       }
+      this.automaticSyncScheduler.localChange();
       this.showNotice("Article archivé.");
     } catch (error) {
       this.error = errorMessage(error);
@@ -1177,6 +1211,7 @@ export class InkRiverApp {
         this.mobileArticleScreen = "timeline";
       }
       this.selectedArticleIds.clear();
+      this.automaticSyncScheduler.localChange();
       this.showNotice(
         `${articleIds.length} article${articleIds.length > 1 ? "s archivés" : " archivé"}.`,
       );
@@ -1473,6 +1508,7 @@ export class InkRiverApp {
       content = `<div class="sync-status">
           <dl><div><dt>Serveur WebDAV</dt><dd>${escapeHtml(status.webdavBaseUrl ?? "Inconnu")}</dd></div><div><dt>Utilisateur</dt><dd>${escapeHtml(status.webdavUsername ?? "Inconnu")}</dd></div><div><dt>Empreinte de clé</dt><dd><code>${escapeHtml(status.keyId ?? "Inconnue")}</code></dd></div></dl>
           <div class="sync-primary-actions"><button type="button" class="primary" data-action="synchronize-now" ${this.syncBusy ? "disabled" : ""}>${this.syncBusy ? "Synchronisation…" : "Synchroniser maintenant"}</button><button type="button" data-action="create-pairing-invitation" ${this.syncBusy ? "disabled" : ""}>${this.syncInvitation ? "Renouveler le QR d’appairage" : "Afficher le QR d’appairage"}</button></div>
+          <label class="sync-automation-setting"><input type="checkbox" data-action="automatic-sync" ${this.automaticSyncEnabled ? "checked" : ""} ${this.syncBusy ? "disabled" : ""}><span><strong>Synchronisation automatique</strong><small>Au démarrage et après vos modifications, uniquement lorsque l’application est visible et le réseau disponible.</small></span></label>
           <div class="sync-history">${lastResult}${persistedError}</div>
           ${invitation}
           <section class="sync-devices"><h3>Appareils</h3><ul>${devices}</ul></section>
@@ -1529,6 +1565,18 @@ export class InkRiverApp {
     }
   }
 
+  private setAutomaticSyncEnabled(enabled: boolean): void {
+    this.automaticSyncEnabled = enabled;
+    writeAutomaticSyncEnabled(this.preferenceStorage, enabled);
+    this.automaticSyncScheduler.setEnabled(enabled);
+    this.showNotice(
+      enabled
+        ? "Synchronisation automatique activée sur cet appareil."
+        : "Synchronisation automatique désactivée : le mode manuel reste disponible.",
+    );
+    this.render();
+  }
+
   private closeSyncDialog(): void {
     this.syncDialogOpen = false;
     this.syncInvitation = null;
@@ -1550,6 +1598,7 @@ export class InkRiverApp {
         String(values.get("webdavPassword") ?? ""),
         String(values.get("deviceName") ?? ""),
       );
+      this.automaticSyncScheduler.localChange();
       this.showNotice("Groupe de synchronisation créé.");
     } catch (error) {
       this.syncError = errorMessage(error);
@@ -1574,6 +1623,7 @@ export class InkRiverApp {
         String(values.get("deviceName") ?? ""),
       );
       this.pendingPairingInvitation = "";
+      this.automaticSyncScheduler.localChange();
       this.showNotice("Cet appareil a rejoint le groupe de synchronisation.");
     } catch (error) {
       this.syncError = errorMessage(error);
@@ -1616,6 +1666,7 @@ export class InkRiverApp {
 
   private async synchronizeNow(): Promise<void> {
     if (this.syncBusy) return;
+    this.automaticSyncScheduler.cancel();
     this.syncBusy = true;
     this.syncError = null;
     this.clearNotice();
@@ -1623,20 +1674,7 @@ export class InkRiverApp {
     this.render();
     try {
       const report = await this.api.synchronizeNow();
-      const [articles, feeds, status] = await Promise.all([
-        this.api.listArticles(),
-        this.api.listFeeds(),
-        this.api.syncPairingStatus(),
-      ]);
-      this.articles = articles;
-      this.feeds = feeds;
-      this.syncPairingStatus = status;
-      if (selectedId && articles.some((article) => article.id === selectedId)) {
-        this.selected = await this.api.getArticle(selectedId);
-      } else if (selectedId) {
-        this.selected = null;
-        this.mobileArticleScreen = "timeline";
-      }
+      await this.reloadAfterSynchronization(selectedId);
       const pending = report.pendingEvents > 0
         ? ` ${report.pendingEvents} changement${report.pendingEvents > 1 ? "s restent" : " reste"} en attente.`
         : "";
@@ -1657,6 +1695,49 @@ export class InkRiverApp {
     }
   }
 
+  private async reloadAfterSynchronization(selectedId: string | null): Promise<void> {
+    const [articles, feeds, status] = await Promise.all([
+      this.api.listArticles(),
+      this.api.listFeeds(),
+      this.api.syncPairingStatus(),
+    ]);
+    this.articles = articles;
+    this.feeds = feeds;
+    this.syncPairingStatus = status;
+    if (selectedId && articles.some((article) => article.id === selectedId)) {
+      this.selected = await this.api.getArticle(selectedId);
+    } else if (selectedId) {
+      this.selected = null;
+      this.mobileArticleScreen = "timeline";
+    }
+  }
+
+  private async synchronizeAutomatically(): Promise<void> {
+    if (this.syncBusy) throw new Error("Une synchronisation est déjà en cours");
+    const status = await this.api.syncPairingStatus();
+    if (!status.configured) return;
+    if (this.syncBusy) throw new Error("Une synchronisation est déjà en cours");
+
+    this.syncBusy = true;
+    this.syncError = null;
+    const selectedId = this.selected?.id ?? null;
+    if (this.syncDialogOpen) this.render();
+    try {
+      await this.api.synchronizeNow();
+      await this.reloadAfterSynchronization(selectedId);
+    } catch (error) {
+      try {
+        this.syncPairingStatus = await this.api.syncPairingStatus();
+      } catch {
+        // The durable error remains available on the next successful status load.
+      }
+      throw error;
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
   private async deleteSyncConfiguration(): Promise<void> {
     if (
       this.syncBusy ||
@@ -1670,6 +1751,7 @@ export class InkRiverApp {
     try {
       this.syncPairingStatus = await this.api.deleteSyncConfiguration();
       this.syncInvitation = null;
+      this.automaticSyncScheduler.cancel();
       this.showNotice("Configuration de synchronisation supprimée de cet appareil.");
     } catch (error) {
       this.syncError = errorMessage(error);
@@ -1688,6 +1770,7 @@ export class InkRiverApp {
     this.render();
     try {
       this.syncPairingStatus = await this.api.renameSyncDevice(deviceId, displayName);
+      this.automaticSyncScheduler.localChange();
       this.showNotice("Nom de l’appareil mis à jour.");
     } catch (error) {
       this.syncError = errorMessage(error);
@@ -1707,6 +1790,7 @@ export class InkRiverApp {
     this.render();
     try {
       this.syncPairingStatus = await this.api.revokeSyncDevice(deviceId);
+      this.automaticSyncScheduler.localChange();
       this.showNotice("Appareil révoqué localement.");
     } catch (error) {
       this.syncError = errorMessage(error);
@@ -1970,6 +2054,9 @@ export class InkRiverApp {
     });
     this.root.querySelector<HTMLElement>('[data-action="synchronize-now"]')?.addEventListener("click", () => {
       void this.synchronizeNow();
+    });
+    this.root.querySelector<HTMLInputElement>('[data-action="automatic-sync"]')?.addEventListener("change", (event) => {
+      this.setAutomaticSyncEnabled((event.currentTarget as HTMLInputElement).checked);
     });
     this.root.querySelector<HTMLElement>('[data-action="delete-sync-configuration"]')?.addEventListener("click", () => {
       void this.deleteSyncConfiguration();
@@ -2422,6 +2509,7 @@ export class InkRiverApp {
         this.selected = null;
         this.mobileArticleScreen = "timeline";
       }
+      this.automaticSyncScheduler.localChange();
       this.showNotice("Article archivé.");
     }
     this.archivingArticleId = null;
