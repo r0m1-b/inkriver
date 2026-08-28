@@ -66,6 +66,10 @@ impl SyncGroupKey {
     pub fn key_id(&self) -> String {
         hex_digest(Sha256::digest(self.0))
     }
+
+    pub(crate) fn expose_bytes(&self) -> [u8; GROUP_KEY_BYTES] {
+        self.0
+    }
 }
 
 impl fmt::Debug for SyncGroupKey {
@@ -329,6 +333,9 @@ pub(crate) async fn import_sync_segment_blobs(
         let segment = decrypt_segment(&encrypted, key)?;
         validate_segment_relative_path(relative_path, &encrypted, &segment)?;
         if segment.device_id == local_device_id {
+            continue;
+        }
+        if storage.sync_device_is_revoked(&segment.device_id).await? {
             continue;
         }
         let cursor = match cursors.get(&segment.device_id) {
@@ -1190,6 +1197,42 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(target.list_feeds().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn logically_revoked_device_segments_are_ignored() {
+        let key = group_key();
+        let source = Storage::open_in_memory().await.unwrap();
+        source.enable_sync().await.unwrap();
+        source
+            .add_feed("https://revoked.example/feed", None)
+            .await
+            .unwrap();
+        let source_id = source.sync_identity().await.unwrap().device_id;
+        let directory = tempfile::tempdir().unwrap();
+        export_sync_directory(&source, directory.path(), &key)
+            .await
+            .unwrap();
+
+        let target = Storage::open_in_memory().await.unwrap();
+        target.enable_sync().await.unwrap();
+        target
+            .register_sync_device(&source_id, "Ancien téléphone", Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            target
+                .revoke_sync_device(&source_id, Utc::now())
+                .await
+                .unwrap()
+        );
+        let report = import_sync_directory(&target, directory.path(), &key, Utc::now())
+            .await
+            .unwrap();
+
+        assert_eq!(report.imported, 0);
+        assert_eq!(report.received, 0);
         assert!(target.list_feeds().await.unwrap().is_empty());
     }
 

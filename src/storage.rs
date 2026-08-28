@@ -39,9 +39,62 @@ fn article_entry_key<'a>(article_id: &'a str, feed_id: &str) -> &'a str {
         .unwrap_or(article_id)
 }
 
+fn validate_sync_configuration(configuration: &SyncConfiguration) -> Result<()> {
+    let url = reqwest::Url::parse(&configuration.webdav_base_url)
+        .context("URL WebDAV de synchronisation invalide")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.path().ends_with('/')
+        || url.as_str() != configuration.webdav_base_url
+        || configuration.webdav_username.trim().is_empty()
+        || configuration.webdav_username != configuration.webdav_username.trim()
+        || configuration.webdav_username.len() > 512
+        || configuration.key_id.len() != 64
+        || !configuration
+            .key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("Configuration de synchronisation invalide");
+    }
+    Ok(())
+}
+
+fn validate_sync_device(device_id: &str, display_name: &str) -> Result<()> {
+    uuid::Uuid::parse_str(device_id).context("Identifiant d'appareil invalide")?;
+    if display_name.trim().is_empty()
+        || display_name != display_name.trim()
+        || display_name.len() > 120
+    {
+        anyhow::bail!("Nom d'appareil invalide");
+    }
+    Ok(())
+}
+
 /// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
     pool: SqlitePool,
+}
+
+/// Non-sensitive synchronization settings persisted alongside local data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncConfiguration {
+    pub webdav_base_url: String,
+    pub webdav_username: String,
+    pub key_id: String,
+}
+
+/// User-facing metadata for one known synchronization device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncDevice {
+    pub device_id: String,
+    pub display_name: String,
+    pub is_local: bool,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// Represents one subscription as persisted by the application.
@@ -443,7 +496,191 @@ impl Storage {
         .await
         .context("Impossible d'initialiser l'identité de synchronisation")?;
 
+        let (device_id,): (String,) =
+            sqlx::query_as("SELECT device_id FROM sync_local_state WHERE singleton = 1")
+                .fetch_one(&pool)
+                .await
+                .context("Impossible de relire l'identité de synchronisation")?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+                INSERT OR IGNORE INTO sync_devices (
+                    device_id, display_name, is_local, created_at, updated_at
+                ) VALUES (?, 'Cet appareil', 1, ?, ?)
+            "#,
+        )
+        .bind(device_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .context("Impossible d'initialiser le nom de l'appareil")?;
+
         Ok(Self { pool })
+    }
+
+    /// Saves the non-secret part of the current synchronization configuration.
+    pub async fn save_sync_configuration(&self, configuration: &SyncConfiguration) -> Result<()> {
+        validate_sync_configuration(configuration)?;
+        sqlx::query(
+            r#"
+                INSERT INTO sync_configuration (
+                    singleton, webdav_base_url, webdav_username, key_id
+                ) VALUES (1, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    webdav_base_url = excluded.webdav_base_url,
+                    webdav_username = excluded.webdav_username,
+                    key_id = excluded.key_id
+            "#,
+        )
+        .bind(&configuration.webdav_base_url)
+        .bind(&configuration.webdav_username)
+        .bind(&configuration.key_id)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer la configuration de synchronisation")?;
+        Ok(())
+    }
+
+    /// Loads the non-secret synchronization configuration, if one exists.
+    pub async fn sync_configuration(&self) -> Result<Option<SyncConfiguration>> {
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT webdav_base_url, webdav_username, key_id FROM sync_configuration WHERE singleton = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Impossible de charger la configuration de synchronisation")?;
+        Ok(row.map(
+            |(webdav_base_url, webdav_username, key_id)| SyncConfiguration {
+                webdav_base_url,
+                webdav_username,
+                key_id,
+            },
+        ))
+    }
+
+    /// Removes only non-secret synchronization settings from SQLite.
+    pub async fn clear_sync_configuration(&self) -> Result<()> {
+        sqlx::query("DELETE FROM sync_configuration WHERE singleton = 1")
+            .execute(&self.pool)
+            .await
+            .context("Impossible de supprimer la configuration de synchronisation")?;
+        Ok(())
+    }
+
+    /// Lists local and paired devices, including logically revoked entries.
+    pub async fn list_sync_devices(&self) -> Result<Vec<SyncDevice>> {
+        let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+            r#"
+                SELECT device_id, display_name, is_local, revoked_at
+                FROM sync_devices
+                ORDER BY is_local DESC, display_name COLLATE NOCASE, device_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les appareils synchronisés")?;
+        rows.into_iter()
+            .map(|(device_id, display_name, is_local, revoked_at)| {
+                Ok(SyncDevice {
+                    device_id,
+                    display_name,
+                    is_local,
+                    revoked_at: revoked_at
+                        .map(|value| {
+                            DateTime::parse_from_rfc3339(&value)
+                                .map(|date| date.with_timezone(&Utc))
+                                .context("Date de révocation d'appareil invalide")
+                        })
+                        .transpose()?,
+                })
+            })
+            .collect()
+    }
+
+    /// Registers a device learned through a validated pairing invitation.
+    pub async fn register_sync_device(
+        &self,
+        device_id: &str,
+        display_name: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_sync_device(device_id, display_name)?;
+        let timestamp = observed_at.to_rfc3339();
+        sqlx::query(
+            r#"
+                INSERT INTO sync_devices (
+                    device_id, display_name, is_local, created_at, updated_at
+                ) VALUES (?, ?, 0, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    updated_at = excluded.updated_at
+                WHERE sync_devices.is_local = 0
+                  AND sync_devices.revoked_at IS NULL
+            "#,
+        )
+        .bind(device_id)
+        .bind(display_name)
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer l'appareil appairé")?;
+        Ok(())
+    }
+
+    /// Renames a known device without changing its immutable identifier.
+    pub async fn rename_sync_device(
+        &self,
+        device_id: &str,
+        display_name: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        validate_sync_device(device_id, display_name)?;
+        let result = sqlx::query(
+            "UPDATE sync_devices SET display_name = ?, updated_at = ? WHERE device_id = ?",
+        )
+        .bind(display_name)
+        .bind(observed_at.to_rfc3339())
+        .bind(device_id)
+        .execute(&self.pool)
+        .await
+        .context("Impossible de renommer l'appareil")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Logically revokes a remote device while retaining its historical events.
+    pub async fn revoke_sync_device(
+        &self,
+        device_id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        uuid::Uuid::parse_str(device_id).context("Identifiant d'appareil invalide")?;
+        let timestamp = observed_at.to_rfc3339();
+        let result = sqlx::query(
+            r#"
+                UPDATE sync_devices
+                SET revoked_at = ?, updated_at = ?
+                WHERE device_id = ? AND is_local = 0 AND revoked_at IS NULL
+            "#,
+        )
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await
+        .context("Impossible de révoquer l'appareil")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub(crate) async fn sync_device_is_revoked(&self, device_id: &str) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE device_id = ? AND revoked_at IS NOT NULL)",
+        )
+        .bind(device_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Impossible de vérifier la révocation de l'appareil")
     }
 
     /// Returns the stable identity and journal allocation state of this installation.
@@ -2486,6 +2723,106 @@ mod tests {
         storage
     }
 
+    #[tokio::test]
+    async fn sync_pairing_metadata_supports_rename_and_logical_revocation() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let observed_at = DateTime::parse_from_rfc3339("2026-08-28T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let local_id = storage.sync_identity().await.unwrap().device_id;
+        let remote_id = "00000000-0000-4000-8000-000000000088";
+        let configuration = SyncConfiguration {
+            webdav_base_url: "https://dav.example.test/inkriver/".to_string(),
+            webdav_username: "romain".to_string(),
+            key_id: "42".repeat(32),
+        };
+
+        storage
+            .save_sync_configuration(&configuration)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.sync_configuration().await.unwrap(),
+            Some(configuration)
+        );
+        assert!(
+            storage
+                .rename_sync_device(&local_id, "Laptop Linux", observed_at)
+                .await
+                .unwrap()
+        );
+        storage
+            .register_sync_device(remote_id, "Téléphone", observed_at)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .rename_sync_device(remote_id, "Pixel", observed_at)
+                .await
+                .unwrap()
+        );
+        assert!(!storage.sync_device_is_revoked(remote_id).await.unwrap());
+        assert!(
+            storage
+                .revoke_sync_device(remote_id, observed_at)
+                .await
+                .unwrap()
+        );
+        assert!(storage.sync_device_is_revoked(remote_id).await.unwrap());
+        assert!(
+            !storage
+                .revoke_sync_device(remote_id, observed_at)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .revoke_sync_device(&local_id, observed_at)
+                .await
+                .unwrap()
+        );
+        let devices = storage.list_sync_devices().await.unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].display_name, "Laptop Linux");
+        assert_eq!(devices[1].display_name, "Pixel");
+        assert!(devices[1].revoked_at.is_some());
+
+        storage.clear_sync_configuration().await.unwrap();
+        assert_eq!(storage.sync_configuration().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn sync_pairing_metadata_rejects_invalid_values() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let invalid_config = SyncConfiguration {
+            webdav_base_url: "https://user:secret@example.test/dav/".to_string(),
+            webdav_username: "user".to_string(),
+            key_id: "42".repeat(32),
+        };
+        assert!(
+            storage
+                .save_sync_configuration(&invalid_config)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .register_sync_device("not-a-uuid", "Phone", Utc::now())
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .rename_sync_device(
+                    &storage.sync_identity().await.unwrap().device_id,
+                    "  ",
+                    Utc::now(),
+                )
+                .await
+                .is_err()
+        );
+    }
+
     /// Verifies a file database is created with migrations and foreign keys enabled.
     #[tokio::test]
     async fn open_creates_database_and_applies_migrations() {
@@ -2526,7 +2863,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 10);
+        assert_eq!(migration_count, 11);
 
         storage.close().await;
     }

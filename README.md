@@ -572,6 +572,8 @@ src/feed_logo.rs  safe website-logo discovery and normalization
 src/service.rs  collection, deduplication, and sorting
 src/storage.rs  SQLite storage and local states
 src/refresh.rs  import → collection → storage orchestration
+src/sync_pairing.rs  versioned device-pairing invitations and offline QR rendering
+src/sync_secrets.rs  native Linux/Android synchronization secret vault
 src/main.rs     CLI entry point
 migrations/     versioned schema changes
 app/src/        Vanilla TypeScript interface
@@ -580,12 +582,26 @@ app/src-tauri/  Tauri adapter, commands, and configuration
 
 ## Current limitations
 
+The synchronization foundation now provides encrypted immutable segments,
+WebDAV transport, native secret storage, and a versioned device-pairing format.
+The QR and synchronization screens are not connected to the Tauri interface
+yet, so end-to-end device synchronization is still unavailable to users.
+Pairing deliberately excludes the WebDAV password: a new device imports the
+group key and non-secret endpoint settings from the QR, then asks for that
+password separately. Linux stores the resulting bundle in Secret Service;
+Android stores it using a key protected by Android Keystore. SQLite contains
+only non-secret settings and device metadata. Logical revocation keeps existing
+history but ignores future segments from the revoked device; rotating the group
+key remains a later recovery feature. Logical revocation is therefore a local
+filter, not a cryptographic exclusion: a device that still owns the group key
+must be handled by the future key-rotation workflow if it is no longer trusted.
+
 - the optional CLI remains part of the main Rust package instead of a separate
   workspace crate;
 - content requiring authentication or a paid subscription is not supported;
 - Android builds still require a configured JDK, SDK, and NDK, and a signed
   release workflow has not been configured yet;
-- synchronization between Linux and Android databases is not implemented yet;
+- synchronization has no user-facing configuration or pairing screen yet;
 - the CLI's `inkriver.db` is still stored in the development repository.
 
 In every installed application, SQLite remains the source of truth in the

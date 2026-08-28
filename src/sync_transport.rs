@@ -128,6 +128,9 @@ pub async fn synchronize_transport<T: SegmentTransport>(
         if device_id == prepared.device_id {
             continue;
         }
+        if storage.sync_device_is_revoked(device_id).await? {
+            continue;
+        }
         let cursor = match cursors.get(device_id) {
             Some(cursor) => *cursor,
             None => {

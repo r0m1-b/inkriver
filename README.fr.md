@@ -596,6 +596,8 @@ src/feed_logo.rs  découverte et normalisation sûres des logos de sites
 src/service.rs  collecte, déduplication et tri
 src/storage.rs  stockage SQLite et états locaux
 src/refresh.rs  orchestration import → collecte → stockage
+src/sync_pairing.rs  invitations d'appairage versionnées et QR hors ligne
+src/sync_secrets.rs  coffre natif des secrets de synchronisation Linux/Android
 src/main.rs     point d'entrée du CLI
 migrations/     évolution versionnée du schéma SQLite
 app/src/         interface Vanilla TypeScript
@@ -604,13 +606,29 @@ app/src-tauri/   adaptation, commandes et configuration Tauri
 
 ## Limites actuelles
 
+Le socle de synchronisation fournit désormais les segments immuables chiffrés,
+le transport WebDAV, le stockage natif des secrets et un format d'appairage
+versionné. Les écrans QR et synchronisation ne sont pas encore reliés à
+l'interface Tauri : la synchronisation de bout en bout n'est donc pas encore
+accessible à l'utilisateur. L'appairage exclut volontairement le mot de passe
+WebDAV : le nouvel appareil importe par QR la clé de groupe et les réglages non
+secrets, puis demande ce mot de passe séparément. Le paquet obtenu est conservé
+dans Secret Service sous Linux et protégé par Android Keystore sous Android ;
+SQLite ne contient que les réglages non secrets et les métadonnées des
+appareils. Une révocation logique conserve l'historique existant mais ignore les
+futurs segments de l'appareil révoqué. La rotation de clé reste une future
+fonction de récupération. La révocation logique est donc un filtre local et non
+une exclusion cryptographique : si l'appareil possède encore la clé de groupe
+et n'est plus digne de confiance, il faudra utiliser la future rotation de clé.
+
 - le CLI optionnel appartient encore au paquet Rust principal au lieu d'être
   isolé dans un crate du workspace ;
 - les contenus nécessitant une connexion ou un abonnement payant ne sont pas
   pris en charge ;
 - les builds Android nécessitent encore un JDK, un SDK et un NDK configurés, et
   le processus de release signée n'est pas encore en place ;
-- la synchronisation des bases Linux et Android n'est pas encore implémentée ;
+- la synchronisation ne possède pas encore d'écran de configuration ou
+  d'appairage ;
 - `inkriver.db` du CLI se trouve encore dans le dépôt de développement.
 
 Dans chaque application installée, SQLite reste la source de vérité dans le
