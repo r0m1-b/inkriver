@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::{error::Error, fmt};
 
@@ -95,6 +95,27 @@ pub struct SyncDevice {
     pub display_name: String,
     pub is_local: bool,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// One device's durable claim that it has consumed a contiguous prefix of
+/// another device's immutable synchronization journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncAcknowledgement {
+    pub key_id: String,
+    pub observer_device_id: String,
+    pub source_device_id: String,
+    pub contiguous_sequence: i64,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Conservative compaction boundary calculated for an explicit, authoritative
+/// set of devices that must all be able to recover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncCompactionFrontier {
+    pub source_device_id: String,
+    pub safe_through_sequence: i64,
+    pub required_observer_count: usize,
+    pub blocking_observer_device_ids: Vec<String>,
 }
 
 /// Non-sensitive counters retained from the last successful synchronization.
@@ -791,6 +812,9 @@ impl Storage {
         sqlx::query("DELETE FROM sync_pending_events")
             .execute(&mut *transaction)
             .await?;
+        sqlx::query("DELETE FROM sync_acknowledgements")
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query("DELETE FROM sync_devices WHERE is_local = 0")
             .execute(&mut *transaction)
             .await?;
@@ -1413,6 +1437,191 @@ impl Storage {
         .await
         .context("Impossible de lire le curseur d'un appareil distant")?
         .unwrap_or(0))
+    }
+
+    /// Records a monotonic acknowledgement learned from one synchronization
+    /// device. Older or identical observations never move the durable state
+    /// backwards.
+    pub async fn record_sync_acknowledgement(
+        &self,
+        acknowledgement: &SyncAcknowledgement,
+    ) -> Result<bool> {
+        if acknowledgement.key_id.len() != 64
+            || !acknowledgement
+                .key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!("Empreinte de clé d'accusé de réception invalide");
+        }
+        uuid::Uuid::parse_str(&acknowledgement.observer_device_id)
+            .context("Identifiant d'appareil observateur invalide")?;
+        uuid::Uuid::parse_str(&acknowledgement.source_device_id)
+            .context("Identifiant d'appareil source invalide")?;
+        if acknowledgement.contiguous_sequence < 0 {
+            anyhow::bail!("Une séquence acquittée ne peut pas être négative");
+        }
+        let result = sqlx::query(
+            r#"
+                INSERT INTO sync_acknowledgements (
+                    key_id, observer_device_id, source_device_id,
+                    contiguous_sequence, observed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(key_id, observer_device_id, source_device_id) DO UPDATE SET
+                    contiguous_sequence = excluded.contiguous_sequence,
+                    observed_at = excluded.observed_at
+                WHERE excluded.contiguous_sequence
+                          > sync_acknowledgements.contiguous_sequence
+                   OR (
+                        excluded.contiguous_sequence
+                            = sync_acknowledgements.contiguous_sequence
+                        AND excluded.observed_at > sync_acknowledgements.observed_at
+                      )
+            "#,
+        )
+        .bind(&acknowledgement.key_id)
+        .bind(&acknowledgement.observer_device_id)
+        .bind(&acknowledgement.source_device_id)
+        .bind(acknowledgement.contiguous_sequence)
+        .bind(acknowledgement.observed_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer l'accusé de réception")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Lists the durable acknowledgements for one source journal.
+    pub async fn sync_acknowledgements_for_source(
+        &self,
+        key_id: &str,
+        source_device_id: &str,
+    ) -> Result<Vec<SyncAcknowledgement>> {
+        if key_id.len() != 64
+            || !key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!("Empreinte de clé d'accusé de réception invalide");
+        }
+        uuid::Uuid::parse_str(source_device_id)
+            .context("Identifiant d'appareil source invalide")?;
+        let rows: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+            r#"
+                SELECT key_id, observer_device_id, source_device_id,
+                       contiguous_sequence, observed_at
+                FROM sync_acknowledgements
+                WHERE key_id = ? AND source_device_id = ?
+                ORDER BY observer_device_id
+            "#,
+        )
+        .bind(key_id)
+        .bind(source_device_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les accusés de réception")?;
+        rows.into_iter()
+            .map(
+                |(
+                    key_id,
+                    observer_device_id,
+                    source_device_id,
+                    contiguous_sequence,
+                    observed_at,
+                )| {
+                    Ok(SyncAcknowledgement {
+                        key_id,
+                        observer_device_id,
+                        source_device_id,
+                        contiguous_sequence,
+                        observed_at: DateTime::parse_from_rfc3339(&observed_at)
+                            .context("Date d'accusé de réception invalide")?
+                            .with_timezone(&Utc),
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Computes the highest prefix that every explicitly required observer has
+    /// consumed. Missing acknowledgements deliberately contribute zero.
+    ///
+    /// The caller must provide the complete authoritative active-device roster;
+    /// the current pairing metadata is not yet a distributed membership list.
+    pub async fn sync_compaction_frontier(
+        &self,
+        key_id: &str,
+        source_device_id: &str,
+        source_max_sequence: i64,
+        required_observer_device_ids: &[String],
+    ) -> Result<SyncCompactionFrontier> {
+        uuid::Uuid::parse_str(source_device_id)
+            .context("Identifiant d'appareil source invalide")?;
+        if source_max_sequence < 0 {
+            anyhow::bail!("La dernière séquence source ne peut pas être négative");
+        }
+        let mut required = required_observer_device_ids
+            .iter()
+            .map(|device_id| {
+                uuid::Uuid::parse_str(device_id)
+                    .context("Identifiant d'appareil requis invalide")?;
+                Ok(device_id.clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        required.sort();
+        required.dedup();
+        if required.is_empty() {
+            anyhow::bail!("Le calcul de compaction exige au moins un appareil");
+        }
+
+        let local = self.sync_identity().await?;
+        let stored = self
+            .sync_acknowledgements_for_source(key_id, source_device_id)
+            .await?
+            .into_iter()
+            .map(|acknowledgement| {
+                (
+                    acknowledgement.observer_device_id,
+                    acknowledgement.contiguous_sequence,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut positions = Vec::with_capacity(required.len());
+        for observer_device_id in &required {
+            let sequence = if observer_device_id == &local.device_id {
+                if source_device_id == local.device_id {
+                    local.next_sequence - 1
+                } else {
+                    self.sync_import_cursor(source_device_id).await?
+                }
+            } else {
+                stored.get(observer_device_id).copied().unwrap_or(0)
+            };
+            positions.push((
+                observer_device_id.clone(),
+                sequence.min(source_max_sequence),
+            ));
+        }
+        let safe_through_sequence = positions
+            .iter()
+            .map(|(_, sequence)| *sequence)
+            .min()
+            .unwrap_or(0);
+        let blocking_observer_device_ids = if safe_through_sequence < source_max_sequence {
+            positions
+                .into_iter()
+                .filter_map(|(device_id, sequence)| {
+                    (sequence == safe_through_sequence).then_some(device_id)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(SyncCompactionFrontier {
+            source_device_id: source_device_id.to_string(),
+            safe_through_sequence,
+            required_observer_count: required.len(),
+            blocking_observer_device_ids,
+        })
     }
 
     /// Validates and atomically imports remote synchronization events.
@@ -3056,6 +3265,151 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sync_acknowledgements_are_monotonic_and_round_trip() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let key_id = "42".repeat(32);
+        let observer = "00000000-0000-4000-8000-000000000111";
+        let source = "00000000-0000-4000-8000-000000000222";
+        let first_at = Utc.with_ymd_and_hms(2026, 8, 28, 10, 0, 0).unwrap();
+        let newer_at = Utc.with_ymd_and_hms(2026, 8, 28, 10, 5, 0).unwrap();
+
+        assert!(
+            storage
+                .record_sync_acknowledgement(&SyncAcknowledgement {
+                    key_id: key_id.clone(),
+                    observer_device_id: observer.to_string(),
+                    source_device_id: source.to_string(),
+                    contiguous_sequence: 8,
+                    observed_at: first_at,
+                })
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .record_sync_acknowledgement(&SyncAcknowledgement {
+                    key_id: key_id.clone(),
+                    observer_device_id: observer.to_string(),
+                    source_device_id: source.to_string(),
+                    contiguous_sequence: 7,
+                    observed_at: newer_at,
+                })
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .record_sync_acknowledgement(&SyncAcknowledgement {
+                    key_id: key_id.clone(),
+                    observer_device_id: observer.to_string(),
+                    source_device_id: source.to_string(),
+                    contiguous_sequence: 8,
+                    observed_at: newer_at,
+                })
+                .await
+                .unwrap()
+        );
+        let other_key_id = "24".repeat(32);
+        assert!(
+            storage
+                .record_sync_acknowledgement(&SyncAcknowledgement {
+                    key_id: other_key_id.clone(),
+                    observer_device_id: observer.to_string(),
+                    source_device_id: source.to_string(),
+                    contiguous_sequence: 99,
+                    observed_at: newer_at,
+                })
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(
+            storage
+                .sync_acknowledgements_for_source(&key_id, source)
+                .await
+                .unwrap(),
+            vec![SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: observer.to_string(),
+                source_device_id: source.to_string(),
+                contiguous_sequence: 8,
+                observed_at: newer_at,
+            }]
+        );
+        assert_eq!(
+            storage
+                .sync_acknowledgements_for_source(&other_key_id, source)
+                .await
+                .unwrap()[0]
+                .contiguous_sequence,
+            99
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_frontier_requires_every_explicit_observer() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let key_id = "42".repeat(32);
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://compaction.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        let local_id = storage.sync_identity().await.unwrap().device_id;
+        let source_max_sequence = storage.sync_identity().await.unwrap().next_sequence - 1;
+        assert!(source_max_sequence >= 2);
+        let first_remote = "00000000-0000-4000-8000-000000000111".to_string();
+        let second_remote = "00000000-0000-4000-8000-000000000222".to_string();
+        let required = vec![
+            second_remote.clone(),
+            local_id.clone(),
+            first_remote.clone(),
+            second_remote.clone(),
+        ];
+
+        let blocked = storage
+            .sync_compaction_frontier(&key_id, &local_id, source_max_sequence, &required)
+            .await
+            .unwrap();
+        assert_eq!(blocked.safe_through_sequence, 0);
+        assert_eq!(blocked.required_observer_count, 3);
+        assert_eq!(
+            blocked.blocking_observer_device_ids,
+            vec![first_remote.clone(), second_remote.clone()]
+        );
+
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 28, 11, 0, 0).unwrap();
+        storage
+            .record_sync_acknowledgement(&SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: first_remote.clone(),
+                source_device_id: local_id.clone(),
+                contiguous_sequence: 1,
+                observed_at,
+            })
+            .await
+            .unwrap();
+        storage
+            .record_sync_acknowledgement(&SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: second_remote.clone(),
+                source_device_id: local_id.clone(),
+                contiguous_sequence: source_max_sequence + 100,
+                observed_at,
+            })
+            .await
+            .unwrap();
+
+        let partial = storage
+            .sync_compaction_frontier(&key_id, &local_id, source_max_sequence, &required)
+            .await
+            .unwrap();
+        assert_eq!(partial.safe_through_sequence, 1);
+        assert_eq!(partial.blocking_observer_device_ids, vec![first_remote]);
+    }
+
     /// Verifies a file database is created with migrations and foreign keys enabled.
     #[tokio::test]
     async fn open_creates_database_and_applies_migrations() {
@@ -3076,6 +3430,7 @@ mod tests {
         assert!(table_names.contains(&"sync_local_state".to_string()));
         assert!(table_names.contains(&"sync_events".to_string()));
         assert!(table_names.contains(&"sync_pending_events".to_string()));
+        assert!(table_names.contains(&"sync_acknowledgements".to_string()));
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&storage.pool)
@@ -3096,7 +3451,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 12);
+        assert_eq!(migration_count, 13);
 
         storage.close().await;
     }

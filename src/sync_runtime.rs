@@ -138,7 +138,7 @@ pub async fn remove_sync_configuration<S: SyncSecretStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SyncConfiguration;
+    use crate::storage::{SyncAcknowledgement, SyncConfiguration};
     use crate::sync_secrets::SyncSecrets;
     use crate::sync_segments::SyncGroupKey;
     use crate::sync_transport::SegmentPublishOutcome;
@@ -301,11 +301,12 @@ mod tests {
     async fn removing_configuration_preserves_content_and_local_identity() {
         let storage = Storage::open_in_memory().await.unwrap();
         let key = SyncGroupKey::from_bytes([0x62; 32]);
+        let key_id = key.key_id();
         storage
             .save_sync_configuration(&SyncConfiguration {
                 webdav_base_url: "https://cloud.example/dav/inkriver/".to_string(),
                 webdav_username: "alice".to_string(),
-                key_id: key.key_id(),
+                key_id: key_id.clone(),
             })
             .await
             .unwrap();
@@ -320,6 +321,16 @@ mod tests {
             .await
             .unwrap();
         storage.record_sync_attempt(Utc::now()).await.unwrap();
+        storage
+            .record_sync_acknowledgement(&SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: "00000000-0000-4000-8000-000000000123".to_string(),
+                source_device_id: identity.device_id.clone(),
+                contiguous_sequence: 1,
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
         let secrets = MemorySecretStore::default();
         secrets
             .save(&SyncSecrets::new(key, "secret".to_string()).unwrap())
@@ -341,6 +352,13 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert!(devices[0].is_local);
         assert_eq!(devices[0].device_id, identity.device_id);
+        assert!(
+            storage
+                .sync_acknowledgements_for_source(&key_id, &identity.device_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
