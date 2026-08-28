@@ -1,6 +1,6 @@
 # InkRiver synchronization contract
 
-Status: implemented through `SYNC-006`
+Status: implemented through `SYNC-007`
 
 Protocol version: draft `1`
 
@@ -366,6 +366,37 @@ those two operations, a later export verifies and reuses the identical file.
 Neither the SQLite database nor its WAL/SHM files is ever inspected or copied
 by the directory transport.
 
+## WebDAV transport
+
+`SYNC-007` introduces a transport contract that only handles opaque encrypted
+segments. It never receives the group key or decrypted events. The common
+orchestrator prepares local segments, asks the transport to publish them, and
+advances the per-key SQLite cursor only after confirmed creation. When an
+immutable destination already exists, its bytes must authenticate and decrypt
+to the exact prepared event range before the cursor can advance.
+
+The WebDAV implementation creates `v2`, key and device collections with
+`MKCOL`. A new segment is first uploaded under a random dot-prefixed temporary
+name and then published with `MOVE` and `Overwrite: F`. A lost response after a
+successful move is recoverable: the retry detects the existing destination,
+downloads it and verifies its logical encrypted payload. Temporary leftovers
+are ignored by listings.
+
+Device collections and segment names are discovered with bounded `PROPFIND`
+requests. Only segments beyond the local per-device import cursor are fetched,
+at most 20 per synchronization call and with at most four simultaneous
+downloads. Repeated calls progress through a larger backlog. Response bodies,
+segment counts, connection time and total request time are limited. HTTP
+redirects are disabled to prevent credentials from following an unexpected
+endpoint. Basic authentication is supported; using plain HTTP exposes those credentials to the
+network, so HTTPS is required outside an explicitly trusted local setup.
+
+One failed listing or download prevents that batch from reaching the merge
+transaction. Already confirmed uploads remain safely published and local
+reading or mutations remain available. WebDAV credentials and the group key
+are still supplied by the caller: secure storage and pairing arrive in
+`SYNC-008`, while Tauri controls and status presentation arrive in `SYNC-009`.
+
 ## Explicitly outside version 1
 
 - synchronizing SQLite, WAL or SHM files;
@@ -396,5 +427,7 @@ identities.
 
 `SYNC-005` implements the local-directory segment transport used by the offline
 Linux–Android simulation and usable directly with Syncthing. `SYNC-006`
-encrypts and authenticates its logical segments. `SYNC-007` then adds WebDAV as
-the first transport managed entirely from the InkRiver interface.
+encrypts and authenticates its logical segments. `SYNC-007` adds the generic
+transport orchestrator and WebDAV implementation. `SYNC-008` must now provide
+secure secret storage and device pairing before `SYNC-009` exposes the workflow
+in the InkRiver interface.

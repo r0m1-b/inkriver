@@ -2369,6 +2369,7 @@ dependencies = [
  "html2text",
  "image",
  "legible",
+ "quick-xml",
  "reqwest",
  "resvg",
  "scraper",

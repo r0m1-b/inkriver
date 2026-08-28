@@ -24,8 +24,8 @@ const FORMAT_DIRECTORY: &str = "v2";
 const GROUP_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
 const MAX_SEGMENT_EVENTS: usize = 250;
-const MAX_SEGMENT_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_DIRECTORY_SEGMENTS: usize = 1_000;
+pub(crate) const MAX_SEGMENT_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_DIRECTORY_SEGMENTS: usize = 1_000;
 const MAX_EVENTS_PER_DIRECTORY_EXPORT: usize = 1_000;
 const MAX_EVENTS_PER_DIRECTORY_IMPORT: usize = 1_000;
 
@@ -133,52 +133,42 @@ pub struct SyncDirectoryImportReport {
     pub pending: usize,
 }
 
-/// Publishes local events not covered by the persistent export cursor.
-///
-/// Files are immutable and organized as
-/// `v2/<key fingerprint>/<device UUID>/<range>.json`.
-/// Existing identical files are reused to recover safely from a process crash
-/// between the filesystem write and the SQLite cursor update.
-///
-/// # Errors
-///
-/// Returns an error without advancing the cursor when the directory cannot be
-/// written, an existing path conflicts, or one event cannot fit in a segment.
-pub async fn export_sync_directory(
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSyncSegment {
+    pub relative_path: String,
+    pub bytes: Vec<u8>,
+    pub first_sequence: i64,
+    pub last_sequence: i64,
+    pub event_count: usize,
+    segment: SegmentFile,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSyncExport {
+    pub key_id: String,
+    pub device_id: String,
+    pub initial_cursor: i64,
+    pub segments: Vec<PreparedSyncSegment>,
+}
+
+pub(crate) async fn prepare_sync_export(
     storage: &Storage,
-    root: &Path,
     key: &SyncGroupKey,
-) -> Result<SyncDirectoryExportReport> {
+) -> Result<PreparedSyncExport> {
     let identity = storage.sync_identity().await?;
     if !identity.is_enabled {
         bail!("Synchronization must be enabled before exporting segments");
     }
     let key_id = key.key_id();
-    let mut cursor = storage.local_sync_export_cursor(&key_id).await?;
-    let mut report = SyncDirectoryExportReport {
-        last_exported_sequence: cursor,
-        ..SyncDirectoryExportReport::default()
-    };
+    let cursor = storage.local_sync_export_cursor(&key_id).await?;
     let events = storage
         .local_sync_events_after(cursor, MAX_EVENTS_PER_DIRECTORY_EXPORT)
         .await?;
-    if events.is_empty() {
-        return Ok(report);
-    }
-    let device_directory = root
-        .join(FORMAT_DIRECTORY)
-        .join(&key_id)
-        .join(&identity.device_id);
-    fs::create_dir_all(&device_directory).with_context(|| {
-        format!(
-            "Impossible de créer le répertoire de segments {}",
-            device_directory.display()
-        )
-    })?;
-
+    let mut expected_cursor = cursor;
+    let mut segments = Vec::new();
     let mut offset = 0;
     while offset < events.len() {
-        if events[offset].sequence != cursor + 1 {
+        if events[offset].sequence != expected_cursor + 1 {
             bail!("The local synchronization journal contains a sequence gap");
         }
         let maximum_end = (offset + MAX_SEGMENT_EVENTS).min(events.len());
@@ -195,18 +185,100 @@ pub async fn export_sync_directory(
             }
             end -= 1;
         };
-        let outcome = publish_segment(&device_directory, &segment, key, &bytes)?;
+        let relative_path = format!(
+            "{FORMAT_DIRECTORY}/{key_id}/{}/{}",
+            identity.device_id,
+            segment_file_name(segment.first_sequence, segment.last_sequence)
+        );
+        expected_cursor = segment.last_sequence;
+        segments.push(PreparedSyncSegment {
+            relative_path,
+            bytes,
+            first_sequence: segment.first_sequence,
+            last_sequence: segment.last_sequence,
+            event_count: segment.events.len(),
+            segment,
+        });
+        offset = end;
+    }
+    Ok(PreparedSyncExport {
+        key_id,
+        device_id: identity.device_id,
+        initial_cursor: cursor,
+        segments,
+    })
+}
+
+pub(crate) async fn confirm_sync_segment_export(
+    storage: &Storage,
+    key_id: &str,
+    expected_cursor: i64,
+    exported_through: i64,
+) -> Result<()> {
+    storage
+        .mark_local_sync_events_exported(key_id, expected_cursor, exported_through)
+        .await
+}
+
+pub(crate) fn verify_prepared_segment_bytes(
+    bytes: &[u8],
+    prepared: &PreparedSyncSegment,
+    key: &SyncGroupKey,
+) -> Result<()> {
+    let existing = decrypt_segment(&read_encrypted_segment_bytes(bytes)?, key)?;
+    if existing != prepared.segment {
+        bail!("An immutable synchronization segment already exists with different content");
+    }
+    Ok(())
+}
+
+/// Publishes local events not covered by the persistent export cursor.
+///
+/// Files are immutable and organized as
+/// `v2/<key fingerprint>/<device UUID>/<range>.json`.
+/// Existing identical files are reused to recover safely from a process crash
+/// between the filesystem write and the SQLite cursor update.
+///
+/// # Errors
+///
+/// Returns an error without advancing the cursor when the directory cannot be
+/// written, an existing path conflicts, or one event cannot fit in a segment.
+pub async fn export_sync_directory(
+    storage: &Storage,
+    root: &Path,
+    key: &SyncGroupKey,
+) -> Result<SyncDirectoryExportReport> {
+    let prepared = prepare_sync_export(storage, key).await?;
+    let mut cursor = prepared.initial_cursor;
+    let mut report = SyncDirectoryExportReport {
+        last_exported_sequence: cursor,
+        ..SyncDirectoryExportReport::default()
+    };
+    if prepared.segments.is_empty() {
+        return Ok(report);
+    }
+    let device_directory = root
+        .join(FORMAT_DIRECTORY)
+        .join(&prepared.key_id)
+        .join(&prepared.device_id);
+    fs::create_dir_all(&device_directory).with_context(|| {
+        format!(
+            "Impossible de créer le répertoire de segments {}",
+            device_directory.display()
+        )
+    })?;
+
+    for segment in &prepared.segments {
+        let outcome = publish_segment(&device_directory, segment, key)?;
         match outcome {
             PublishOutcome::Written => report.written_segments += 1,
             PublishOutcome::Reused => report.reused_segments += 1,
         }
-        storage
-            .mark_local_sync_events_exported(&key_id, cursor, segment.last_sequence)
+        confirm_sync_segment_export(storage, &prepared.key_id, cursor, segment.last_sequence)
             .await?;
-        report.exported_events += segment.events.len();
+        report.exported_events += segment.event_count;
         report.last_exported_sequence = segment.last_sequence;
         cursor = segment.last_sequence;
-        offset = end;
     }
     Ok(report)
 }
@@ -227,11 +299,35 @@ pub async fn import_sync_directory(
     observed_at: DateTime<Utc>,
 ) -> Result<SyncDirectoryImportReport> {
     let paths = discover_segments(root, &key.key_id())?;
+    let mut blobs = Vec::with_capacity(paths.len());
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .context("Le segment n'appartient pas au répertoire de synchronisation")?
+            .to_str()
+            .context("Le chemin du segment n'est pas UTF-8")?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        blobs.push((relative, read_segment_file_bytes(&path)?));
+    }
+    import_sync_segment_blobs(storage, key, blobs, observed_at).await
+}
+
+pub(crate) async fn import_sync_segment_blobs(
+    storage: &Storage,
+    key: &SyncGroupKey,
+    blobs: Vec<(String, Vec<u8>)>,
+    observed_at: DateTime<Utc>,
+) -> Result<SyncDirectoryImportReport> {
+    if blobs.len() > MAX_DIRECTORY_SEGMENTS {
+        bail!("A synchronization import cannot exceed {MAX_DIRECTORY_SEGMENTS} segments");
+    }
     let local_device_id = storage.sync_identity().await?.device_id;
     let mut cursors = HashMap::new();
     let mut events = Vec::new();
-    for path in &paths {
-        let segment = read_segment(path, root, key)?;
+    for (relative_path, bytes) in &blobs {
+        let encrypted = read_encrypted_segment_bytes(bytes)?;
+        let segment = decrypt_segment(&encrypted, key)?;
+        validate_segment_relative_path(relative_path, &encrypted, &segment)?;
         if segment.device_id == local_device_id {
             continue;
         }
@@ -250,7 +346,7 @@ pub async fn import_sync_directory(
         }
     }
     let imported = storage.import_sync_events(&events, observed_at).await?;
-    Ok(import_report(paths.len(), imported))
+    Ok(import_report(blobs.len(), imported))
 }
 
 fn import_report(segments: usize, report: SyncImportReport) -> SyncDirectoryImportReport {
@@ -447,9 +543,8 @@ enum PublishOutcome {
 
 fn publish_segment(
     directory: &Path,
-    segment: &SegmentFile,
+    segment: &PreparedSyncSegment,
     key: &SyncGroupKey,
-    bytes: &[u8],
 ) -> Result<PublishOutcome> {
     let destination = directory.join(segment_file_name(
         segment.first_sequence,
@@ -474,7 +569,7 @@ fn publish_segment(
             .create_new(true)
             .open(&temporary)
             .with_context(|| format!("Impossible de créer {}", temporary.display()))?;
-        file.write_all(bytes)
+        file.write_all(&segment.bytes)
             .context("Impossible d'écrire le segment temporaire")?;
         file.sync_all()
             .context("Impossible de synchroniser le segment temporaire")?;
@@ -500,7 +595,7 @@ fn publish_segment(
                 {
                     Ok(mut destination_file) => {
                         let publish_result = destination_file
-                            .write_all(bytes)
+                            .write_all(&segment.bytes)
                             .and_then(|()| destination_file.sync_all());
                         drop(destination_file);
                         if let Err(error) = publish_result {
@@ -531,12 +626,12 @@ fn publish_segment(
     write_result
 }
 
-fn verify_existing_segment(path: &Path, expected: &SegmentFile, key: &SyncGroupKey) -> Result<()> {
-    let existing = decrypt_segment(&read_encrypted_segment_file(path)?, key)?;
-    if existing != *expected {
-        bail!("An immutable synchronization segment already exists with different content");
-    }
-    Ok(())
+fn verify_existing_segment(
+    path: &Path,
+    expected: &PreparedSyncSegment,
+    key: &SyncGroupKey,
+) -> Result<()> {
+    verify_prepared_segment_bytes(&read_segment_file_bytes(path)?, expected, key)
 }
 
 fn discover_segments(root: &Path, key_id: &str) -> Result<Vec<PathBuf>> {
@@ -638,32 +733,29 @@ fn is_dot_name(name: &str) -> bool {
     name.starts_with('.')
 }
 
-fn read_segment(path: &Path, root: &Path, key: &SyncGroupKey) -> Result<SegmentFile> {
-    let encrypted = read_encrypted_segment_file(path)?;
-    let segment = decrypt_segment(&encrypted, key)?;
-    let relative = path
-        .strip_prefix(root)
-        .context("Le segment n'appartient pas au répertoire de synchronisation")?;
-    let components = relative
-        .components()
-        .map(|component| component.as_os_str())
-        .collect::<Vec<_>>();
+fn validate_segment_relative_path(
+    relative_path: &str,
+    encrypted: &EncryptedSegmentFile,
+    segment: &SegmentFile,
+) -> Result<()> {
+    let components = relative_path.split('/').collect::<Vec<_>>();
     if components.len() != 4
-        || components[0] != OsStr::new(FORMAT_DIRECTORY)
-        || components[1] != OsStr::new(&encrypted.key_id)
-        || components[2] != OsStr::new(&segment.device_id)
-        || components[3]
-            != OsStr::new(&segment_file_name(
-                segment.first_sequence,
-                segment.last_sequence,
-            ))
+        || components[0] != FORMAT_DIRECTORY
+        || components[1] != encrypted.key_id
+        || components[2] != segment.device_id
+        || components[3] != segment_file_name(segment.first_sequence, segment.last_sequence)
     {
         bail!("Segment metadata does not match its immutable path");
     }
-    Ok(segment)
+    Ok(())
 }
 
+#[cfg(test)]
 fn read_encrypted_segment_file(path: &Path) -> Result<EncryptedSegmentFile> {
+    read_encrypted_segment_bytes(&read_segment_file_bytes(path)?)
+}
+
+fn read_segment_file_bytes(path: &Path) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("Impossible de lire {}", path.display()))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -681,7 +773,14 @@ fn read_encrypted_segment_file(path: &Path) -> Result<EncryptedSegmentFile> {
     if bytes.len() as u64 > MAX_SEGMENT_BYTES {
         bail!("A synchronization segment grew beyond the size limit");
     }
-    serde_json::from_slice(&bytes).context("Malformed encrypted synchronization segment")
+    Ok(bytes)
+}
+
+fn read_encrypted_segment_bytes(bytes: &[u8]) -> Result<EncryptedSegmentFile> {
+    if bytes.len() as u64 > MAX_SEGMENT_BYTES {
+        bail!("A synchronization segment exceeds the size limit");
+    }
+    serde_json::from_slice(bytes).context("Malformed encrypted synchronization segment")
 }
 
 fn validate_segment(segment: &SegmentFile) -> Result<()> {
@@ -818,12 +917,9 @@ mod tests {
                 .is_err()
         );
         fs::remove_file(collision).unwrap();
-        let events = storage.local_sync_events_after(0, 10).await.unwrap();
-        let segment = build_segment(&identity.device_id, &events).unwrap();
-        let encrypted = encrypt_segment(&segment, &key).unwrap();
-        let bytes = serialize_encrypted_segment(&encrypted).unwrap();
+        let prepared = prepare_sync_export(&storage, &key).await.unwrap();
         assert!(matches!(
-            publish_segment(&device_directory, &segment, &key, &bytes).unwrap(),
+            publish_segment(&device_directory, &prepared.segments[0], &key).unwrap(),
             PublishOutcome::Written
         ));
         let first = export_sync_directory(&storage, directory.path(), &key)

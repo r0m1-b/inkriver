@@ -22,6 +22,7 @@ getrandom = "0.4.3"
 html2text = "0.17.1"
 image = { version = "0.25.8", default-features = false, features = ["gif", "ico", "jpeg", "png", "webp"] }
 legible = "0.5.1"
+quick-xml = "0.41.0"
 reqwest = "0.13.4"
 resvg = { version = "0.45.1", default-features = false }
 scraper = "0.24.0"
