@@ -6,6 +6,8 @@ import type {
   Feed,
   Platform,
   RefreshReport,
+  PairingInvitation,
+  SyncPairingStatus,
 } from "./types";
 
 export interface InkRiverApi {
@@ -22,6 +24,21 @@ export interface InkRiverApi {
   addFeed(url: string, platform?: Platform): Promise<Feed>;
   setFeedActive(feedId: string, isActive: boolean): Promise<Feed>;
   deleteFeed(feedId: string): Promise<DeleteFeedResult>;
+  syncPairingStatus(): Promise<SyncPairingStatus>;
+  configureSyncGroup(
+    webdavBaseUrl: string,
+    webdavUsername: string,
+    webdavPassword: string,
+    deviceName: string,
+  ): Promise<SyncPairingStatus>;
+  pairingInvitation(): Promise<PairingInvitation>;
+  joinSyncGroup(
+    invitation: string,
+    webdavPassword: string,
+    deviceName: string,
+  ): Promise<SyncPairingStatus>;
+  renameSyncDevice(deviceId: string, displayName: string): Promise<SyncPairingStatus>;
+  revokeSyncDevice(deviceId: string): Promise<SyncPairingStatus>;
 }
 
 export const tauriApi: InkRiverApi = {
@@ -42,4 +59,18 @@ export const tauriApi: InkRiverApi = {
   setFeedActive: (feedId, isActive) =>
     invoke("set_feed_active", { feedId, isActive }),
   deleteFeed: (feedId) => invoke("delete_feed", { feedId }),
+  syncPairingStatus: () => invoke("sync_pairing_status"),
+  configureSyncGroup: (webdavBaseUrl, webdavUsername, webdavPassword, deviceName) =>
+    invoke("configure_sync_group", {
+      webdavBaseUrl,
+      webdavUsername,
+      webdavPassword,
+      deviceName,
+    }),
+  pairingInvitation: () => invoke("pairing_invitation"),
+  joinSyncGroup: (invitation, webdavPassword, deviceName) =>
+    invoke("join_sync_group", { invitation, webdavPassword, deviceName }),
+  renameSyncDevice: (deviceId, displayName) =>
+    invoke("rename_sync_device", { deviceId, displayName }),
+  revokeSyncDevice: (deviceId) => invoke("revoke_sync_device", { deviceId }),
 };

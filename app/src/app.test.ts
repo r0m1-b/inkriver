@@ -104,6 +104,45 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
     addFeed: vi.fn(async () => structuredClone(feed)),
     setFeedActive: vi.fn(async () => structuredClone(feed)),
     deleteFeed: vi.fn(async () => ({ feedId: feed.id, deletedArticles: 1 })),
+    syncPairingStatus: vi.fn(async () => ({
+      configured: false,
+      webdavBaseUrl: null,
+      webdavUsername: null,
+      keyId: null,
+      devices: [],
+    })),
+    configureSyncGroup: vi.fn(async () => ({
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [{ deviceId: "linux", displayName: "Linux", isLocal: true, revokedAt: null }],
+    })),
+    pairingInvitation: vi.fn(async () => ({
+      invitation: "inkriver://pair/example",
+      qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+    })),
+    joinSyncGroup: vi.fn(async () => ({
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [{ deviceId: "android", displayName: "Android", isLocal: true, revokedAt: null }],
+    })),
+    renameSyncDevice: vi.fn(async () => ({
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [{ deviceId: "linux", displayName: "Portable", isLocal: true, revokedAt: null }],
+    })),
+    revokeSyncDevice: vi.fn(async () => ({
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [{ deviceId: "android", displayName: "Android", isLocal: false, revokedAt: "2026-08-28T10:00:00Z" }],
+    })),
     ...overrides,
   };
 }
@@ -159,10 +198,11 @@ async function mounted(
   api = fakeApi(),
   opener = vi.fn(async () => undefined),
   confirmer = vi.fn(() => true),
+  scanner: (() => Promise<string>) | null = null,
 ) {
   document.body.innerHTML = '<div id="app"></div>';
   const root = document.querySelector<HTMLElement>("#app")!;
-  const app = new InkRiverApp(root, api, opener, confirmer);
+  const app = new InkRiverApp(root, api, opener, confirmer, scanner);
   const initialization = app.init();
   expect(root.querySelector('[data-testid="loading"]')).not.toBeNull();
   await initialization;
@@ -2575,6 +2615,97 @@ describe("InkRiverApp", () => {
     expect(mountedApp.root.querySelector('[role="alert"]')?.textContent).toContain(
       "Navigateur indisponible",
     );
+  });
+  it("configures a first synchronization group from subscription management", async () => {
+    const api = fakeApi();
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    expect(root.querySelector("#configure-sync-form")).not.toBeNull();
+    const form = root.querySelector<HTMLFormElement>("#configure-sync-form")!;
+    form.querySelector<HTMLInputElement>('[name="webdavBaseUrl"]')!.value =
+      "https://cloud.example/dav/inkriver";
+    form.querySelector<HTMLInputElement>('[name="webdavUsername"]')!.value = "alice";
+    form.querySelector<HTMLInputElement>('[name="webdavPassword"]')!.value = "secret";
+    form.querySelector<HTMLInputElement>('[name="deviceName"]')!.value = "Linux";
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flush();
+
+    expect(api.configureSyncGroup).toHaveBeenCalledWith(
+      "https://cloud.example/dav/inkriver",
+      "alice",
+      "secret",
+      "Linux",
+    );
+    expect(root.textContent).toContain("Serveur WebDAV");
+    expect(root.querySelector<HTMLInputElement>('[data-sync-device-form] input')?.value).toBe(
+      "Linux",
+    );
+  });
+
+  it("scans an invitation on mobile and joins without putting the WebDAV password in the QR", async () => {
+    const scanner = vi.fn(async () => "inkriver://pair/scanned-invitation");
+    const api = fakeApi();
+    const { root } = await mounted(api, undefined, undefined, scanner);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="scan-pairing-code"]')!.click();
+    await flush();
+    const form = root.querySelector<HTMLFormElement>("#join-sync-form")!;
+    expect(form.querySelector<HTMLTextAreaElement>('[name="invitation"]')!.value).toBe(
+      "inkriver://pair/scanned-invitation",
+    );
+    form.querySelector<HTMLInputElement>('[name="webdavPassword"]')!.value = "separate-secret";
+    form.querySelector<HTMLInputElement>('[name="deviceName"]')!.value = "Android";
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flush();
+
+    expect(scanner).toHaveBeenCalledOnce();
+    expect(api.joinSyncGroup).toHaveBeenCalledWith(
+      "inkriver://pair/scanned-invitation",
+      "separate-secret",
+      "Android",
+    );
+    expect(root.querySelector<HTMLInputElement>('[data-sync-device-form] input')?.value).toBe(
+      "Android",
+    );
+  });
+
+  it("displays a confidential pairing QR and manages synchronized devices", async () => {
+    const configured = {
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [
+        { deviceId: "linux", displayName: "Linux", isLocal: true, revokedAt: null },
+        { deviceId: "phone", displayName: "Téléphone", isLocal: false, revokedAt: null },
+      ],
+    };
+    const api = fakeApi({ syncPairingStatus: vi.fn(async () => configured) });
+    const confirmer = vi.fn(() => true);
+    const { root } = await mounted(api, undefined, confirmer);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="create-pairing-invitation"]')!.click();
+    await flush();
+    expect(api.pairingInvitation).toHaveBeenCalledOnce();
+    expect(root.querySelector<HTMLImageElement>('.pairing-invitation img')?.src).toContain(
+      "data:image/svg+xml;base64,",
+    );
+    expect(root.textContent).toContain("contient la clé de chiffrement");
+    expect(root.textContent).not.toContain("separate-secret");
+
+    root.querySelector<HTMLElement>('[data-action="revoke-sync-device"]')!.click();
+    await flush();
+    expect(confirmer).toHaveBeenCalledWith(expect.stringContaining("Téléphone"));
+    expect(api.revokeSyncDevice).toHaveBeenCalledWith("phone");
   });
 });
 

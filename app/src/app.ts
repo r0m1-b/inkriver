@@ -4,12 +4,15 @@ import type {
   ArticleDetail,
   ArticleSummary,
   Feed,
+  PairingInvitation,
   Platform,
   RefreshReport,
+  SyncPairingStatus,
 } from "./types";
 
 type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmAction = (message: string) => boolean;
+type ScanPairingCode = () => Promise<string>;
 type ArticleView = "all" | "favorites" | "unread";
 type MainView = "articles" | "feeds";
 type MobileArticleScreen = "timeline" | "reader";
@@ -295,6 +298,12 @@ export class InkRiverApp {
   private readonly updatingReadArticleIds = new Set<string>();
   private readonly updatingFavoriteArticleIds = new Set<string>();
   private addSubscriptionOpen = false;
+  private syncDialogOpen = false;
+  private syncPairingStatus: SyncPairingStatus | null = null;
+  private syncInvitation: PairingInvitation | null = null;
+  private pendingPairingInvitation = "";
+  private syncError: string | null = null;
+  private syncBusy = false;
   private deletingFeedId: string | null = null;
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
@@ -324,6 +333,7 @@ export class InkRiverApp {
     private readonly api: InkRiverApi,
     private readonly openOriginal: OpenOriginal,
     private readonly confirmAction: ConfirmAction,
+    private readonly scanPairingCode: ScanPairingCode | null = null,
   ) {
     let preferenceStorage: PreferenceStorage | null = null;
     try {
@@ -1335,6 +1345,10 @@ export class InkRiverApp {
       this.render();
       return true;
     }
+    if (this.syncDialogOpen) {
+      this.closeSyncDialog();
+      return true;
+    }
     if (this.selectedArticleIds.size > 0) {
       this.clearArticleSelection();
       this.render();
@@ -1416,7 +1430,214 @@ export class InkRiverApp {
           )
           .join("")
       : '<div class="state" data-testid="feeds-empty">Aucun abonnement.<button class="text-button" data-action="add-subscription">Ajouter un abonnement</button></div>';
-    return `<section class="feed-management" data-testid="feed-management"><header><div><span class="eyebrow">Sources</span><h1>Gestion des abonnements</h1><p>Consultez l’état des flux et leur dernier rafraîchissement.</p></div><button class="primary" data-action="add-subscription">Ajouter un abonnement</button></header><div class="feed-grid">${feeds}</div></section>`;
+    return `<section class="feed-management" data-testid="feed-management"><header><div><span class="eyebrow">Sources</span><h1>Gestion des abonnements</h1><p>Consultez l’état des flux et leur dernier rafraîchissement.</p></div><div class="feed-management-actions"><button data-action="open-sync">Synchronisation</button><button class="primary" data-action="add-subscription">Ajouter un abonnement</button></div></header><div class="feed-grid">${feeds}</div></section>`;
+  }
+
+  private renderSyncDialog(): string {
+    if (!this.syncDialogOpen) return "";
+    const status = this.syncPairingStatus;
+    const loading = status === null && this.syncBusy;
+    let content: string;
+
+    if (loading) {
+      content = '<div class="state" data-testid="sync-loading">Chargement de la configuration…</div>';
+    } else if (status?.configured) {
+      const devices = status.devices.length
+        ? status.devices.map((device) => {
+            const revoked = device.revokedAt !== null;
+            return `<li class="sync-device${revoked ? " revoked" : ""}">
+              <form data-sync-device-form data-device-id="${escapeHtml(device.deviceId)}">
+                <label><span>${device.isLocal ? "Cet appareil" : "Appareil"}${revoked ? " · révoqué" : ""}</span><input name="displayName" required maxlength="80" value="${escapeHtml(device.displayName)}" ${revoked || this.syncBusy ? "disabled" : ""}></label>
+                <button type="submit" ${revoked || this.syncBusy ? "disabled" : ""}>Renommer</button>
+                ${!device.isLocal && !revoked ? `<button type="button" class="danger" data-action="revoke-sync-device" data-device-id="${escapeHtml(device.deviceId)}" data-device-name="${escapeHtml(device.displayName)}" ${this.syncBusy ? "disabled" : ""}>Révoquer</button>` : ""}
+              </form>
+            </li>`;
+          }).join("")
+        : '<li class="state">Aucun appareil enregistré.</li>';
+      const invitation = this.syncInvitation
+        ? `<section class="pairing-invitation" data-testid="pairing-invitation">
+            <p class="sync-warning"><strong>Confidentiel :</strong> ce QR code contient la clé de chiffrement du groupe. Ne le partagez qu’avec un appareil de confiance.</p>
+            <img src="${escapeHtml(this.syncInvitation.qrCodeDataUrl)}" alt="QR code d’appairage InkRiver">
+            <label>Invitation manuelle<textarea readonly rows="4">${escapeHtml(this.syncInvitation.invitation)}</textarea></label>
+          </section>`
+        : "";
+      content = `<div class="sync-status">
+          <dl><div><dt>Serveur WebDAV</dt><dd>${escapeHtml(status.webdavBaseUrl ?? "Inconnu")}</dd></div><div><dt>Utilisateur</dt><dd>${escapeHtml(status.webdavUsername ?? "Inconnu")}</dd></div><div><dt>Empreinte de clé</dt><dd><code>${escapeHtml(status.keyId ?? "Inconnue")}</code></dd></div></dl>
+          <button type="button" class="primary" data-action="create-pairing-invitation" ${this.syncBusy ? "disabled" : ""}>${this.syncInvitation ? "Renouveler le QR d’appairage" : "Afficher le QR d’appairage"}</button>
+          ${invitation}
+          <section class="sync-devices"><h3>Appareils</h3><ul>${devices}</ul></section>
+        </div>`;
+    } else {
+      const scanButton = this.scanPairingCode
+        ? '<button type="button" data-action="scan-pairing-code">Scanner le QR code</button>'
+        : "";
+      content = `<div class="sync-onboarding">
+        <section><h3>Créer un groupe de synchronisation</h3><p>Configurez le serveur depuis ce premier appareil.</p>
+          <form id="configure-sync-form" class="sync-form">
+            <label>URL WebDAV<input name="webdavBaseUrl" type="url" required placeholder="https://cloud.example/remote.php/dav/files/user/inkriver"></label>
+            <label>Utilisateur WebDAV<input name="webdavUsername" required autocomplete="username"></label>
+            <label>Mot de passe WebDAV<input name="webdavPassword" type="password" required autocomplete="current-password"></label>
+            <label>Nom de cet appareil<input name="deviceName" required maxlength="80" placeholder="Ordinateur Linux"></label>
+            <button type="submit" class="primary" ${this.syncBusy ? "disabled" : ""}>Créer le groupe</button>
+          </form>
+        </section>
+        <div class="sync-divider"><span>ou</span></div>
+        <section><h3>Rejoindre un groupe existant</h3><p>Scannez le QR code affiché sur l’autre appareil ou collez l’invitation.</p>
+          ${scanButton}
+          <form id="join-sync-form" class="sync-form">
+            <label>Invitation InkRiver<textarea name="invitation" required rows="4" placeholder="inkriver://pair/…">${escapeHtml(this.pendingPairingInvitation)}</textarea></label>
+            <label>Mot de passe WebDAV<input name="webdavPassword" type="password" required autocomplete="current-password"></label>
+            <label>Nom de cet appareil<input name="deviceName" required maxlength="80" placeholder="Téléphone Android"></label>
+            <button type="submit" class="primary" ${this.syncBusy ? "disabled" : ""}>Rejoindre le groupe</button>
+          </form>
+        </section>
+      </div>`;
+    }
+
+    return `<div class="modal-backdrop sync-backdrop" data-action="close-sync-backdrop"><section class="subscriptions sync-dialog" role="dialog" aria-modal="true" aria-labelledby="sync-dialog-title">
+      <header><div><span class="eyebrow">Appareils</span><h2 id="sync-dialog-title">Synchronisation</h2></div><button type="button" class="icon-button" data-action="close-sync" aria-label="Fermer">×</button></header>
+      ${this.syncError ? `<div class="sync-error" role="alert">${escapeHtml(this.syncError)}</div>` : ""}
+      ${content}
+    </section></div>`;
+  }
+
+  private async openSyncDialog(): Promise<void> {
+    this.syncDialogOpen = true;
+    this.syncPairingStatus = null;
+    this.syncInvitation = null;
+    this.syncError = null;
+    this.syncBusy = true;
+    this.render();
+    try {
+      this.syncPairingStatus = await this.api.syncPairingStatus();
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private closeSyncDialog(): void {
+    this.syncDialogOpen = false;
+    this.syncInvitation = null;
+    this.pendingPairingInvitation = "";
+    this.syncError = null;
+    this.render();
+  }
+
+  private async configureSyncGroup(form: HTMLFormElement): Promise<void> {
+    if (this.syncBusy) return;
+    const values = new FormData(form);
+    this.syncBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      this.syncPairingStatus = await this.api.configureSyncGroup(
+        String(values.get("webdavBaseUrl") ?? ""),
+        String(values.get("webdavUsername") ?? ""),
+        String(values.get("webdavPassword") ?? ""),
+        String(values.get("deviceName") ?? ""),
+      );
+      this.showNotice("Groupe de synchronisation créé.");
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async joinSyncGroup(form: HTMLFormElement): Promise<void> {
+    if (this.syncBusy) return;
+    const values = new FormData(form);
+    const invitation = String(values.get("invitation") ?? "").trim();
+    this.pendingPairingInvitation = invitation;
+    this.syncBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      this.syncPairingStatus = await this.api.joinSyncGroup(
+        invitation,
+        String(values.get("webdavPassword") ?? ""),
+        String(values.get("deviceName") ?? ""),
+      );
+      this.pendingPairingInvitation = "";
+      this.showNotice("Cet appareil a rejoint le groupe de synchronisation.");
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async scanSyncInvitation(): Promise<void> {
+    if (!this.scanPairingCode || this.syncBusy) return;
+    this.syncBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      this.pendingPairingInvitation = await this.scanPairingCode();
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+      this.root.querySelector<HTMLTextAreaElement>('#join-sync-form textarea[name="invitation"]')?.focus();
+    }
+  }
+
+  private async createPairingInvitation(): Promise<void> {
+    if (this.syncBusy) return;
+    this.syncBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      this.syncInvitation = await this.api.pairingInvitation();
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async renameSyncDevice(form: HTMLFormElement): Promise<void> {
+    if (this.syncBusy) return;
+    this.syncBusy = true;
+    this.syncError = null;
+    const deviceId = form.dataset.deviceId ?? "";
+    const displayName = String(new FormData(form).get("displayName") ?? "");
+    this.render();
+    try {
+      this.syncPairingStatus = await this.api.renameSyncDevice(deviceId, displayName);
+      this.showNotice("Nom de l’appareil mis à jour.");
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async revokeSyncDevice(deviceId: string, displayName: string): Promise<void> {
+    if (
+      this.syncBusy ||
+      !this.confirmAction(`Révoquer l’appareil « ${displayName} » ? Ses futurs segments seront ignorés sur cet appareil.`)
+    ) return;
+    this.syncBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      this.syncPairingStatus = await this.api.revokeSyncDevice(deviceId);
+      this.showNotice("Appareil révoqué localement.");
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
   }
 
   private renderAddSubscription(): string {
@@ -1475,6 +1696,7 @@ export class InkRiverApp {
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span class="notice-content" role="${this.noticeKind === "error" ? "alert" : "status"}">${this.noticeHasCheck ? `<span class="notice-check" aria-hidden="true">${checkIcon()}</span>` : ""}<span>${escapeHtml(this.notice)}</span></span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
       <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}${this.renderMobileReaderNavigation()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
+      ${this.renderSyncDialog()}
       ${this.renderArchiveConfirmation()}
       ${this.pullRefreshing ? '<div class="app-interaction-lock" data-app-interaction-lock aria-hidden="true"></div>' : ""}
     </div>`;
@@ -1638,6 +1860,50 @@ export class InkRiverApp {
       element.addEventListener("click", () => {
         this.addSubscriptionOpen = true;
         this.render();
+      });
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="open-sync"]').forEach((element) => {
+      element.addEventListener("click", () => void this.openSyncDialog());
+    });
+    this.root.querySelector<HTMLElement>('[data-action="close-sync"]')?.addEventListener("click", () => {
+      this.closeSyncDialog();
+    });
+    this.root.querySelector<HTMLElement>('[data-action="close-sync-backdrop"]')?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) this.closeSyncDialog();
+    });
+    const syncDialog = this.root.querySelector<HTMLElement>(".sync-dialog");
+    syncDialog?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeSyncDialog();
+      }
+    });
+    this.root.querySelector<HTMLFormElement>("#configure-sync-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void this.configureSyncGroup(event.currentTarget as HTMLFormElement);
+    });
+    this.root.querySelector<HTMLFormElement>("#join-sync-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void this.joinSyncGroup(event.currentTarget as HTMLFormElement);
+    });
+    this.root.querySelector<HTMLElement>('[data-action="scan-pairing-code"]')?.addEventListener("click", () => {
+      void this.scanSyncInvitation();
+    });
+    this.root.querySelector<HTMLElement>('[data-action="create-pairing-invitation"]')?.addEventListener("click", () => {
+      void this.createPairingInvitation();
+    });
+    this.root.querySelectorAll<HTMLFormElement>("[data-sync-device-form]").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        void this.renameSyncDevice(event.currentTarget as HTMLFormElement);
+      });
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-action="revoke-sync-device"]').forEach((element) => {
+      element.addEventListener("click", () => {
+        void this.revokeSyncDevice(
+          element.dataset.deviceId ?? "",
+          element.dataset.deviceName ?? "cet appareil",
+        );
       });
     });
     this.root.querySelector<HTMLElement>('[data-action="close-add-subscription"]')?.addEventListener("click", () => {

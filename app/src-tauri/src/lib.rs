@@ -3,7 +3,13 @@ use inkriver::config::Platform;
 use inkriver::refresh::{self, RefreshReport};
 use inkriver::storage::{
     ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, SubscriptionError,
+    SyncDevice,
 };
+use inkriver::sync_pairing::{
+    accept_pairing_invitation, configure_new_sync_group, create_pairing_invitation,
+    encode_pairing_invitation, render_pairing_qr_svg,
+};
+use inkriver::sync_secrets::{PlatformSyncSecretStore, SyncSecretStore};
 use serde::Serialize;
 use std::path::Path;
 use tauri::{Manager, State};
@@ -122,6 +128,43 @@ pub struct StoredFeedErrorDto {
     pub stage: String,
     pub message: String,
     pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncDeviceDto {
+    pub device_id: String,
+    pub display_name: String,
+    pub is_local: bool,
+    pub revoked_at: Option<String>,
+}
+
+impl From<SyncDevice> for SyncDeviceDto {
+    fn from(device: SyncDevice) -> Self {
+        Self {
+            device_id: device.device_id,
+            display_name: device.display_name,
+            is_local: device.is_local,
+            revoked_at: device.revoked_at.map(|date| date.to_rfc3339()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPairingStatusDto {
+    pub configured: bool,
+    pub webdav_base_url: Option<String>,
+    pub webdav_username: Option<String>,
+    pub key_id: Option<String>,
+    pub devices: Vec<SyncDeviceDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingInvitationDto {
+    pub invitation: String,
+    pub qr_code_data_url: String,
 }
 
 impl From<StoredFeed> for FeedDto {
@@ -444,6 +487,117 @@ async fn delete_feed_from(
         .map_err(subscription_error)
 }
 
+async fn sync_pairing_status_from(storage: &Storage) -> Result<SyncPairingStatusDto, ApiError> {
+    let configuration = storage
+        .sync_configuration()
+        .await
+        .map_err(ApiError::storage)?;
+    let devices = storage
+        .list_sync_devices()
+        .await
+        .map_err(ApiError::storage)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(match configuration {
+        Some(configuration) => SyncPairingStatusDto {
+            configured: true,
+            webdav_base_url: Some(configuration.webdav_base_url),
+            webdav_username: Some(configuration.webdav_username),
+            key_id: Some(configuration.key_id),
+            devices,
+        },
+        None => SyncPairingStatusDto {
+            configured: false,
+            webdav_base_url: None,
+            webdav_username: None,
+            key_id: None,
+            devices,
+        },
+    })
+}
+
+fn pairing_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    let code = if message.contains("existe déjà") {
+        "sync_already_configured"
+    } else if message.contains("appairage") || message.contains("invitation") {
+        "invalid_pairing"
+    } else if message.contains("coffre")
+        || message.contains("Secret Service")
+        || message.contains("Keystore")
+    {
+        "secret_store"
+    } else {
+        "sync_pairing"
+    };
+    ApiError::new(code, message)
+}
+
+fn platform_secret_store() -> Result<PlatformSyncSecretStore, ApiError> {
+    PlatformSyncSecretStore::initialize().map_err(pairing_error)
+}
+
+async fn configure_sync_group_with<S: SyncSecretStore>(
+    storage: &Storage,
+    secret_store: &S,
+    webdav_base_url: &str,
+    webdav_username: &str,
+    webdav_password: String,
+    device_name: &str,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    configure_new_sync_group(
+        storage,
+        secret_store,
+        webdav_base_url,
+        webdav_username,
+        webdav_password,
+        device_name,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(pairing_error)?;
+    sync_pairing_status_from(storage).await
+}
+
+async fn create_pairing_invitation_with<S: SyncSecretStore>(
+    storage: &Storage,
+    secret_store: &S,
+) -> Result<PairingInvitationDto, ApiError> {
+    let invitation = create_pairing_invitation(storage, secret_store)
+        .await
+        .map_err(pairing_error)?;
+    let encoded = encode_pairing_invitation(&invitation).map_err(pairing_error)?;
+    let svg = render_pairing_qr_svg(&encoded).map_err(pairing_error)?;
+    Ok(PairingInvitationDto {
+        invitation: encoded,
+        qr_code_data_url: format!(
+            "data:image/svg+xml;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(svg)
+        ),
+    })
+}
+
+async fn accept_pairing_invitation_with<S: SyncSecretStore>(
+    storage: &Storage,
+    secret_store: &S,
+    invitation: &str,
+    webdav_password: String,
+    device_name: &str,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    accept_pairing_invitation(
+        storage,
+        secret_store,
+        invitation,
+        webdav_password,
+        device_name,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(pairing_error)?;
+    sync_pairing_status_from(storage).await
+}
+
 #[tauri::command]
 async fn list_articles(state: State<'_, AppState>) -> Result<Vec<ArticleSummaryDto>, ApiError> {
     list_articles_from(&state.storage).await
@@ -546,6 +700,94 @@ async fn delete_feed(
     delete_feed_from(&state.storage, &feed_id).await
 }
 
+#[tauri::command]
+async fn sync_pairing_status(state: State<'_, AppState>) -> Result<SyncPairingStatusDto, ApiError> {
+    sync_pairing_status_from(&state.storage).await
+}
+
+#[tauri::command]
+async fn configure_sync_group(
+    state: State<'_, AppState>,
+    webdav_base_url: String,
+    webdav_username: String,
+    webdav_password: String,
+    device_name: String,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    let secret_store = platform_secret_store()?;
+    configure_sync_group_with(
+        &state.storage,
+        &secret_store,
+        &webdav_base_url,
+        &webdav_username,
+        webdav_password,
+        &device_name,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn pairing_invitation(state: State<'_, AppState>) -> Result<PairingInvitationDto, ApiError> {
+    let secret_store = platform_secret_store()?;
+    create_pairing_invitation_with(&state.storage, &secret_store).await
+}
+
+#[tauri::command]
+async fn join_sync_group(
+    state: State<'_, AppState>,
+    invitation: String,
+    webdav_password: String,
+    device_name: String,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    let secret_store = platform_secret_store()?;
+    accept_pairing_invitation_with(
+        &state.storage,
+        &secret_store,
+        &invitation,
+        webdav_password,
+        &device_name,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn rename_sync_device(
+    state: State<'_, AppState>,
+    device_id: String,
+    display_name: String,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    if !state
+        .storage
+        .rename_sync_device(&device_id, &display_name, chrono::Utc::now())
+        .await
+        .map_err(ApiError::storage)?
+    {
+        return Err(ApiError::new(
+            "sync_device_not_found",
+            "Appareil de synchronisation introuvable",
+        ));
+    }
+    sync_pairing_status_from(&state.storage).await
+}
+
+#[tauri::command]
+async fn revoke_sync_device(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    if !state
+        .storage
+        .revoke_sync_device(&device_id, chrono::Utc::now())
+        .await
+        .map_err(ApiError::storage)?
+    {
+        return Err(ApiError::new(
+            "sync_device_not_revocable",
+            "Cet appareil est local, introuvable ou déjà révoqué",
+        ));
+    }
+    sync_pairing_status_from(&state.storage).await
+}
+
 fn open_storage(database_path: &Path) -> Result<Storage, Box<dyn std::error::Error>> {
     let storage = tauri::async_runtime::block_on(Storage::open(database_path))?;
     tauri::async_runtime::block_on(storage.apply_article_retention())?;
@@ -554,8 +796,10 @@ fn open_storage(database_path: &Path) -> Result<Storage, Box<dyn std::error::Err
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    builder
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
@@ -580,6 +824,12 @@ pub fn run() {
             add_feed,
             set_feed_active,
             delete_feed,
+            sync_pairing_status,
+            configure_sync_group,
+            pairing_invitation,
+            join_sync_group,
+            rename_sync_device,
+            revoke_sync_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InkRiver");
@@ -593,6 +843,27 @@ mod tests {
     use inkriver::config::FeedConfig;
     use inkriver::feed::FeedMetadata;
     use inkriver::storage::FeedRefreshFailure;
+    use inkriver::sync_secrets::SyncSecrets;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct MemorySecretStore(StdMutex<Option<SyncSecrets>>);
+
+    impl SyncSecretStore for MemorySecretStore {
+        fn save(&self, secrets: &SyncSecrets) -> anyhow::Result<()> {
+            *self.0.lock().unwrap() = Some(secrets.clone());
+            Ok(())
+        }
+
+        fn load(&self) -> anyhow::Result<Option<SyncSecrets>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn delete(&self) -> anyhow::Result<()> {
+            self.0.lock().unwrap().take();
+            Ok(())
+        }
+    }
 
     async fn test_storage() -> (tempfile::TempDir, Storage) {
         let directory = tempfile::tempdir().unwrap();
@@ -627,6 +898,56 @@ mod tests {
             .await
             .unwrap();
         (directory, storage)
+    }
+
+    #[tokio::test]
+    async fn pairing_adapters_configure_invite_and_join_without_webdav_secret_in_qr() {
+        let (_linux_directory, linux) = test_storage().await;
+        let linux_secrets = MemorySecretStore::default();
+        let initial = sync_pairing_status_from(&linux).await.unwrap();
+        assert!(!initial.configured);
+
+        let configured = configure_sync_group_with(
+            &linux,
+            &linux_secrets,
+            "https://cloud.example/dav/inkriver",
+            "alice",
+            "webdav-secret".to_string(),
+            "Linux",
+        )
+        .await
+        .unwrap();
+        assert!(configured.configured);
+        assert_eq!(configured.devices.len(), 1);
+        assert!(configured.devices[0].is_local);
+
+        let invitation = create_pairing_invitation_with(&linux, &linux_secrets)
+            .await
+            .unwrap();
+        assert!(invitation.invitation.starts_with("inkriver://pair/"));
+        assert!(!invitation.invitation.contains("webdav-secret"));
+        assert!(
+            invitation
+                .qr_code_data_url
+                .starts_with("data:image/svg+xml;base64,")
+        );
+
+        let (_android_directory, android) = test_storage().await;
+        let android_secrets = MemorySecretStore::default();
+        let joined = accept_pairing_invitation_with(
+            &android,
+            &android_secrets,
+            &invitation.invitation,
+            "webdav-secret".to_string(),
+            "Android",
+        )
+        .await
+        .unwrap();
+        assert!(joined.configured);
+        assert_eq!(joined.webdav_base_url, configured.webdav_base_url);
+        assert_eq!(joined.webdav_username.as_deref(), Some("alice"));
+        assert_eq!(joined.devices.len(), 2);
+        assert!(joined.devices.iter().any(|device| device.is_local));
     }
 
     #[test]

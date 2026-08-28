@@ -43,6 +43,8 @@ Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
 - extraction sécurisée des pages complètes pour les articles incomplets des
   autres flux ;
 - ouverture sécurisée de l'article original pour les extraits.
+- appairage des appareils Linux et Android par QR code, avec mot de passe
+  WebDAV demandé séparément et secrets conservés dans le coffre natif.
 
 ## Prérequis sous Ubuntu
 
@@ -608,9 +610,11 @@ app/src-tauri/   adaptation, commandes et configuration Tauri
 
 Le socle de synchronisation fournit désormais les segments immuables chiffrés,
 le transport WebDAV, le stockage natif des secrets et un format d'appairage
-versionné. Les écrans QR et synchronisation ne sont pas encore reliés à
-l'interface Tauri : la synchronisation de bout en bout n'est donc pas encore
-accessible à l'utilisateur. L'appairage exclut volontairement le mot de passe
+versionné. La boîte de dialogue **Synchronisation** de la gestion des
+abonnements permet de créer un groupe, d'afficher son QR code, de le rejoindre
+avec la caméra Android ou une invitation manuelle, puis de renommer ou révoquer
+logiquement les appareils. L'envoi et la réception effectifs des changements
+depuis l'interface restent réservés à la prochaine étape. L'appairage exclut volontairement le mot de passe
 WebDAV : le nouvel appareil importe par QR la clé de groupe et les réglages non
 secrets, puis demande ce mot de passe séparément. Le paquet obtenu est conservé
 dans Secret Service sous Linux et protégé par Android Keystore sous Android ;
@@ -627,8 +631,8 @@ et n'est plus digne de confiance, il faudra utiliser la future rotation de clé.
   pris en charge ;
 - les builds Android nécessitent encore un JDK, un SDK et un NDK configurés, et
   le processus de release signée n'est pas encore en place ;
-- la synchronisation ne possède pas encore d'écran de configuration ou
-  d'appairage ;
+- la synchronisation n'est pas encore exécutée depuis l'interface, même si la
+  configuration du groupe et l'appairage des appareils sont disponibles ;
 - `inkriver.db` du CLI se trouve encore dans le dépôt de développement.
 
 Dans chaque application installée, SQLite reste la source de vérité dans le

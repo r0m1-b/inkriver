@@ -192,6 +192,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 .feed-management > header { display: flex; align-items: start; justify-content: space-between; gap: 24px; max-width: 1180px; margin: 0 auto 28px; }
 .feed-management h1 { margin: 4px 0 8px; font: 700 clamp(30px, 4vw, 44px) Georgia, serif; }
 .feed-management header p { margin: 0; color: var(--muted); }
+.feed-management-actions { display: flex; flex: 0 0 auto; gap: 10px; }
 .feed-grid { display: grid; max-width: 1180px; margin: 0 auto; gap: 18px; }
 .feed-card { padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--paper) 96%, var(--wash)); box-shadow: 0 5px 18px rgb(3 29 59 / 6%); }
 .feed-card.inactive { opacity: .78; }
@@ -230,6 +231,30 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
 #feed-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
 #feed-form input, #feed-form select { width: 100%; padding: 10px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 7px; }
 .feed-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.sync-dialog { width: min(880px, 100%); }
+.sync-error { margin-bottom: 18px; padding: 12px 14px; color: #812c25; border: 1px solid #e9b8af; border-radius: 8px; background: #f8dfda; }
+.sync-onboarding { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 24px; }
+.sync-onboarding h3, .sync-devices h3 { margin: 0 0 6px; font: 700 21px/1.25 Georgia, serif; }
+.sync-onboarding section > p { min-height: 44px; margin: 0 0 16px; color: var(--muted); line-height: 1.45; }
+.sync-form { display: grid; gap: 13px; }
+.sync-form label, .pairing-invitation label, .sync-device label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.sync-form input, .sync-form textarea, .pairing-invitation textarea, .sync-device input { width: 100%; padding: 10px; color: var(--ink); border: 1px solid var(--line); border-radius: 7px; background: var(--paper); font: inherit; }
+.sync-form textarea, .pairing-invitation textarea { resize: vertical; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 11px; }
+.sync-divider { position: relative; width: 1px; background: var(--line); }
+.sync-divider span { position: absolute; top: 34px; left: 50%; padding: 6px; color: var(--muted); background: var(--paper); transform: translateX(-50%); font-size: 11px; text-transform: uppercase; }
+.sync-status > dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 20px; }
+.sync-status > dl > div { min-width: 0; padding: 12px; border-radius: 8px; background: var(--wash); }
+.sync-status dt { margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 750; text-transform: uppercase; }
+.sync-status dd { margin: 0; overflow-wrap: anywhere; }
+.pairing-invitation { display: grid; justify-items: center; gap: 15px; margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--wash); }
+.pairing-invitation img { width: min(320px, 100%); padding: 10px; border-radius: 8px; background: #fff; }
+.pairing-invitation label { width: 100%; }
+.sync-warning { margin: 0; color: var(--muted); line-height: 1.45; }
+.sync-devices { margin-top: 24px; }
+.sync-devices ul { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
+.sync-device { padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.sync-device.revoked { opacity: .65; }
+.sync-device form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; gap: 9px; }
 
 @media (prefers-color-scheme: dark) {
   :root { color: #eef4fa; background: #061426; --app-background: #061426; --paper: #0d2238; --ink: #eef4fa; --muted: #9babc0; --line: #294158; --accent: #ff7a2f; --accent-dark: #ff955f; --accent-ink: #031d3b; --favorite-action: #e3ad3d; --danger-action: #f07c72; --wash: #173049; --timeline-background: #091a2d; --topbar-ink: #f8fbff; --topbar-muted: #b9c7d7; }
@@ -242,6 +267,7 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .source-logo.other { color: #c9daeb; }
   .feed-status { color: #bfe0c2; background: #29462d; }
   .feed-error { color: #f1b4ad; border-color: #754841; background: #352724; }
+  .sync-error { color: #f1b4ad; border-color: #754841; background: #352724; }
   button.danger { color: #f0aaa3; border-color: #754841; background: #352724; }
   .confirmation-symbol { color: #f0aaa3; border-color: #754841; background: #352724; }
 }
@@ -375,6 +401,8 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
   .feed-management { padding: 24px 14px calc(44px + env(safe-area-inset-bottom)); }
   .feed-management > header { flex-direction: column; gap: 18px; margin-bottom: 22px; }
   .feed-management > header > button { width: 100%; }
+  .feed-management-actions { width: 100%; }
+  .feed-management-actions button { flex: 1; }
   .feed-management > header .eyebrow,
   .feed-management > header h1 { display: none; }
   .feed-management h1 { font-size: clamp(29px, 9vw, 38px); }
@@ -397,6 +425,13 @@ main { position: relative; min-height: 0; display: grid; grid-template-columns: 
     border-radius: 18px 18px 0 0;
   }
   .subscriptions h2, .confirmation-dialog h2 { font-size: 28px; }
+  .sync-onboarding { grid-template-columns: 1fr; }
+  .sync-onboarding section > p { min-height: 0; }
+  .sync-divider { width: 100%; height: 1px; margin: 2px 0; }
+  .sync-divider span { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+  .sync-status > dl { grid-template-columns: 1fr; }
+  .sync-device form { grid-template-columns: 1fr 1fr; }
+  .sync-device label { grid-column: 1 / -1; }
   #feed-form { grid-template-columns: 1fr; padding: 15px; }
   #feed-form input, #feed-form select { min-height: 44px; }
   .confirmation-actions { display: grid; grid-template-columns: 1fr 1fr; }

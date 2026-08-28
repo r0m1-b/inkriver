@@ -66,3 +66,23 @@ export interface ApiError {
   code: string;
   message: string;
 }
+
+export interface SyncDevice {
+  deviceId: string;
+  displayName: string;
+  isLocal: boolean;
+  revokedAt: string | null;
+}
+
+export interface SyncPairingStatus {
+  configured: boolean;
+  webdavBaseUrl: string | null;
+  webdavUsername: string | null;
+  keyId: string | null;
+  devices: SyncDevice[];
+}
+
+export interface PairingInvitation {
+  invitation: string;
+  qrCodeDataUrl: string;
+}

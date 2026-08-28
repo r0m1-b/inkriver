@@ -4,6 +4,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::sync::OnceLock;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const SECRET_SERVICE: &str = "io.github.r0m1-b.inkriver.sync";
@@ -84,20 +86,45 @@ fn decode_secrets(encoded: &[u8]) -> Result<SyncSecrets> {
 }
 
 /// Native credential store backed by Secret Service on Linux and Android Keystore on Android.
-#[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PlatformSyncSecretStore;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 impl PlatformSyncSecretStore {
     pub fn initialize() -> Result<Self> {
-        initialize_native_store()?;
-        Ok(Self)
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            static INITIALIZED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+            INITIALIZED
+                .get_or_init(|| initialize_native_store().map_err(|error| error.to_string()))
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!(message.clone()))?;
+            Ok(Self)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        bail!(
+            "Le coffre natif de synchronisation n'est pas encore pris en charge sur cette plateforme"
+        )
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn entry(&self) -> Result<keyring_core::Entry> {
         keyring_core::Entry::new(SECRET_SERVICE, SECRET_USER)
             .context("Impossible d'accéder au coffre de secrets InkRiver")
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+impl SyncSecretStore for PlatformSyncSecretStore {
+    fn save(&self, _secrets: &SyncSecrets) -> Result<()> {
+        bail!("Le coffre natif de synchronisation n'est pas disponible")
+    }
+
+    fn load(&self) -> Result<Option<SyncSecrets>> {
+        bail!("Le coffre natif de synchronisation n'est pas disponible")
+    }
+
+    fn delete(&self) -> Result<()> {
+        bail!("Le coffre natif de synchronisation n'est pas disponible")
     }
 }
 
