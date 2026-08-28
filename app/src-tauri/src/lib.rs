@@ -2,14 +2,16 @@ use base64::Engine;
 use inkriver::config::Platform;
 use inkriver::refresh::{self, RefreshReport};
 use inkriver::storage::{
-    ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, SubscriptionError,
-    SyncDevice,
+    ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, StoredSyncReport,
+    StoredSyncRuntimeError, SubscriptionError, SyncDevice,
 };
 use inkriver::sync_pairing::{
     accept_pairing_invitation, configure_new_sync_group, create_pairing_invitation,
     encode_pairing_invitation, render_pairing_qr_svg,
 };
+use inkriver::sync_runtime;
 use inkriver::sync_secrets::{PlatformSyncSecretStore, SyncSecretStore};
+use inkriver::sync_transport::SyncTransportReport;
 use serde::Serialize;
 use std::path::Path;
 use tauri::{Manager, State};
@@ -20,6 +22,7 @@ const DATABASE_FILE_NAME: &str = "inkriver.db";
 pub struct AppState {
     storage: Storage,
     refresh_lock: Mutex<()>,
+    sync_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -158,6 +161,28 @@ pub struct SyncPairingStatusDto {
     pub webdav_username: Option<String>,
     pub key_id: Option<String>,
     pub devices: Vec<SyncDeviceDto>,
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_error: Option<SyncRuntimeErrorDto>,
+    pub last_report: Option<SyncTransportReportDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRuntimeErrorDto {
+    pub stage: String,
+    pub message: String,
+    pub occurred_at: String,
+}
+
+impl From<StoredSyncRuntimeError> for SyncRuntimeErrorDto {
+    fn from(error: StoredSyncRuntimeError) -> Self {
+        Self {
+            stage: error.stage,
+            message: error.message,
+            occurred_at: error.occurred_at.to_rfc3339(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -165,6 +190,52 @@ pub struct SyncPairingStatusDto {
 pub struct PairingInvitationDto {
     pub invitation: String,
     pub qr_code_data_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTransportReportDto {
+    pub uploaded_segments: usize,
+    pub reused_segments: usize,
+    pub exported_events: usize,
+    pub downloaded_segments: usize,
+    pub received_events: usize,
+    pub imported_events: usize,
+    pub duplicate_events: usize,
+    pub applied_events: usize,
+    pub pending_events: usize,
+}
+
+impl From<SyncTransportReport> for SyncTransportReportDto {
+    fn from(report: SyncTransportReport) -> Self {
+        Self {
+            uploaded_segments: report.uploaded_segments,
+            reused_segments: report.reused_segments,
+            exported_events: report.exported_events,
+            downloaded_segments: report.downloaded_segments,
+            received_events: report.received_events,
+            imported_events: report.imported_events,
+            duplicate_events: report.duplicate_events,
+            applied_events: report.applied_events,
+            pending_events: report.pending_events,
+        }
+    }
+}
+
+impl From<StoredSyncReport> for SyncTransportReportDto {
+    fn from(report: StoredSyncReport) -> Self {
+        Self {
+            uploaded_segments: report.uploaded_segments,
+            reused_segments: report.reused_segments,
+            exported_events: report.exported_events,
+            downloaded_segments: report.downloaded_segments,
+            received_events: report.received_events,
+            imported_events: report.imported_events,
+            duplicate_events: report.duplicate_events,
+            applied_events: report.applied_events,
+            pending_events: report.pending_events,
+        }
+    }
 }
 
 impl From<StoredFeed> for FeedDto {
@@ -499,6 +570,14 @@ async fn sync_pairing_status_from(storage: &Storage) -> Result<SyncPairingStatus
         .into_iter()
         .map(Into::into)
         .collect();
+    let runtime = storage
+        .sync_runtime_status()
+        .await
+        .map_err(ApiError::storage)?;
+    let last_attempt_at = runtime.last_attempt_at.map(|date| date.to_rfc3339());
+    let last_success_at = runtime.last_success_at.map(|date| date.to_rfc3339());
+    let last_error = runtime.last_error.map(Into::into);
+    let last_report = runtime.last_report.map(Into::into);
     Ok(match configuration {
         Some(configuration) => SyncPairingStatusDto {
             configured: true,
@@ -506,6 +585,10 @@ async fn sync_pairing_status_from(storage: &Storage) -> Result<SyncPairingStatus
             webdav_username: Some(configuration.webdav_username),
             key_id: Some(configuration.key_id),
             devices,
+            last_attempt_at,
+            last_success_at,
+            last_error,
+            last_report,
         },
         None => SyncPairingStatusDto {
             configured: false,
@@ -513,6 +596,10 @@ async fn sync_pairing_status_from(storage: &Storage) -> Result<SyncPairingStatus
             webdav_username: None,
             key_id: None,
             devices,
+            last_attempt_at,
+            last_success_at,
+            last_error,
+            last_report,
         },
     })
 }
@@ -536,6 +623,36 @@ fn pairing_error(error: anyhow::Error) -> ApiError {
 
 fn platform_secret_store() -> Result<PlatformSyncSecretStore, ApiError> {
     PlatformSyncSecretStore::initialize().map_err(pairing_error)
+}
+
+fn sync_runtime_error(error: anyhow::Error) -> ApiError {
+    let message = format!("{error:#}");
+    let code = if message.contains("n'est pas configurée") {
+        "sync_not_configured"
+    } else if message.contains("secrets")
+        || message.contains("clé sécurisée")
+        || message.contains("coffre")
+    {
+        "sync_secrets"
+    } else {
+        "sync_failed"
+    };
+    ApiError::new(code, message)
+}
+
+async fn delete_sync_configuration_with<S: SyncSecretStore>(
+    storage: &Storage,
+    secret_store: &S,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    sync_runtime::remove_sync_configuration(storage, secret_store)
+        .await
+        .map_err(sync_runtime_error)?;
+    sync_pairing_status_from(storage).await
+}
+
+fn acquire_sync_lock(lock: &Mutex<()>) -> Result<MutexGuard<'_, ()>, ApiError> {
+    lock.try_lock()
+        .map_err(|_| ApiError::new("sync_in_progress", "Une synchronisation est déjà en cours."))
 }
 
 async fn configure_sync_group_with<S: SyncSecretStore>(
@@ -788,6 +905,25 @@ async fn revoke_sync_device(
     sync_pairing_status_from(&state.storage).await
 }
 
+#[tauri::command]
+async fn synchronize_now(state: State<'_, AppState>) -> Result<SyncTransportReportDto, ApiError> {
+    let _guard = acquire_sync_lock(&state.sync_lock)?;
+    let secret_store = platform_secret_store()?;
+    sync_runtime::synchronize_configured(&state.storage, &secret_store, chrono::Utc::now())
+        .await
+        .map(Into::into)
+        .map_err(sync_runtime_error)
+}
+
+#[tauri::command]
+async fn delete_sync_configuration(
+    state: State<'_, AppState>,
+) -> Result<SyncPairingStatusDto, ApiError> {
+    let _guard = acquire_sync_lock(&state.sync_lock)?;
+    let secret_store = platform_secret_store()?;
+    delete_sync_configuration_with(&state.storage, &secret_store).await
+}
+
 fn open_storage(database_path: &Path) -> Result<Storage, Box<dyn std::error::Error>> {
     let storage = tauri::async_runtime::block_on(Storage::open(database_path))?;
     tauri::async_runtime::block_on(storage.apply_article_retention())?;
@@ -807,6 +943,7 @@ pub fn run() {
             app.manage(AppState {
                 storage,
                 refresh_lock: Mutex::new(()),
+                sync_lock: Mutex::new(()),
             });
             Ok(())
         })
@@ -830,6 +967,8 @@ pub fn run() {
             join_sync_group,
             rename_sync_device,
             revoke_sync_device,
+            synchronize_now,
+            delete_sync_configuration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InkRiver");
@@ -948,6 +1087,59 @@ mod tests {
         assert_eq!(joined.webdav_username.as_deref(), Some("alice"));
         assert_eq!(joined.devices.len(), 2);
         assert!(joined.devices.iter().any(|device| device.is_local));
+    }
+
+    #[tokio::test]
+    async fn pairing_status_persists_runtime_details_and_deletion_preserves_articles() {
+        let (_directory, storage) = storage_with_article().await;
+        let secrets = MemorySecretStore::default();
+        configure_sync_group_with(
+            &storage,
+            &secrets,
+            "https://cloud.example/dav/inkriver",
+            "alice",
+            "webdav-secret".to_string(),
+            "Linux",
+        )
+        .await
+        .unwrap();
+        let synchronized_at = Utc.with_ymd_and_hms(2026, 8, 28, 12, 30, 0).unwrap();
+        storage
+            .record_sync_success(
+                synchronized_at,
+                StoredSyncReport {
+                    exported_events: 2,
+                    applied_events: 3,
+                    pending_events: 1,
+                    ..StoredSyncReport::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let status = sync_pairing_status_from(&storage).await.unwrap();
+        assert_eq!(
+            status.last_success_at.as_deref(),
+            Some("2026-08-28T12:30:00+00:00")
+        );
+        assert_eq!(status.last_report.as_ref().unwrap().exported_events, 2);
+        assert_eq!(status.last_report.as_ref().unwrap().pending_events, 1);
+
+        let removed = delete_sync_configuration_with(&storage, &secrets)
+            .await
+            .unwrap();
+        assert!(!removed.configured);
+        assert!(removed.last_attempt_at.is_none());
+        assert!(secrets.load().unwrap().is_none());
+        assert!(storage.get_article("space::mars").await.unwrap().is_some());
+        assert_eq!(
+            removed
+                .devices
+                .iter()
+                .filter(|device| device.is_local)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1369,6 +1561,23 @@ mod tests {
         assert_eq!(refresh["extractionFailedArticles"], 2);
         assert_eq!(refresh["extractionSkippedArticles"], 3);
         assert!(refresh.get("auto_archived_articles").is_none());
+
+        let sync = serde_json::to_value(SyncTransportReportDto::from(SyncTransportReport {
+            uploaded_segments: 1,
+            reused_segments: 2,
+            exported_events: 3,
+            downloaded_segments: 4,
+            received_events: 5,
+            imported_events: 6,
+            duplicate_events: 7,
+            applied_events: 8,
+            pending_events: 9,
+        }))
+        .unwrap();
+        assert_eq!(sync["uploadedSegments"], 1);
+        assert_eq!(sync["appliedEvents"], 8);
+        assert_eq!(sync["pendingEvents"], 9);
+        assert!(sync.get("uploaded_segments").is_none());
     }
 
     #[tokio::test]
@@ -1379,6 +1588,34 @@ mod tests {
         assert_eq!(error.code, "refresh_in_progress");
         drop(first);
         assert!(acquire_refresh_lock(&lock).is_ok());
+    }
+
+    #[tokio::test]
+    async fn sync_lock_rejects_a_second_concurrent_operation() {
+        let lock = Mutex::new(());
+        let first = acquire_sync_lock(&lock).unwrap();
+        let error = acquire_sync_lock(&lock).unwrap_err();
+        assert_eq!(error.code, "sync_in_progress");
+        drop(first);
+        assert!(acquire_sync_lock(&lock).is_ok());
+    }
+
+    #[test]
+    fn sync_runtime_failures_are_structured_without_hiding_details() {
+        assert_eq!(
+            sync_runtime_error(anyhow::anyhow!("La synchronisation n'est pas configurée")).code,
+            "sync_not_configured"
+        );
+        assert_eq!(
+            sync_runtime_error(anyhow::anyhow!(
+                "Les secrets de synchronisation sont absents"
+            ))
+            .code,
+            "sync_secrets"
+        );
+        let error = sync_runtime_error(anyhow::anyhow!("PROPFIND returned HTTP status 503"));
+        assert_eq!(error.code, "sync_failed");
+        assert_eq!(error.message, "PROPFIND returned HTTP status 503");
     }
 
     #[tokio::test]

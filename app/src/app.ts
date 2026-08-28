@@ -1461,11 +1461,22 @@ export class InkRiverApp {
             <label>Invitation manuelle<textarea readonly rows="4">${escapeHtml(this.syncInvitation.invitation)}</textarea></label>
           </section>`
         : "";
+      const lastReport = status.lastReport;
+      const lastResult = status.lastSuccessAt
+        ? `<section class="sync-last-result ${lastReport && lastReport.pendingEvents > 0 ? "partial" : "success"}"><strong>${lastReport && lastReport.pendingEvents > 0 ? "Dernière synchronisation partielle" : "Dernière synchronisation réussie"}</strong><time>${displayDateTime(status.lastSuccessAt)}</time>${lastReport ? `<p>${lastReport.exportedEvents} changement${lastReport.exportedEvents > 1 ? "s" : ""} envoyé${lastReport.exportedEvents > 1 ? "s" : ""}, ${lastReport.appliedEvents} appliqué${lastReport.appliedEvents > 1 ? "s" : ""}${lastReport.pendingEvents > 0 ? `, ${lastReport.pendingEvents} en attente` : ""}.</p>` : ""}</section>`
+        : status.lastAttemptAt
+          ? `<p class="sync-last-attempt">Dernière tentative : ${displayDateTime(status.lastAttemptAt)}</p>`
+          : '<p class="sync-last-attempt">Aucune synchronisation effectuée.</p>';
+      const persistedError = status.lastError
+        ? `<section class="sync-persisted-error" aria-label="Dernière erreur de synchronisation"><strong>Dernière erreur · ${escapeHtml(status.lastError.stage)}</strong><time>${displayDateTime(status.lastError.occurredAt)}</time><p>${escapeHtml(status.lastError.message)}</p></section>`
+        : "";
       content = `<div class="sync-status">
           <dl><div><dt>Serveur WebDAV</dt><dd>${escapeHtml(status.webdavBaseUrl ?? "Inconnu")}</dd></div><div><dt>Utilisateur</dt><dd>${escapeHtml(status.webdavUsername ?? "Inconnu")}</dd></div><div><dt>Empreinte de clé</dt><dd><code>${escapeHtml(status.keyId ?? "Inconnue")}</code></dd></div></dl>
-          <button type="button" class="primary" data-action="create-pairing-invitation" ${this.syncBusy ? "disabled" : ""}>${this.syncInvitation ? "Renouveler le QR d’appairage" : "Afficher le QR d’appairage"}</button>
+          <div class="sync-primary-actions"><button type="button" class="primary" data-action="synchronize-now" ${this.syncBusy ? "disabled" : ""}>${this.syncBusy ? "Synchronisation…" : "Synchroniser maintenant"}</button><button type="button" data-action="create-pairing-invitation" ${this.syncBusy ? "disabled" : ""}>${this.syncInvitation ? "Renouveler le QR d’appairage" : "Afficher le QR d’appairage"}</button></div>
+          <div class="sync-history">${lastResult}${persistedError}</div>
           ${invitation}
           <section class="sync-devices"><h3>Appareils</h3><ul>${devices}</ul></section>
+          <section class="sync-danger-zone"><h3>Supprimer la configuration locale</h3><p>Les articles et abonnements resteront sur cet appareil. Les fichiers distants ne seront pas supprimés.</p><button type="button" class="danger" data-action="delete-sync-configuration" ${this.syncBusy ? "disabled" : ""}>Supprimer la configuration</button></section>
         </div>`;
     } else {
       const scanButton = this.scanPairingCode
@@ -1595,6 +1606,71 @@ export class InkRiverApp {
     this.render();
     try {
       this.syncInvitation = await this.api.pairingInvitation();
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async synchronizeNow(): Promise<void> {
+    if (this.syncBusy) return;
+    this.syncBusy = true;
+    this.syncError = null;
+    this.clearNotice();
+    const selectedId = this.selected?.id ?? null;
+    this.render();
+    try {
+      const report = await this.api.synchronizeNow();
+      const [articles, feeds, status] = await Promise.all([
+        this.api.listArticles(),
+        this.api.listFeeds(),
+        this.api.syncPairingStatus(),
+      ]);
+      this.articles = articles;
+      this.feeds = feeds;
+      this.syncPairingStatus = status;
+      if (selectedId && articles.some((article) => article.id === selectedId)) {
+        this.selected = await this.api.getArticle(selectedId);
+      } else if (selectedId) {
+        this.selected = null;
+        this.mobileArticleScreen = "timeline";
+      }
+      const pending = report.pendingEvents > 0
+        ? ` ${report.pendingEvents} changement${report.pendingEvents > 1 ? "s restent" : " reste"} en attente.`
+        : "";
+      this.showNotice(
+        `Synchronisation terminée : ${report.exportedEvents} changement${report.exportedEvents > 1 ? "s" : ""} envoyé${report.exportedEvents > 1 ? "s" : ""}, ${report.appliedEvents} appliqué${report.appliedEvents > 1 ? "s" : ""}.${pending}`,
+      );
+    } catch (error) {
+      this.syncError = errorMessage(error);
+      try {
+        this.syncPairingStatus = await this.api.syncPairingStatus();
+        if (this.syncPairingStatus.lastError) this.syncError = null;
+      } catch {
+        // Keep the previous configuration visible alongside the direct error.
+      }
+    } finally {
+      this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async deleteSyncConfiguration(): Promise<void> {
+    if (
+      this.syncBusy ||
+      !this.confirmAction(
+        "Supprimer la configuration de synchronisation de cet appareil ? Les articles et abonnements locaux seront conservés, ainsi que les fichiers WebDAV distants.",
+      )
+    ) return;
+    this.syncBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      this.syncPairingStatus = await this.api.deleteSyncConfiguration();
+      this.syncInvitation = null;
+      this.showNotice("Configuration de synchronisation supprimée de cet appareil.");
     } catch (error) {
       this.syncError = errorMessage(error);
     } finally {
@@ -1891,6 +1967,12 @@ export class InkRiverApp {
     });
     this.root.querySelector<HTMLElement>('[data-action="create-pairing-invitation"]')?.addEventListener("click", () => {
       void this.createPairingInvitation();
+    });
+    this.root.querySelector<HTMLElement>('[data-action="synchronize-now"]')?.addEventListener("click", () => {
+      void this.synchronizeNow();
+    });
+    this.root.querySelector<HTMLElement>('[data-action="delete-sync-configuration"]')?.addEventListener("click", () => {
+      void this.deleteSyncConfiguration();
     });
     this.root.querySelectorAll<HTMLFormElement>("[data-sync-device-form]").forEach((form) => {
       form.addEventListener("submit", (event) => {

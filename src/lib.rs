@@ -13,6 +13,7 @@ pub mod storage;
 pub mod sync;
 mod sync_merge;
 pub mod sync_pairing;
+pub mod sync_runtime;
 pub mod sync_secrets;
 pub mod sync_segments;
 pub mod sync_transport;

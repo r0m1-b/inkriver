@@ -8,6 +8,7 @@ import type {
   RefreshReport,
   PairingInvitation,
   SyncPairingStatus,
+  SyncTransportReport,
 } from "./types";
 
 export interface InkRiverApi {
@@ -39,6 +40,8 @@ export interface InkRiverApi {
   ): Promise<SyncPairingStatus>;
   renameSyncDevice(deviceId: string, displayName: string): Promise<SyncPairingStatus>;
   revokeSyncDevice(deviceId: string): Promise<SyncPairingStatus>;
+  synchronizeNow(): Promise<SyncTransportReport>;
+  deleteSyncConfiguration(): Promise<SyncPairingStatus>;
 }
 
 export const tauriApi: InkRiverApi = {
@@ -73,4 +76,6 @@ export const tauriApi: InkRiverApi = {
   renameSyncDevice: (deviceId, displayName) =>
     invoke("rename_sync_device", { deviceId, displayName }),
   revokeSyncDevice: (deviceId) => invoke("revoke_sync_device", { deviceId }),
+  synchronizeNow: () => invoke("synchronize_now"),
+  deleteSyncConfiguration: () => invoke("delete_sync_configuration"),
 };

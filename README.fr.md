@@ -45,6 +45,8 @@ Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
 - ouverture sécurisée de l'article original pour les extraits.
 - appairage des appareils Linux et Android par QR code, avec mot de passe
   WebDAV demandé séparément et secrets conservés dans le coffre natif.
+- échange manuel des changements chiffrés par le serveur WebDAV configuré,
+  sans quitter ni remplacer la vue locale en cache.
 
 ## Prérequis sous Ubuntu
 
@@ -613,8 +615,12 @@ le transport WebDAV, le stockage natif des secrets et un format d'appairage
 versionné. La boîte de dialogue **Synchronisation** de la gestion des
 abonnements permet de créer un groupe, d'afficher son QR code, de le rejoindre
 avec la caméra Android ou une invitation manuelle, puis de renommer ou révoquer
-logiquement les appareils. L'envoi et la réception effectifs des changements
-depuis l'interface restent réservés à la prochaine étape. L'appairage exclut volontairement le mot de passe
+logiquement les appareils. Une action manuelle effectue un cycle borné d'envoi,
+de téléchargement et de fusion, puis recharge les projections locales. La
+synchronisation automatique n'est pas encore implémentée. La dernière
+tentative, les compteurs du dernier succès, l'état partiel et l'erreur détaillée
+sont persistés après redémarrage. Supprimer la configuration locale conserve
+les abonnements, les articles et les fichiers WebDAV distants. L'appairage exclut volontairement le mot de passe
 WebDAV : le nouvel appareil importe par QR la clé de groupe et les réglages non
 secrets, puis demande ce mot de passe séparément. Le paquet obtenu est conservé
 dans Secret Service sous Linux et protégé par Android Keystore sous Android ;
@@ -631,8 +637,8 @@ et n'est plus digne de confiance, il faudra utiliser la future rotation de clé.
   pris en charge ;
 - les builds Android nécessitent encore un JDK, un SDK et un NDK configurés, et
   le processus de release signée n'est pas encore en place ;
-- la synchronisation n'est pas encore exécutée depuis l'interface, même si la
-  configuration du groupe et l'appairage des appareils sont disponibles ;
+- la synchronisation reste manuelle ; sa planification automatique reste à
+  implémenter ;
 - `inkriver.db` du CLI se trouve encore dans le dépôt de développement.
 
 Dans chaque application installée, SQLite reste la source de vérité dans le

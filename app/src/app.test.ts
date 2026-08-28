@@ -65,6 +65,13 @@ const feed: Feed = {
   logoDataUrl: null,
 };
 
+const emptySyncRuntime = {
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  lastReport: null,
+};
+
 beforeEach(() => {
   localStorage.clear();
 });
@@ -105,6 +112,7 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
     setFeedActive: vi.fn(async () => structuredClone(feed)),
     deleteFeed: vi.fn(async () => ({ feedId: feed.id, deletedArticles: 1 })),
     syncPairingStatus: vi.fn(async () => ({
+      ...emptySyncRuntime,
       configured: false,
       webdavBaseUrl: null,
       webdavUsername: null,
@@ -112,6 +120,7 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       devices: [],
     })),
     configureSyncGroup: vi.fn(async () => ({
+      ...emptySyncRuntime,
       configured: true,
       webdavBaseUrl: "https://cloud.example/dav/inkriver",
       webdavUsername: "alice",
@@ -123,6 +132,7 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       qrCodeDataUrl: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
     })),
     joinSyncGroup: vi.fn(async () => ({
+      ...emptySyncRuntime,
       configured: true,
       webdavBaseUrl: "https://cloud.example/dav/inkriver",
       webdavUsername: "alice",
@@ -130,6 +140,7 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       devices: [{ deviceId: "android", displayName: "Android", isLocal: true, revokedAt: null }],
     })),
     renameSyncDevice: vi.fn(async () => ({
+      ...emptySyncRuntime,
       configured: true,
       webdavBaseUrl: "https://cloud.example/dav/inkriver",
       webdavUsername: "alice",
@@ -137,11 +148,31 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       devices: [{ deviceId: "linux", displayName: "Portable", isLocal: true, revokedAt: null }],
     })),
     revokeSyncDevice: vi.fn(async () => ({
+      ...emptySyncRuntime,
       configured: true,
       webdavBaseUrl: "https://cloud.example/dav/inkriver",
       webdavUsername: "alice",
       keyId: "key-123",
       devices: [{ deviceId: "android", displayName: "Android", isLocal: false, revokedAt: "2026-08-28T10:00:00Z" }],
+    })),
+    synchronizeNow: vi.fn(async () => ({
+      uploadedSegments: 0,
+      reusedSegments: 0,
+      exportedEvents: 0,
+      downloadedSegments: 0,
+      receivedEvents: 0,
+      importedEvents: 0,
+      duplicateEvents: 0,
+      appliedEvents: 0,
+      pendingEvents: 0,
+    })),
+    deleteSyncConfiguration: vi.fn(async () => ({
+      ...emptySyncRuntime,
+      configured: false,
+      webdavBaseUrl: null,
+      webdavUsername: null,
+      keyId: null,
+      devices: [],
     })),
     ...overrides,
   };
@@ -2677,6 +2708,7 @@ describe("InkRiverApp", () => {
 
   it("displays a confidential pairing QR and manages synchronized devices", async () => {
     const configured = {
+      ...emptySyncRuntime,
       configured: true,
       webdavBaseUrl: "https://cloud.example/dav/inkriver",
       webdavUsername: "alice",
@@ -2706,6 +2738,166 @@ describe("InkRiverApp", () => {
     await flush();
     expect(confirmer).toHaveBeenCalledWith(expect.stringContaining("Téléphone"));
     expect(api.revokeSyncDevice).toHaveBeenCalledWith("phone");
+  });
+
+  it("synchronizes manually, reloads projections and keeps subscription management open", async () => {
+    const configured = {
+      ...emptySyncRuntime,
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [],
+    };
+    const synchronized = {
+      ...configured,
+      lastAttemptAt: "2026-08-28T12:30:00Z",
+      lastSuccessAt: "2026-08-28T12:30:00Z",
+      lastReport: {
+        uploadedSegments: 1,
+        reusedSegments: 0,
+        exportedEvents: 2,
+        downloadedSegments: 1,
+        receivedEvents: 3,
+        importedEvents: 3,
+        duplicateEvents: 0,
+        appliedEvents: 3,
+        pendingEvents: 0,
+      },
+    };
+    const syncPairingStatus = vi
+      .fn<InkRiverApi["syncPairingStatus"]>()
+      .mockResolvedValueOnce(configured)
+      .mockResolvedValue(synchronized);
+    const api = fakeApi({
+      syncPairingStatus,
+      synchronizeNow: vi.fn(async () => ({
+        uploadedSegments: 1,
+        reusedSegments: 0,
+        exportedEvents: 2,
+        downloadedSegments: 1,
+        receivedEvents: 3,
+        importedEvents: 3,
+        duplicateEvents: 0,
+        appliedEvents: 3,
+        pendingEvents: 0,
+      })),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="synchronize-now"]')!.click();
+    await flush();
+    expect(api.synchronizeNow).toHaveBeenCalledOnce();
+    expect(api.listArticles).toHaveBeenCalledTimes(2);
+    expect(api.listFeeds).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+    expect(root.querySelector(".sync-dialog")).not.toBeNull();
+    expect(root.textContent).toContain("2 changements envoyés, 3 appliqués");
+    expect(root.textContent).toContain("Dernière synchronisation réussie");
+  });
+
+  it("keeps cached content and shows the detailed error when manual synchronization fails", async () => {
+    const configured = {
+      ...emptySyncRuntime,
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [],
+    };
+    const failed = {
+      ...configured,
+      lastAttemptAt: "2026-08-28T12:35:00Z",
+      lastError: {
+        stage: "Transport WebDAV",
+        message: "PROPFIND returned HTTP status 503",
+        occurredAt: "2026-08-28T12:35:00Z",
+      },
+    };
+    const syncPairingStatus = vi
+      .fn<InkRiverApi["syncPairingStatus"]>()
+      .mockResolvedValueOnce(configured)
+      .mockResolvedValue(failed);
+    const api = fakeApi({
+      syncPairingStatus,
+      synchronizeNow: vi.fn(async () => {
+        throw { code: "sync_failed", message: "PROPFIND returned HTTP status 503" };
+      }),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="synchronize-now"]')!.click();
+    await flush();
+    expect(root.querySelector(".sync-persisted-error")?.textContent).toContain(
+      "PROPFIND returned HTTP status 503",
+    );
+    expect(root.textContent).toContain("Carnet du ciel");
+    expect(root.querySelector('[data-testid="feed-management"]')).not.toBeNull();
+    expect(root.textContent).toContain("Dernière erreur · Transport WebDAV");
+  });
+
+  it("identifies a persisted synchronization with pending events as partial", async () => {
+    const api = fakeApi({
+      syncPairingStatus: vi.fn(async () => ({
+        ...emptySyncRuntime,
+        configured: true,
+        webdavBaseUrl: "https://cloud.example/dav/inkriver",
+        webdavUsername: "alice",
+        keyId: "key-123",
+        devices: [],
+        lastAttemptAt: "2026-08-28T12:40:00Z",
+        lastSuccessAt: "2026-08-28T12:40:00Z",
+        lastReport: {
+          uploadedSegments: 1,
+          reusedSegments: 0,
+          exportedEvents: 1,
+          downloadedSegments: 1,
+          receivedEvents: 2,
+          importedEvents: 2,
+          duplicateEvents: 0,
+          appliedEvents: 1,
+          pendingEvents: 1,
+        },
+      })),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    expect(root.textContent).toContain("Dernière synchronisation partielle");
+    expect(root.textContent).toContain("1 en attente");
+  });
+
+  it("deletes only the local synchronization configuration after confirmation", async () => {
+    const configured = {
+      ...emptySyncRuntime,
+      configured: true,
+      webdavBaseUrl: "https://cloud.example/dav/inkriver",
+      webdavUsername: "alice",
+      keyId: "key-123",
+      devices: [],
+    };
+    const api = fakeApi({ syncPairingStatus: vi.fn(async () => configured) });
+    const confirmer = vi.fn(() => true);
+    const { root } = await mounted(api, undefined, confirmer);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    root.querySelector<HTMLElement>('[data-action="delete-sync-configuration"]')!.click();
+    await flush();
+    expect(confirmer).toHaveBeenCalledWith(expect.stringContaining("fichiers WebDAV distants"));
+    expect(api.deleteSyncConfiguration).toHaveBeenCalledOnce();
+    expect(root.querySelector("#configure-sync-form")).not.toBeNull();
+    expect(root.textContent).toContain("Carnet du ciel");
+    expect(root.textContent).toContain("Configuration de synchronisation supprimée");
   });
 });
 

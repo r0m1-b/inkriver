@@ -40,6 +40,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - safely open the original article when a feed only provides an excerpt.
 - pair Linux and Android devices through a QR code while keeping the WebDAV
   password separate and storing synchronization secrets in the native vault.
+- manually exchange encrypted changes through the configured WebDAV server
+  without leaving or replacing the current cached view.
 
 ## Ubuntu prerequisites
 
@@ -588,8 +590,11 @@ The synchronization foundation now provides encrypted immutable segments,
 WebDAV transport, native secret storage, and a versioned device-pairing format.
 The **Synchronization** dialog in subscription management can create a group,
 display its QR code, join it by Android camera or manual invitation, and rename
-or logically revoke devices. Actual upload/download actions remain unavailable
-until the next synchronization milestone.
+or logically revoke devices. A manual action performs one bounded upload,
+download, and merge cycle and then reloads the local projections. Automatic
+synchronization is not implemented yet. The last attempt, successful counters,
+pending state, and detailed error are persisted across restarts. Removing the
+local configuration keeps subscriptions, articles, and remote WebDAV files.
 Pairing deliberately excludes the WebDAV password: a new device imports the
 group key and non-secret endpoint settings from the QR, then asks for that
 password separately. Linux stores the resulting bundle in Secret Service;
@@ -605,8 +610,8 @@ must be handled by the future key-rotation workflow if it is no longer trusted.
 - content requiring authentication or a paid subscription is not supported;
 - Android builds still require a configured JDK, SDK, and NDK, and a signed
   release workflow has not been configured yet;
-- synchronization is not executed from the interface yet, even though group
-  configuration and device pairing are available;
+- synchronization is manual only; automatic scheduling remains to be
+  implemented;
 - the CLI's `inkriver.db` is still stored in the development repository.
 
 In every installed application, SQLite remains the source of truth in the

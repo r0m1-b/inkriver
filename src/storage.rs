@@ -97,6 +97,36 @@ pub struct SyncDevice {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+/// Non-sensitive counters retained from the last successful synchronization.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoredSyncReport {
+    pub uploaded_segments: usize,
+    pub reused_segments: usize,
+    pub exported_events: usize,
+    pub downloaded_segments: usize,
+    pub received_events: usize,
+    pub imported_events: usize,
+    pub duplicate_events: usize,
+    pub applied_events: usize,
+    pub pending_events: usize,
+}
+
+/// Persisted user-facing state of the manual synchronization runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSyncRuntimeStatus {
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_error: Option<StoredSyncRuntimeError>,
+    pub last_report: Option<StoredSyncReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSyncRuntimeError {
+    pub stage: String,
+    pub message: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
 /// Represents one subscription as persisted by the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredFeed {
@@ -565,6 +595,209 @@ impl Storage {
             .execute(&self.pool)
             .await
             .context("Impossible de supprimer la configuration de synchronisation")?;
+        Ok(())
+    }
+
+    /// Returns the persisted outcome of the most recent manual sync attempts.
+    pub async fn sync_runtime_status(&self) -> Result<StoredSyncRuntimeStatus> {
+        type StatusRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        );
+        let row: Option<StatusRow> = sqlx::query_as(
+            r#"
+                SELECT last_attempt_at, last_success_at,
+                       last_error_stage, last_error_message, last_error_at,
+                       uploaded_segments, reused_segments, exported_events,
+                       downloaded_segments, received_events, imported_events,
+                       duplicate_events, applied_events, pending_events
+                FROM sync_runtime_status WHERE singleton = 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Impossible de charger l'état de synchronisation")?;
+        let Some(row) = row else {
+            return Ok(StoredSyncRuntimeStatus {
+                last_attempt_at: None,
+                last_success_at: None,
+                last_error: None,
+                last_report: None,
+            });
+        };
+        let parse_date = |value: String| -> Result<DateTime<Utc>> {
+            Ok(DateTime::parse_from_rfc3339(&value)
+                .context("Date d'état de synchronisation invalide")?
+                .with_timezone(&Utc))
+        };
+        let last_attempt_at = row.0.map(&parse_date).transpose()?;
+        let last_success_at = row.1.map(&parse_date).transpose()?;
+        let last_error = match (row.2, row.3, row.4) {
+            (Some(stage), Some(message), Some(occurred_at)) => Some(StoredSyncRuntimeError {
+                stage,
+                message,
+                occurred_at: parse_date(occurred_at)?,
+            }),
+            (None, None, None) => None,
+            _ => anyhow::bail!("État d'erreur de synchronisation incohérent"),
+        };
+        let last_report = last_success_at.map(|_| StoredSyncReport {
+            uploaded_segments: row.5 as usize,
+            reused_segments: row.6 as usize,
+            exported_events: row.7 as usize,
+            downloaded_segments: row.8 as usize,
+            received_events: row.9 as usize,
+            imported_events: row.10 as usize,
+            duplicate_events: row.11 as usize,
+            applied_events: row.12 as usize,
+            pending_events: row.13 as usize,
+        });
+        Ok(StoredSyncRuntimeStatus {
+            last_attempt_at,
+            last_success_at,
+            last_error,
+            last_report,
+        })
+    }
+
+    pub async fn record_sync_attempt(&self, attempted_at: DateTime<Utc>) -> Result<()> {
+        sqlx::query(
+            r#"
+                INSERT INTO sync_runtime_status (singleton, last_attempt_at)
+                VALUES (1, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    last_attempt_at = excluded.last_attempt_at
+            "#,
+        )
+        .bind(attempted_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer la tentative de synchronisation")?;
+        Ok(())
+    }
+
+    pub async fn record_sync_success(
+        &self,
+        succeeded_at: DateTime<Utc>,
+        report: StoredSyncReport,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+                INSERT INTO sync_runtime_status (
+                    singleton, last_attempt_at, last_success_at,
+                    uploaded_segments, reused_segments, exported_events,
+                    downloaded_segments, received_events, imported_events,
+                    duplicate_events, applied_events, pending_events
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_success_at = excluded.last_success_at,
+                    last_error_stage = NULL,
+                    last_error_message = NULL,
+                    last_error_at = NULL,
+                    uploaded_segments = excluded.uploaded_segments,
+                    reused_segments = excluded.reused_segments,
+                    exported_events = excluded.exported_events,
+                    downloaded_segments = excluded.downloaded_segments,
+                    received_events = excluded.received_events,
+                    imported_events = excluded.imported_events,
+                    duplicate_events = excluded.duplicate_events,
+                    applied_events = excluded.applied_events,
+                    pending_events = excluded.pending_events
+            "#,
+        )
+        .bind(succeeded_at.to_rfc3339())
+        .bind(succeeded_at.to_rfc3339())
+        .bind(report.uploaded_segments as i64)
+        .bind(report.reused_segments as i64)
+        .bind(report.exported_events as i64)
+        .bind(report.downloaded_segments as i64)
+        .bind(report.received_events as i64)
+        .bind(report.imported_events as i64)
+        .bind(report.duplicate_events as i64)
+        .bind(report.applied_events as i64)
+        .bind(report.pending_events as i64)
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer le succès de synchronisation")?;
+        Ok(())
+    }
+
+    pub async fn record_sync_failure(
+        &self,
+        failed_at: DateTime<Utc>,
+        stage: &str,
+        message: &str,
+    ) -> Result<()> {
+        if stage.trim().is_empty()
+            || stage != stage.trim()
+            || stage.len() > 120
+            || message.trim().is_empty()
+            || message.len() > 4_096
+        {
+            anyhow::bail!("Erreur de synchronisation invalide");
+        }
+        sqlx::query(
+            r#"
+                INSERT INTO sync_runtime_status (
+                    singleton, last_attempt_at, last_error_stage,
+                    last_error_message, last_error_at
+                ) VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_error_stage = excluded.last_error_stage,
+                    last_error_message = excluded.last_error_message,
+                    last_error_at = excluded.last_error_at
+            "#,
+        )
+        .bind(failed_at.to_rfc3339())
+        .bind(stage)
+        .bind(message)
+        .bind(failed_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer l'échec de synchronisation")?;
+        Ok(())
+    }
+
+    /// Clears local pairing/runtime metadata while preserving subscriptions,
+    /// articles, the local device identity, journal and remote WebDAV data.
+    pub async fn remove_sync_metadata(&self) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM sync_configuration WHERE singleton = 1")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_runtime_status WHERE singleton = 1")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_export_cursors")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_import_cursors")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_pending_events")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_devices WHERE is_local = 0")
+            .execute(&mut *transaction)
+            .await?;
+        transaction
+            .commit()
+            .await
+            .context("Impossible de supprimer les métadonnées de synchronisation")?;
         Ok(())
     }
 
@@ -2863,7 +3096,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 11);
+        assert_eq!(migration_count, 12);
 
         storage.close().await;
     }

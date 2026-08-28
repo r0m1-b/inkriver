@@ -80,9 +80,31 @@ export interface SyncPairingStatus {
   webdavUsername: string | null;
   keyId: string | null;
   devices: SyncDevice[];
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: SyncRuntimeError | null;
+  lastReport: SyncTransportReport | null;
+}
+
+export interface SyncRuntimeError {
+  stage: string;
+  message: string;
+  occurredAt: string;
 }
 
 export interface PairingInvitation {
   invitation: string;
   qrCodeDataUrl: string;
+}
+
+export interface SyncTransportReport {
+  uploadedSegments: number;
+  reusedSegments: number;
+  exportedEvents: number;
+  downloadedSegments: number;
+  receivedEvents: number;
+  importedEvents: number;
+  duplicateEvents: number;
+  appliedEvents: number;
+  pendingEvents: number;
 }
