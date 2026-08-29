@@ -349,11 +349,18 @@ cargo run -- mark-read 1
 cargo run -- mark-unread 1
 cargo run -- favorite 1
 cargo run -- unfavorite 1
+
+# Exporter un rapport d'assistance sans identifiants, métadonnées personnelles
+# d'appareil, métadonnées d'abonnement/article ni contenu en cache.
+cargo run -- sync-diagnostic > inkriver-sync-diagnostic.json
 ```
 
 `show` charge uniquement l'article sélectionné, convertit son HTML en texte
 lisible dans le terminal, affiche son URL originale et le marque automatiquement
 comme lu.
+`sync-diagnostic` fonctionne entièrement hors ligne et n'exporte que les
+versions de protocole, les dates et les compteurs agrégés de synchronisation.
+Comme pour tout fichier de diagnostic, relisez le JSON avant de le partager.
 
 Un numéro correspond à la position actuelle dans la chronologie et peut changer
 après un rafraîchissement. Pour les scripts, préférer l'identifiant stable.
@@ -636,6 +643,29 @@ futurs segments de l'appareil révoqué. La rotation de clé reste une future
 fonction de récupération. La révocation logique est donc un filtre local et non
 une exclusion cryptographique : si l'appareil possède encore la clé de groupe
 et n'est plus digne de confiance, il faudra utiliser la future rotation de clé.
+Chaque cycle réussi publie également un document d'accusé de réception chiffré
+et borné, qui décrit les préfixes contigus de journaux consommés par cet
+appareil. WebDAV remplace atomiquement ce document propre à l'appareil et les
+récepteurs ne conservent qu'une progression monotone après authentification par
+la clé de groupe. Ces accusés préparent une compaction sûre, mais InkRiver ne
+supprime encore aucun événement ni segment distant. Chaque appareil publie
+désormais aussi un instantané de récupération authentifié lorsque son état
+synchronisé contigu change. Une installation neuve peut reconstruire ses
+projections depuis cet instantané sans télécharger les anciens segments ; un
+appareil en retard l'utilise lorsqu'il détecte un trou, puis applique les
+segments suivants. Les instantanés contiennent uniquement les événements de
+synchronisation, jamais les corps d'articles en cache, sont limités à 10 000
+événements et 8 Mio chiffrés, et sont omis plutôt que de bloquer la
+synchronisation au-delà de ces limites. La découverte accepte jusqu'à 256
+appareils, mais chaque cycle ne télécharge qu'au plus huit instantanés
+prioritaires afin de borner le trafic de récupération. Une liste complète et
+fiable des appareils est également échangée à chaque cycle dans un registre
+chiffré et authentifié propre à chaque appareil. L'appartenance ne peut que
+s'étendre et une révocation est définitive pour un UUID : un ancien document ne
+peut donc pas réactiver silencieusement un appareil. Tout détenteur de la clé de
+groupe partagée peut publier une telle révocation ; un appareil réinstallé
+rejoint donc le groupe avec un nouvel UUID. La compaction destructive reste
+désactivée jusqu'aux dernières validations de récupération et de suppression.
 
 - le CLI optionnel appartient encore au paquet Rust principal au lieu d'être
   isolé dans un crate du workspace ;

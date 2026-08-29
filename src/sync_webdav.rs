@@ -1,4 +1,7 @@
 use crate::http::client_builder;
+use crate::sync_acknowledgements::ACKNOWLEDGEMENT_DIRECTORY;
+use crate::sync_roster::{MAX_ROSTER_BYTES, ROSTER_DIRECTORY};
+use crate::sync_snapshots::{MAX_SNAPSHOT_BYTES, SNAPSHOT_DIRECTORY};
 use crate::sync_transport::{SegmentPublishOutcome, SegmentTransport};
 use anyhow::{Context, Result, bail};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -136,6 +139,40 @@ impl WebDavTransport {
         }
     }
 
+    async fn publish_replaceable(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
+        let (directory, file_name) = relative_path
+            .rsplit_once('/')
+            .context("Le chemin remplaçable n'a pas de répertoire")?;
+        let temporary = format!("{directory}/.{file_name}.{}.tmp", uuid::Uuid::new_v4());
+        let put = self
+            .request(Method::PUT, self.url(&temporary)?)
+            .header("Content-Type", "application/json")
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .context("Téléversement temporaire WebDAV impossible")?;
+        if !put.status().is_success() {
+            bail!("Temporary PUT returned HTTP status {}", put.status());
+        }
+        let moved = self
+            .request(Method::from_bytes(b"MOVE")?, self.url(&temporary)?)
+            .header(DESTINATION, self.url(relative_path)?.as_str())
+            .header(OVERWRITE, HeaderValue::from_static("T"))
+            .send()
+            .await;
+        match moved {
+            Ok(response) if response.status().is_success() => Ok(()),
+            Ok(response) => {
+                self.delete_temporary(&temporary).await;
+                bail!("MOVE returned HTTP status {}", response.status())
+            }
+            Err(error) => {
+                self.delete_temporary(&temporary).await;
+                Err(error).context("Remplacement atomique WebDAV impossible")
+            }
+        }
+    }
+
     fn relative_from_href(&self, href: &str) -> Result<String> {
         let url = self
             .config
@@ -195,6 +232,12 @@ impl SegmentTransport for WebDavTransport {
         self.ensure_collection("").await?;
         self.ensure_collection("v2/").await?;
         self.ensure_collection(&format!("v2/{key_id}/")).await?;
+        self.ensure_collection(&format!("v2/{key_id}/{ACKNOWLEDGEMENT_DIRECTORY}/"))
+            .await?;
+        self.ensure_collection(&format!("v2/{key_id}/{SNAPSHOT_DIRECTORY}/"))
+            .await?;
+        self.ensure_collection(&format!("v2/{key_id}/{ROSTER_DIRECTORY}/"))
+            .await?;
         self.ensure_collection(&format!("v2/{key_id}/{device_id}/"))
             .await
     }
@@ -257,6 +300,14 @@ impl SegmentTransport for WebDavTransport {
         }
         let key_collection = format!("v2/{key_id}/");
         let devices = self.direct_children(&key_collection).await?;
+        let devices = devices
+            .into_iter()
+            .filter(|(name, _)| {
+                name != ACKNOWLEDGEMENT_DIRECTORY
+                    && name != SNAPSHOT_DIRECTORY
+                    && name != ROSTER_DIRECTORY
+            })
+            .collect::<Vec<_>>();
         for (device, is_collection) in &devices {
             if !is_collection || uuid::Uuid::parse_str(device).is_err() {
                 bail!("WebDAV key directory contains an invalid device entry");
@@ -297,6 +348,91 @@ impl SegmentTransport for WebDavTransport {
             bail!("GET returned HTTP status {}", response.status());
         }
         read_bounded(response, max_bytes).await
+    }
+
+    async fn publish_acknowledgement(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > crate::sync_acknowledgements::MAX_ACKNOWLEDGEMENT_BYTES {
+            bail!("Synchronization acknowledgement exceeds the upload limit");
+        }
+        self.publish_replaceable(relative_path, bytes).await
+    }
+
+    async fn list_acknowledgements(&self, key_id: &str) -> Result<Vec<String>> {
+        validate_key_id(key_id)?;
+        let collection = format!("v2/{key_id}/{ACKNOWLEDGEMENT_DIRECTORY}/");
+        let mut paths = Vec::new();
+        for (name, is_collection) in self.direct_children(&collection).await? {
+            let observer = name
+                .strip_suffix(".json")
+                .context("Invalid synchronization acknowledgement file")?;
+            if is_collection || uuid::Uuid::parse_str(observer).is_err() {
+                bail!("Invalid synchronization acknowledgement file");
+            }
+            paths.push(format!("{collection}{name}"));
+        }
+        Ok(paths)
+    }
+
+    async fn download_acknowledgement(
+        &self,
+        relative_path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        self.download_segment(relative_path, max_bytes).await
+    }
+
+    async fn publish_snapshot(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            bail!("Synchronization snapshot exceeds the upload limit");
+        }
+        self.publish_replaceable(relative_path, bytes).await
+    }
+
+    async fn list_snapshots(&self, key_id: &str) -> Result<Vec<String>> {
+        validate_key_id(key_id)?;
+        let collection = format!("v2/{key_id}/{SNAPSHOT_DIRECTORY}/");
+        let mut paths = Vec::new();
+        for (name, is_collection) in self.direct_children(&collection).await? {
+            let creator = name
+                .strip_suffix(".json")
+                .context("Invalid synchronization snapshot file")?;
+            if is_collection || uuid::Uuid::parse_str(creator).is_err() {
+                bail!("Invalid synchronization snapshot file");
+            }
+            paths.push(format!("{collection}{name}"));
+        }
+        Ok(paths)
+    }
+
+    async fn download_snapshot(&self, relative_path: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        self.download_segment(relative_path, max_bytes).await
+    }
+
+    async fn publish_roster(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > MAX_ROSTER_BYTES {
+            bail!("Synchronization roster exceeds the upload limit");
+        }
+        self.publish_replaceable(relative_path, bytes).await
+    }
+
+    async fn list_rosters(&self, key_id: &str) -> Result<Vec<String>> {
+        validate_key_id(key_id)?;
+        let collection = format!("v2/{key_id}/{ROSTER_DIRECTORY}/");
+        let mut paths = Vec::new();
+        for (name, is_collection) in self.direct_children(&collection).await? {
+            let publisher = name
+                .strip_suffix(".json")
+                .context("Invalid synchronization roster file")?;
+            if is_collection || uuid::Uuid::parse_str(publisher).is_err() {
+                bail!("Invalid synchronization roster file");
+            }
+            paths.push(format!("{collection}{name}"));
+        }
+        Ok(paths)
+    }
+
+    async fn download_roster(&self, relative_path: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        self.download_segment(relative_path, max_bytes).await
     }
 }
 
@@ -391,10 +527,19 @@ fn validate_relative_path(path: &str) -> Result<()> {
 }
 
 fn validate_key_and_device(key_id: &str, device_id: &str) -> Result<()> {
-    if key_id.len() != 64 || !key_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    validate_key_id(key_id)?;
+    uuid::Uuid::parse_str(device_id).context("Invalid synchronization device identifier")?;
+    Ok(())
+}
+
+fn validate_key_id(key_id: &str) -> Result<()> {
+    if key_id.len() != 64
+        || !key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
         bail!("Invalid synchronization key identifier");
     }
-    uuid::Uuid::parse_str(device_id).context("Invalid synchronization device identifier")?;
     Ok(())
 }
 
@@ -553,7 +698,8 @@ mod tests {
                         .and_then(|value| Url::parse(value).ok())
                         .map(|url| url.path().to_string());
                     if let Some(destination) = destination {
-                        if nodes.contains_key(&destination) {
+                        let overwrite = request.headers.get("overwrite").map(String::as_str);
+                        if nodes.contains_key(&destination) && overwrite != Some("T") {
                             (412, "Precondition Failed", Vec::new(), "text/plain", false)
                         } else if let Some(node) = nodes.remove(&request.path) {
                             nodes.insert(destination, node);
@@ -826,6 +972,7 @@ mod tests {
         let key = SyncGroupKey::from_bytes([0x37; 32]);
         let linux = Storage::open_in_memory().await.unwrap();
         linux.enable_sync().await.unwrap();
+        let linux_id = linux.sync_identity().await.unwrap().device_id;
         let feed = linux
             .add_feed("https://private.example/feed", None)
             .await
@@ -844,11 +991,12 @@ mod tests {
         assert_eq!(first.downloaded_segments, 0);
         let android = Storage::open_in_memory().await.unwrap();
         android.enable_sync().await.unwrap();
+        let android_id = android.sync_identity().await.unwrap().device_id;
         let received = synchronize_transport(&android, &key, &server.transport(), Utc::now())
             .await
             .unwrap();
         assert_eq!(received.imported_events, 2);
-        assert_eq!(received.downloaded_segments, 1);
+        assert_eq!(received.downloaded_segments, 0);
         let android_article = android.list_articles().await.unwrap().pop().unwrap();
         android
             .set_read(&android_article.article.id, false)
@@ -875,7 +1023,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(merged.imported_events, 2);
-        assert_eq!(merged.downloaded_segments, 1);
+        assert_eq!(merged.downloaded_segments, 0);
         let linux_article = linux.list_articles().await.unwrap().pop().unwrap();
         assert!(!linux_article.is_read);
         assert!(linux_article.is_favorite);
@@ -884,6 +1032,44 @@ mod tests {
             .unwrap();
         assert_eq!(repeated.downloaded_segments, 0);
         assert_eq!(repeated.imported_events, 0);
+        assert!(
+            linux
+                .sync_acknowledgements_for_source(&key.key_id(), &linux_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|acknowledgement| {
+                    acknowledgement.observer_device_id == android_id
+                        && acknowledgement.contiguous_sequence >= 2
+                })
+        );
+        let acknowledgement_files = server
+            .state
+            .nodes
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|path| path.contains("/acknowledgements/") && path.ends_with(".json"))
+            .count();
+        assert_eq!(acknowledgement_files, 2);
+        let snapshot_files = server
+            .state
+            .nodes
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|path| path.contains("/snapshots/") && path.ends_with(".json"))
+            .count();
+        assert_eq!(snapshot_files, 2);
+        let roster_files = server
+            .state
+            .nodes
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|path| path.contains("/rosters/") && path.ends_with(".json"))
+            .count();
+        assert_eq!(roster_files, 2);
         assert!(server.state.saw_authorization.load(Ordering::SeqCst));
         for bytes in server.encrypted_files() {
             let visible = String::from_utf8_lossy(&bytes);

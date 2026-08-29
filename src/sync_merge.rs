@@ -36,8 +36,26 @@ pub(crate) async fn import_sync_events(
     events: &[SyncEvent],
     observed_at: DateTime<Utc>,
 ) -> Result<SyncImportReport> {
-    if events.len() > MAX_EVENTS_PER_IMPORT {
-        bail!("A synchronization import cannot exceed {MAX_EVENTS_PER_IMPORT} events");
+    import_sync_events_bounded(pool, events, observed_at, MAX_EVENTS_PER_IMPORT).await
+}
+
+pub(crate) async fn import_sync_snapshot_events(
+    pool: &SqlitePool,
+    events: &[SyncEvent],
+    observed_at: DateTime<Utc>,
+    maximum: usize,
+) -> Result<SyncImportReport> {
+    import_sync_events_bounded(pool, events, observed_at, maximum).await
+}
+
+async fn import_sync_events_bounded(
+    pool: &SqlitePool,
+    events: &[SyncEvent],
+    observed_at: DateTime<Utc>,
+    maximum: usize,
+) -> Result<SyncImportReport> {
+    if events.len() > maximum {
+        bail!("A synchronization import cannot exceed {maximum} events");
     }
     for event in events {
         validate_event(event)?;

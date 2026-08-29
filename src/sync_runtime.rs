@@ -190,6 +190,54 @@ mod tests {
         ) -> Result<Vec<u8>> {
             unreachable!("the transport exposes no segment")
         }
+
+        async fn publish_acknowledgement(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_acknowledgements(&self, _key_id: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn download_acknowledgement(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+
+        async fn publish_snapshot(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_snapshots(&self, _key_id: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn download_snapshot(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+
+        async fn publish_roster(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_rosters(&self, _key_id: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn download_roster(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
     }
 
     struct FailingTransport;
@@ -212,6 +260,54 @@ mod tests {
         }
 
         async fn download_segment(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+
+        async fn publish_acknowledgement(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn list_acknowledgements(&self, _key_id: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+
+        async fn download_acknowledgement(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+
+        async fn publish_snapshot(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn list_snapshots(&self, _key_id: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+
+        async fn download_snapshot(
+            &self,
+            _relative_path: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+
+        async fn publish_roster(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn list_rosters(&self, _key_id: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+
+        async fn download_roster(
             &self,
             _relative_path: &str,
             _max_bytes: usize,

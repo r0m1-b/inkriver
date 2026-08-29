@@ -331,10 +331,17 @@ cargo run -- mark-read 1
 cargo run -- mark-unread 1
 cargo run -- favorite 1
 cargo run -- unfavorite 1
+
+# Export a support report without credentials, personal device metadata,
+# subscription/article metadata or cached content.
+cargo run -- sync-diagnostic > inkriver-sync-diagnostic.json
 ```
 
 `show` loads only the selected article, converts its HTML to readable terminal
 text, displays its original URL, and automatically marks it as read.
+`sync-diagnostic` is fully offline and exports only protocol versions, dates and
+aggregate synchronization counters. Review the JSON before sharing it, as with
+any diagnostic file.
 
 A number refers to the article's current position in the timeline and may
 change after a refresh. Scripts should use the stable identifier instead.
@@ -609,6 +616,26 @@ history but ignores future segments from the revoked device; rotating the group
 key remains a later recovery feature. Logical revocation is therefore a local
 filter, not a cryptographic exclusion: a device that still owns the group key
 must be handled by the future key-rotation workflow if it is no longer trusted.
+Each successful cycle also publishes an encrypted, bounded acknowledgement
+document describing the contiguous journal prefixes consumed by that device.
+WebDAV replaces this per-device document atomically, and receivers only retain
+monotonic progress after authentication with the group key. These
+acknowledgements prepare safe compaction, but InkRiver does not delete any
+synchronization event or remote segment yet. Each device now also publishes an
+authenticated recovery snapshot when its contiguous synchronized state changes.
+A fresh installation can rebuild its projections from that snapshot without
+downloading older segments, and a lagging device uses the latest snapshot when
+it detects a segment gap before applying subsequent segments. Snapshots contain
+only synchronization events—never cached article bodies—are limited to 10,000
+events and 8 MiB encrypted, and are skipped rather than blocking synchronization
+when those limits are exceeded. Snapshot discovery accepts up to 256 devices,
+while each synchronization cycle downloads at most eight prioritized snapshots
+to keep recovery traffic bounded. Every cycle also exchanges an encrypted,
+authenticated per-device membership roster. Membership grows monotonically and
+revocation is permanent for a device UUID, so an old document cannot silently
+reactivate a device. Any holder of the shared group key can publish such a
+revocation; a reinstalled device therefore joins with a new UUID. Destructive
+compaction remains disabled pending the final recovery and deletion checks.
 
 - the optional CLI remains part of the main Rust package instead of a separate
   workspace crate;

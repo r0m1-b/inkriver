@@ -11,11 +11,15 @@ pub mod refresh;
 pub mod service;
 pub mod storage;
 pub mod sync;
+pub mod sync_acknowledgements;
+pub mod sync_diagnostics;
 mod sync_merge;
 pub mod sync_pairing;
+pub mod sync_roster;
 pub mod sync_runtime;
 pub mod sync_secrets;
 pub mod sync_segments;
+pub mod sync_snapshots;
 pub mod sync_transport;
 pub mod sync_webdav;
 

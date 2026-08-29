@@ -5,6 +5,7 @@ use crate::sync::{
     HybridLogicalClock, SYNC_PROTOCOL_VERSION, SyncArticleRef, SyncEvent, SyncEventId,
     SyncEventPayload, SyncIdentity, SyncImportReport,
 };
+use crate::sync_diagnostics::SyncDiagnosticCounters;
 use crate::sync_merge;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -75,6 +76,54 @@ fn validate_sync_device(device_id: &str, display_name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_sync_acknowledgement(acknowledgement: &SyncAcknowledgement) -> Result<()> {
+    if acknowledgement.key_id.len() != 64
+        || !acknowledgement
+            .key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("Empreinte de clé d'accusé de réception invalide");
+    }
+    uuid::Uuid::parse_str(&acknowledgement.observer_device_id)
+        .context("Identifiant d'appareil observateur invalide")?;
+    uuid::Uuid::parse_str(&acknowledgement.source_device_id)
+        .context("Identifiant d'appareil source invalide")?;
+    if acknowledgement.contiguous_sequence < 0 {
+        anyhow::bail!("Une séquence acquittée ne peut pas être négative");
+    }
+    Ok(())
+}
+
+fn validate_sync_key_and_device(key_id: &str, device_id: &str) -> Result<()> {
+    validate_sync_key_id(key_id)?;
+    uuid::Uuid::parse_str(device_id).context("Identifiant d'appareil invalide")?;
+    Ok(())
+}
+
+fn validate_sync_key_id(key_id: &str) -> Result<()> {
+    if key_id.len() != 64
+        || !key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("Empreinte de clé de synchronisation invalide");
+    }
+    Ok(())
+}
+
+fn validate_sync_snapshot_identity(key_id: &str, device_id: &str, state_hash: &str) -> Result<()> {
+    validate_sync_key_and_device(key_id, device_id)?;
+    if state_hash.len() != 64
+        || !state_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("Empreinte d'instantané invalide");
+    }
+    Ok(())
+}
+
 /// Owns the SQLite connection pool used by the InkRiver core.
 pub struct Storage {
     pool: SqlitePool,
@@ -94,6 +143,13 @@ pub struct SyncDevice {
     pub device_id: String,
     pub display_name: String,
     pub is_local: bool,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// One member of the monotonic, group-scoped synchronization roster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncRosterMember {
+    pub device_id: String,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -693,6 +749,40 @@ impl Storage {
         })
     }
 
+    pub(crate) async fn sync_diagnostic_counters(&self) -> Result<SyncDiagnosticCounters> {
+        let local_device_id: String =
+            sqlx::query_scalar("SELECT device_id FROM sync_local_state WHERE singleton = 1")
+                .fetch_one(&self.pool)
+                .await
+                .context("Impossible de lire l'identité du diagnostic")?;
+        let row: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+                SELECT
+                    (SELECT COUNT(*) FROM sync_events WHERE device_id = ?),
+                    (SELECT COUNT(*) FROM sync_events WHERE device_id <> ?),
+                    (SELECT COUNT(*) FROM sync_pending_events),
+                    (SELECT COUNT(*) FROM sync_import_cursors),
+                    (SELECT COUNT(*) FROM sync_acknowledgements),
+                    (SELECT COUNT(*) FROM sync_snapshot_publications),
+                    (SELECT COUNT(*) FROM sync_snapshot_imports)
+            "#,
+        )
+        .bind(&local_device_id)
+        .bind(&local_device_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Impossible de calculer le diagnostic de synchronisation")?;
+        Ok(SyncDiagnosticCounters {
+            local_events: row.0,
+            remote_events: row.1,
+            pending_events: row.2,
+            import_streams: row.3,
+            acknowledgements: row.4,
+            published_snapshots: row.5,
+            imported_snapshots: row.6,
+        })
+    }
+
     pub async fn record_sync_attempt(&self, attempted_at: DateTime<Utc>) -> Result<()> {
         sqlx::query(
             r#"
@@ -813,6 +903,15 @@ impl Storage {
             .execute(&mut *transaction)
             .await?;
         sqlx::query("DELETE FROM sync_acknowledgements")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_snapshot_publications")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_snapshot_imports")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_roster_members")
             .execute(&mut *transaction)
             .await?;
         sqlx::query("DELETE FROM sync_devices WHERE is_local = 0")
@@ -938,6 +1037,164 @@ impl Storage {
         .fetch_one(&self.pool)
         .await
         .context("Impossible de vérifier la révocation de l'appareil")
+    }
+
+    /// Seeds the group roster from locally known pairing metadata. Membership
+    /// and revocation are both monotonic: an old observation can never remove a
+    /// member or reactivate a revoked device.
+    pub(crate) async fn seed_sync_roster(
+        &self,
+        key_id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_sync_key_id(key_id)?;
+        let devices = self.list_sync_devices().await?;
+        self.merge_sync_roster(
+            key_id,
+            &devices
+                .into_iter()
+                .map(|device| SyncRosterMember {
+                    device_id: device.device_id,
+                    revoked_at: device.revoked_at,
+                })
+                .collect::<Vec<_>>(),
+            observed_at,
+        )
+        .await
+    }
+
+    pub(crate) async fn merge_sync_roster(
+        &self,
+        key_id: &str,
+        members: &[SyncRosterMember],
+        observed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_sync_key_id(key_id)?;
+        if members.is_empty() || members.len() > 256 {
+            anyhow::bail!("Liste d'appareils de synchronisation invalide");
+        }
+        let mut unique = HashSet::new();
+        for member in members {
+            uuid::Uuid::parse_str(&member.device_id)
+                .context("Identifiant d'appareil du registre invalide")?;
+            if !unique.insert(member.device_id.as_str()) {
+                anyhow::bail!("Appareil dupliqué dans le registre de synchronisation");
+            }
+        }
+        let timestamp = observed_at.to_rfc3339();
+        let mut transaction = self.pool.begin().await?;
+        for member in members {
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_roster_members (
+                        key_id, device_id, revoked_at,
+                        first_observed_at, last_observed_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(key_id, device_id) DO UPDATE SET
+                        revoked_at = COALESCE(
+                            sync_roster_members.revoked_at,
+                            excluded.revoked_at
+                        ),
+                        last_observed_at = MAX(
+                            sync_roster_members.last_observed_at,
+                            excluded.last_observed_at
+                        )
+                "#,
+            )
+            .bind(key_id)
+            .bind(&member.device_id)
+            .bind(member.revoked_at.map(|date| date.to_rfc3339()))
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&mut *transaction)
+            .await?;
+            if let Some(revoked_at) = member.revoked_at {
+                sqlx::query(
+                    r#"
+                        UPDATE sync_devices
+                        SET revoked_at = COALESCE(revoked_at, ?),
+                            updated_at = MAX(updated_at, ?)
+                        WHERE device_id = ?
+                    "#,
+                )
+                .bind(revoked_at.to_rfc3339())
+                .bind(&timestamp)
+                .bind(&member.device_id)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de fusionner le registre des appareils")?;
+        Ok(())
+    }
+
+    pub(crate) async fn sync_roster_members(&self, key_id: &str) -> Result<Vec<SyncRosterMember>> {
+        validate_sync_key_id(key_id)?;
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            r#"
+                SELECT device_id, revoked_at
+                FROM sync_roster_members
+                WHERE key_id = ?
+                ORDER BY device_id
+            "#,
+        )
+        .bind(key_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger le registre des appareils")?;
+        rows.into_iter()
+            .map(|(device_id, revoked_at)| {
+                Ok(SyncRosterMember {
+                    device_id,
+                    revoked_at: revoked_at
+                        .map(|value| {
+                            DateTime::parse_from_rfc3339(&value)
+                                .map(|date| date.with_timezone(&Utc))
+                                .context("Date de révocation du registre invalide")
+                        })
+                        .transpose()?,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) async fn active_sync_roster_device_ids(&self, key_id: &str) -> Result<Vec<String>> {
+        validate_sync_key_id(key_id)?;
+        sqlx::query_scalar(
+            r#"
+                SELECT device_id FROM sync_roster_members
+                WHERE key_id = ? AND revoked_at IS NULL
+                ORDER BY device_id
+            "#,
+        )
+        .bind(key_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les appareils actifs du registre")
+    }
+
+    pub(crate) async fn sync_roster_device_is_revoked(
+        &self,
+        key_id: &str,
+        device_id: &str,
+    ) -> Result<bool> {
+        validate_sync_key_and_device(key_id, device_id)?;
+        sqlx::query_scalar(
+            r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM sync_roster_members
+                    WHERE key_id = ? AND device_id = ? AND revoked_at IS NOT NULL
+                )
+            "#,
+        )
+        .bind(key_id)
+        .bind(device_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Impossible de vérifier la révocation distribuée")
     }
 
     /// Returns the stable identity and journal allocation state of this installation.
@@ -1439,6 +1696,175 @@ impl Storage {
         .unwrap_or(0))
     }
 
+    /// Reads a transactionally consistent set of contiguous events suitable
+    /// for an authenticated recovery snapshot.
+    pub(crate) async fn sync_snapshot_material(
+        &self,
+        maximum_events: usize,
+    ) -> Result<Option<(Vec<(String, i64)>, Vec<SyncEvent>)>> {
+        if maximum_events == 0 {
+            anyhow::bail!("Un instantané doit autoriser au moins un événement");
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer la lecture de l'instantané")?;
+        let (local_device_id, local_next_sequence): (String, i64) = sqlx::query_as(
+            "SELECT device_id, next_sequence FROM sync_local_state WHERE singleton = 1",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .context("Impossible de lire la frontière locale de l'instantané")?;
+        let mut frontiers: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+                SELECT remote_device_id, contiguous_sequence
+                FROM sync_import_cursors
+                ORDER BY remote_device_id
+            "#,
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de lire les frontières distantes de l'instantané")?;
+        frontiers.push((local_device_id, local_next_sequence - 1));
+        frontiers.sort_by(|left, right| left.0.cmp(&right.0));
+        if frontiers.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            anyhow::bail!("Les frontières de l'instantané contiennent un appareil dupliqué");
+        }
+        let event_count = frontiers.iter().try_fold(0_usize, |total, (_, frontier)| {
+            let frontier = usize::try_from(*frontier)
+                .context("Une frontière d'instantané est hors limites")?;
+            total
+                .checked_add(frontier)
+                .context("Le nombre d'événements de l'instantané déborde")
+        })?;
+        if event_count > maximum_events {
+            transaction
+                .rollback()
+                .await
+                .context("Impossible de terminer la lecture de l'instantané")?;
+            return Ok(None);
+        }
+        let mut events = Vec::with_capacity(event_count);
+        for (device_id, frontier) in &frontiers {
+            let rows: Vec<SyncEventRow> = sqlx::query_as(
+                r#"
+                    SELECT device_id, sequence, hlc_physical_ms, hlc_counter,
+                           protocol_version, event_kind, payload_json
+                    FROM sync_events
+                    WHERE device_id = ? AND sequence <= ?
+                    ORDER BY sequence
+                "#,
+            )
+            .bind(device_id)
+            .bind(frontier)
+            .fetch_all(&mut *transaction)
+            .await
+            .context("Impossible de lire les événements de l'instantané")?;
+            if rows.len() != usize::try_from(*frontier).unwrap_or(usize::MAX) {
+                anyhow::bail!("Le journal contient un trou empêchant son instantané");
+            }
+            events.extend(
+                rows.into_iter()
+                    .map(sync_event_from_row)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de terminer la lecture de l'instantané")?;
+        Ok(Some((frontiers, events)))
+    }
+
+    pub(crate) async fn sync_snapshot_publication_hash(
+        &self,
+        key_id: &str,
+        creator_device_id: &str,
+    ) -> Result<Option<String>> {
+        validate_sync_key_and_device(key_id, creator_device_id)?;
+        sqlx::query_scalar(
+            "SELECT state_hash FROM sync_snapshot_publications WHERE key_id = ? AND creator_device_id = ?",
+        )
+        .bind(key_id)
+        .bind(creator_device_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Impossible de lire l'état de publication de l'instantané")
+    }
+
+    pub(crate) async fn record_sync_snapshot_publication(
+        &self,
+        key_id: &str,
+        creator_device_id: &str,
+        state_hash: &str,
+        published_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_sync_snapshot_identity(key_id, creator_device_id, state_hash)?;
+        sqlx::query(
+            r#"
+                INSERT INTO sync_snapshot_publications (
+                    key_id, creator_device_id, state_hash, published_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(key_id, creator_device_id) DO UPDATE SET
+                    state_hash = excluded.state_hash,
+                    published_at = excluded.published_at
+            "#,
+        )
+        .bind(key_id)
+        .bind(creator_device_id)
+        .bind(state_hash)
+        .bind(published_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer la publication de l'instantané")?;
+        Ok(())
+    }
+
+    pub(crate) async fn sync_snapshot_import_hash(
+        &self,
+        key_id: &str,
+        creator_device_id: &str,
+    ) -> Result<Option<String>> {
+        validate_sync_key_and_device(key_id, creator_device_id)?;
+        sqlx::query_scalar(
+            "SELECT state_hash FROM sync_snapshot_imports WHERE key_id = ? AND creator_device_id = ?",
+        )
+        .bind(key_id)
+        .bind(creator_device_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Impossible de lire l'état d'import de l'instantané")
+    }
+
+    pub(crate) async fn record_sync_snapshot_import(
+        &self,
+        key_id: &str,
+        creator_device_id: &str,
+        state_hash: &str,
+        imported_at: DateTime<Utc>,
+    ) -> Result<()> {
+        validate_sync_snapshot_identity(key_id, creator_device_id, state_hash)?;
+        sqlx::query(
+            r#"
+                INSERT INTO sync_snapshot_imports (
+                    key_id, creator_device_id, state_hash, imported_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(key_id, creator_device_id) DO UPDATE SET
+                    state_hash = excluded.state_hash,
+                    imported_at = excluded.imported_at
+            "#,
+        )
+        .bind(key_id)
+        .bind(creator_device_id)
+        .bind(state_hash)
+        .bind(imported_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Impossible d'enregistrer l'import de l'instantané")?;
+        Ok(())
+    }
+
     /// Records a monotonic acknowledgement learned from one synchronization
     /// device. Older or identical observations never move the durable state
     /// backwards.
@@ -1446,21 +1872,7 @@ impl Storage {
         &self,
         acknowledgement: &SyncAcknowledgement,
     ) -> Result<bool> {
-        if acknowledgement.key_id.len() != 64
-            || !acknowledgement
-                .key_id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            anyhow::bail!("Empreinte de clé d'accusé de réception invalide");
-        }
-        uuid::Uuid::parse_str(&acknowledgement.observer_device_id)
-            .context("Identifiant d'appareil observateur invalide")?;
-        uuid::Uuid::parse_str(&acknowledgement.source_device_id)
-            .context("Identifiant d'appareil source invalide")?;
-        if acknowledgement.contiguous_sequence < 0 {
-            anyhow::bail!("Une séquence acquittée ne peut pas être négative");
-        }
+        validate_sync_acknowledgement(acknowledgement)?;
         let result = sqlx::query(
             r#"
                 INSERT INTO sync_acknowledgements (
@@ -1488,6 +1900,68 @@ impl Storage {
         .await
         .context("Impossible d'enregistrer l'accusé de réception")?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Atomically records one authenticated acknowledgement document.
+    pub async fn record_sync_acknowledgements(
+        &self,
+        acknowledgements: &[SyncAcknowledgement],
+    ) -> Result<usize> {
+        if acknowledgements.is_empty() {
+            anyhow::bail!("Un document d'accusé de réception ne peut pas être vide");
+        }
+        for acknowledgement in acknowledgements {
+            validate_sync_acknowledgement(acknowledgement)?;
+        }
+        let first = &acknowledgements[0];
+        if acknowledgements.iter().any(|acknowledgement| {
+            acknowledgement.key_id != first.key_id
+                || acknowledgement.observer_device_id != first.observer_device_id
+        }) {
+            anyhow::bail!(
+                "Un document d'accusé doit appartenir à un seul observateur et une seule clé"
+            );
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer l'enregistrement des accusés de réception")?;
+        let mut changed = 0;
+        for acknowledgement in acknowledgements {
+            changed += sqlx::query(
+                r#"
+                    INSERT INTO sync_acknowledgements (
+                        key_id, observer_device_id, source_device_id,
+                        contiguous_sequence, observed_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(key_id, observer_device_id, source_device_id) DO UPDATE SET
+                        contiguous_sequence = excluded.contiguous_sequence,
+                        observed_at = excluded.observed_at
+                    WHERE excluded.contiguous_sequence
+                              > sync_acknowledgements.contiguous_sequence
+                       OR (
+                            excluded.contiguous_sequence
+                                = sync_acknowledgements.contiguous_sequence
+                            AND excluded.observed_at > sync_acknowledgements.observed_at
+                          )
+                "#,
+            )
+            .bind(&acknowledgement.key_id)
+            .bind(&acknowledgement.observer_device_id)
+            .bind(&acknowledgement.source_device_id)
+            .bind(acknowledgement.contiguous_sequence)
+            .bind(acknowledgement.observed_at.to_rfc3339())
+            .execute(&mut *transaction)
+            .await
+            .context("Impossible d'enregistrer un document d'accusé de réception")?
+            .rows_affected() as usize;
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider les accusés de réception")?;
+        Ok(changed)
     }
 
     /// Lists the durable acknowledgements for one source journal.
@@ -1540,6 +2014,56 @@ impl Storage {
                 },
             )
             .collect()
+    }
+
+    /// Builds the local device's current acknowledgement vector. The local
+    /// journal and every contiguous remote import cursor are included in a
+    /// deterministic order, including sequence zero for a fresh device.
+    pub async fn local_sync_acknowledgement_snapshot(
+        &self,
+        key_id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Vec<SyncAcknowledgement>> {
+        if key_id.len() != 64
+            || !key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!("Empreinte de clé d'accusé de réception invalide");
+        }
+        let identity = self.sync_identity().await?;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+                SELECT remote_device_id, contiguous_sequence
+                FROM sync_import_cursors
+                ORDER BY remote_device_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les curseurs à acquitter")?;
+        let mut positions = rows
+            .into_iter()
+            .map(
+                |(source_device_id, contiguous_sequence)| SyncAcknowledgement {
+                    key_id: key_id.to_string(),
+                    observer_device_id: identity.device_id.clone(),
+                    source_device_id,
+                    contiguous_sequence,
+                    observed_at,
+                },
+            )
+            .collect::<Vec<_>>();
+        positions.push(SyncAcknowledgement {
+            key_id: key_id.to_string(),
+            observer_device_id: identity.device_id.clone(),
+            source_device_id: identity.device_id,
+            contiguous_sequence: identity.next_sequence - 1,
+            observed_at,
+        });
+        positions.sort_by(|left, right| left.source_device_id.cmp(&right.source_device_id));
+        positions.dedup_by(|left, right| left.source_device_id == right.source_device_id);
+        Ok(positions)
     }
 
     /// Computes the highest prefix that every explicitly required observer has
@@ -1624,6 +2148,27 @@ impl Storage {
         })
     }
 
+    /// Computes a compaction boundary from the complete active distributed
+    /// roster. This is the only frontier suitable for a future destructive
+    /// operation; callers cannot omit a lagging member.
+    pub async fn authoritative_sync_compaction_frontier(
+        &self,
+        key_id: &str,
+        source_device_id: &str,
+        source_max_sequence: i64,
+    ) -> Result<SyncCompactionFrontier> {
+        let required = self.active_sync_roster_device_ids(key_id).await?;
+        let local_device_id = self.sync_identity().await?.device_id;
+        if !required
+            .iter()
+            .any(|device_id| device_id == &local_device_id)
+        {
+            anyhow::bail!("L'appareil local est absent du registre actif");
+        }
+        self.sync_compaction_frontier(key_id, source_device_id, source_max_sequence, &required)
+            .await
+    }
+
     /// Validates and atomically imports remote synchronization events.
     ///
     /// Remote application writes projections directly and therefore never
@@ -1639,6 +2184,15 @@ impl Storage {
         observed_at: DateTime<Utc>,
     ) -> Result<SyncImportReport> {
         sync_merge::import_sync_events(&self.pool, events, observed_at).await
+    }
+
+    pub(crate) async fn import_sync_snapshot_events(
+        &self,
+        events: &[SyncEvent],
+        observed_at: DateTime<Utc>,
+        maximum: usize,
+    ) -> Result<SyncImportReport> {
+        sync_merge::import_sync_snapshot_events(&self.pool, events, observed_at, maximum).await
     }
 
     /// Imports the configured subscriptions as the active feed set.
@@ -3348,6 +3902,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledgement_documents_are_recorded_atomically() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let key_id = "42".repeat(32);
+        let observer = "00000000-0000-4000-8000-000000000111";
+        let valid_source = "00000000-0000-4000-8000-000000000222";
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 29, 10, 0, 0).unwrap();
+        let acknowledgements = vec![
+            SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: observer.to_string(),
+                source_device_id: valid_source.to_string(),
+                contiguous_sequence: 4,
+                observed_at,
+            },
+            SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: observer.to_string(),
+                source_device_id: "invalid".to_string(),
+                contiguous_sequence: 2,
+                observed_at,
+            },
+        ];
+
+        assert!(
+            storage
+                .record_sync_acknowledgements(&acknowledgements)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .sync_acknowledgements_for_source(&key_id, valid_source)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn compaction_frontier_requires_every_explicit_observer() {
         let storage = Storage::open_in_memory().await.unwrap();
         let key_id = "42".repeat(32);
@@ -3410,6 +4003,151 @@ mod tests {
         assert_eq!(partial.blocking_observer_device_ids, vec![first_remote]);
     }
 
+    #[tokio::test]
+    async fn authoritative_frontier_uses_active_roster_and_excludes_revoked_members() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        storage
+            .add_feed("https://frontier.example/feed", None)
+            .await
+            .unwrap();
+        let local_id = storage.sync_identity().await.unwrap().device_id;
+        let active_remote = "00000000-0000-4000-8000-000000000061";
+        let revoked_remote = "00000000-0000-4000-8000-000000000062";
+        let key_id = "ef".repeat(32);
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 29, 15, 0, 0).unwrap();
+        storage
+            .merge_sync_roster(
+                &key_id,
+                &[
+                    SyncRosterMember {
+                        device_id: local_id.clone(),
+                        revoked_at: None,
+                    },
+                    SyncRosterMember {
+                        device_id: active_remote.to_string(),
+                        revoked_at: None,
+                    },
+                    SyncRosterMember {
+                        device_id: revoked_remote.to_string(),
+                        revoked_at: Some(observed_at),
+                    },
+                ],
+                observed_at,
+            )
+            .await
+            .unwrap();
+
+        let blocked = storage
+            .authoritative_sync_compaction_frontier(&key_id, &local_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(blocked.safe_through_sequence, 0);
+        assert_eq!(blocked.required_observer_count, 2);
+        assert_eq!(
+            blocked.blocking_observer_device_ids,
+            vec![active_remote.to_string()]
+        );
+
+        storage
+            .record_sync_acknowledgement(&SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: active_remote.to_string(),
+                source_device_id: local_id.clone(),
+                contiguous_sequence: 1,
+                observed_at,
+            })
+            .await
+            .unwrap();
+        let ready = storage
+            .authoritative_sync_compaction_frontier(&key_id, &local_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(ready.safe_through_sequence, 1);
+        assert!(ready.blocking_observer_device_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn synchronization_roster_is_additive_and_revocation_never_regresses() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let key_id = "cd".repeat(32);
+        let first = "00000000-0000-4000-8000-000000000041";
+        let second = "00000000-0000-4000-8000-000000000042";
+        let revoked_at = Utc.with_ymd_and_hms(2026, 8, 29, 14, 0, 0).unwrap();
+
+        storage
+            .merge_sync_roster(
+                &key_id,
+                &[
+                    SyncRosterMember {
+                        device_id: first.to_string(),
+                        revoked_at: None,
+                    },
+                    SyncRosterMember {
+                        device_id: second.to_string(),
+                        revoked_at: Some(revoked_at),
+                    },
+                ],
+                revoked_at,
+            )
+            .await
+            .unwrap();
+        storage
+            .merge_sync_roster(
+                &key_id,
+                &[SyncRosterMember {
+                    device_id: second.to_string(),
+                    revoked_at: None,
+                }],
+                revoked_at - chrono::Duration::days(1),
+            )
+            .await
+            .unwrap();
+
+        let members = storage.sync_roster_members(&key_id).await.unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[1].revoked_at, Some(revoked_at));
+        assert_eq!(
+            storage
+                .active_sync_roster_device_ids(&key_id)
+                .await
+                .unwrap(),
+            vec![first]
+        );
+    }
+
+    #[tokio::test]
+    async fn synchronization_roster_merge_is_atomic_on_invalid_input() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let key_id = "de".repeat(32);
+        let valid = "00000000-0000-4000-8000-000000000051";
+        let result = storage
+            .merge_sync_roster(
+                &key_id,
+                &[
+                    SyncRosterMember {
+                        device_id: valid.to_string(),
+                        revoked_at: None,
+                    },
+                    SyncRosterMember {
+                        device_id: "invalid".to_string(),
+                        revoked_at: None,
+                    },
+                ],
+                Utc::now(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            storage
+                .sync_roster_members(&key_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// Verifies a file database is created with migrations and foreign keys enabled.
     #[tokio::test]
     async fn open_creates_database_and_applies_migrations() {
@@ -3431,6 +4169,9 @@ mod tests {
         assert!(table_names.contains(&"sync_events".to_string()));
         assert!(table_names.contains(&"sync_pending_events".to_string()));
         assert!(table_names.contains(&"sync_acknowledgements".to_string()));
+        assert!(table_names.contains(&"sync_snapshot_publications".to_string()));
+        assert!(table_names.contains(&"sync_snapshot_imports".to_string()));
+        assert!(table_names.contains(&"sync_roster_members".to_string()));
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&storage.pool)
@@ -3451,7 +4192,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 13);
+        assert_eq!(migration_count, 15);
 
         storage.close().await;
     }

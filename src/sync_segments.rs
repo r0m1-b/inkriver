@@ -1,5 +1,8 @@
 use crate::storage::Storage;
 use crate::sync::{SYNC_PROTOCOL_VERSION, SyncEvent, SyncImportReport};
+use crate::sync_acknowledgements::ACKNOWLEDGEMENT_DIRECTORY;
+use crate::sync_roster::ROSTER_DIRECTORY;
+use crate::sync_snapshots::SNAPSHOT_DIRECTORY;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -691,6 +694,13 @@ fn discover_segments(root: &Path, key_id: &str) -> Result<Vec<PathBuf>> {
         if is_dot_name(&name) {
             continue;
         }
+        if matches!(
+            name.as_str(),
+            ACKNOWLEDGEMENT_DIRECTORY | SNAPSHOT_DIRECTORY | ROSTER_DIRECTORY
+        ) {
+            require_real_directory(&device.path())?;
+            continue;
+        }
         if uuid::Uuid::parse_str(&name).is_err() {
             bail!("Invalid synchronization device directory");
         }
@@ -1133,6 +1143,62 @@ mod tests {
             .await
             .unwrap();
         assert!(remote_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn directory_import_ignores_the_separate_control_planes() {
+        let key = group_key();
+        let source = Storage::open_in_memory().await.unwrap();
+        source.enable_sync().await.unwrap();
+        source
+            .add_feed("https://sync.example/feed", None)
+            .await
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        export_sync_directory(&source, directory.path(), &key)
+            .await
+            .unwrap();
+        let acknowledgement_directory = directory
+            .path()
+            .join(FORMAT_DIRECTORY)
+            .join(key.key_id())
+            .join(ACKNOWLEDGEMENT_DIRECTORY);
+        fs::create_dir(&acknowledgement_directory).unwrap();
+        fs::write(
+            acknowledgement_directory.join("00000000-0000-4000-8000-00000000000a.json"),
+            b"separate encrypted control data",
+        )
+        .unwrap();
+        let snapshot_directory = directory
+            .path()
+            .join(FORMAT_DIRECTORY)
+            .join(key.key_id())
+            .join(SNAPSHOT_DIRECTORY);
+        fs::create_dir(&snapshot_directory).unwrap();
+        fs::write(
+            snapshot_directory.join("00000000-0000-4000-8000-00000000000b.json"),
+            b"separate encrypted recovery data",
+        )
+        .unwrap();
+        let roster_directory = directory
+            .path()
+            .join(FORMAT_DIRECTORY)
+            .join(key.key_id())
+            .join(ROSTER_DIRECTORY);
+        fs::create_dir(&roster_directory).unwrap();
+        fs::write(
+            roster_directory.join("00000000-0000-4000-8000-00000000000c.json"),
+            b"separate encrypted membership data",
+        )
+        .unwrap();
+
+        let target = Storage::open_in_memory().await.unwrap();
+        target.enable_sync().await.unwrap();
+        let report = import_sync_directory(&target, directory.path(), &key, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(target.list_feeds().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

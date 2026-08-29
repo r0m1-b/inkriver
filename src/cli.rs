@@ -2,6 +2,7 @@ use crate::config;
 use crate::refresh;
 use crate::refresh::RefreshReport;
 use crate::storage::{ArticleSummary, Storage, StoredArticle};
+use crate::sync_diagnostics;
 use clap::{Parser, Subcommand};
 use std::fmt;
 use std::path::PathBuf;
@@ -43,6 +44,8 @@ pub enum Command {
     Favorite { selector: String },
     /// Retirer un article stocké des favoris.
     Unfavorite { selector: String },
+    /// Exporter sur la sortie standard un diagnostic de synchronisation expurgé.
+    SyncDiagnostic,
 }
 
 /// Text and process status produced by one successfully handled command.
@@ -256,6 +259,17 @@ async fn run_with_storage(
                 ..CommandOutput::default()
             })
         }
+        Command::SyncDiagnostic => {
+            let mut stdout =
+                sync_diagnostics::export_sync_diagnostic_json(storage, chrono::Utc::now())
+                    .await
+                    .map_err(|error| CliError::Database(format!("{error:#}")))?;
+            stdout.push('\n');
+            Ok(CommandOutput {
+                stdout,
+                ..CommandOutput::default()
+            })
+        }
     }
 }
 
@@ -374,6 +388,7 @@ mod tests {
                     selector: "article-id".to_string(),
                 },
             ),
+            ("sync-diagnostic", Command::SyncDiagnostic),
         ];
 
         for (name, expected) in cases {
@@ -385,7 +400,10 @@ mod tests {
                 "custom.toml",
                 name,
             ];
-            if !matches!(expected, Command::Refresh | Command::List) {
+            if !matches!(
+                expected,
+                Command::Refresh | Command::List | Command::SyncDiagnostic
+            ) {
                 arguments.push("article-id");
             }
             let cli = Cli::try_parse_from(arguments).unwrap();
@@ -530,6 +548,21 @@ mod tests {
         assert_eq!(output.exit_code, 0);
         assert!(output.stdout.contains("Repérer Jupiter"));
         assert!(output.stdout.contains("astronomy::jupiter"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_diagnostic_is_offline_and_machine_readable() {
+        let (_directory, database_path) = populated_database().await;
+
+        let output = run(offline_cli(database_path, Command::SyncDiagnostic))
+            .await
+            .unwrap();
+        let diagnostic: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+
+        assert_eq!(diagnostic["format"], "inkriver-sync-diagnostic");
+        assert!(diagnostic.get("webdavBaseUrl").is_none());
+        assert!(diagnostic.get("devices").is_none());
         assert!(output.stderr.is_empty());
     }
 
