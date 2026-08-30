@@ -36,16 +36,17 @@ pub(crate) async fn import_sync_events(
     events: &[SyncEvent],
     observed_at: DateTime<Utc>,
 ) -> Result<SyncImportReport> {
-    import_sync_events_bounded(pool, events, observed_at, MAX_EVENTS_PER_IMPORT).await
+    import_sync_events_bounded(pool, events, observed_at, MAX_EVENTS_PER_IMPORT, None).await
 }
 
-pub(crate) async fn import_sync_snapshot_events(
+pub(crate) async fn import_sync_checkpoint_events(
     pool: &SqlitePool,
     events: &[SyncEvent],
+    frontiers: &[(String, i64)],
     observed_at: DateTime<Utc>,
     maximum: usize,
 ) -> Result<SyncImportReport> {
-    import_sync_events_bounded(pool, events, observed_at, maximum).await
+    import_sync_events_bounded(pool, events, observed_at, maximum, Some(frontiers)).await
 }
 
 async fn import_sync_events_bounded(
@@ -53,12 +54,25 @@ async fn import_sync_events_bounded(
     events: &[SyncEvent],
     observed_at: DateTime<Utc>,
     maximum: usize,
+    checkpoint_frontiers: Option<&[(String, i64)]>,
 ) -> Result<SyncImportReport> {
     if events.len() > maximum {
         bail!("A synchronization import cannot exceed {maximum} events");
     }
     for event in events {
         validate_event(event)?;
+    }
+    if let Some(frontiers) = checkpoint_frontiers {
+        let mut previous = None;
+        for (device_id, sequence) in frontiers {
+            if uuid::Uuid::parse_str(device_id).is_err()
+                || *sequence < 0
+                || previous.is_some_and(|value: &str| value >= device_id.as_str())
+            {
+                bail!("Invalid synchronization checkpoint frontiers");
+            }
+            previous = Some(device_id.as_str());
+        }
     }
 
     let mut transaction = pool
@@ -122,6 +136,30 @@ async fn import_sync_events_bounded(
 
     for device_id in imported_devices {
         update_contiguous_cursor(&mut transaction, &device_id).await?;
+    }
+    if let Some(frontiers) = checkpoint_frontiers {
+        for (device_id, sequence) in frontiers {
+            if device_id == &local_device_id {
+                continue;
+            }
+            sqlx::query(
+                r#"
+                    INSERT INTO sync_import_cursors (
+                        remote_device_id, contiguous_sequence
+                    ) VALUES (?, ?)
+                    ON CONFLICT(remote_device_id) DO UPDATE SET
+                        contiguous_sequence = MAX(
+                            sync_import_cursors.contiguous_sequence,
+                            excluded.contiguous_sequence
+                        )
+                "#,
+            )
+            .bind(device_id)
+            .bind(sequence)
+            .execute(&mut *transaction)
+            .await
+            .context("Impossible d'avancer la frontière du checkpoint")?;
+        }
     }
 
     transaction

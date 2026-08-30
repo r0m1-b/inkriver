@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 const SNAPSHOT_FORMAT: &str = "inkriver-sync-snapshot";
-const SNAPSHOT_VERSION: u32 = 1;
+const LEGACY_SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 const ENCRYPTED_SNAPSHOT_FORMAT: &str = "inkriver-encrypted-sync-snapshot";
 const ENCRYPTED_SNAPSHOT_VERSION: u32 = 1;
 const NONCE_BYTES: usize = 24;
@@ -76,18 +77,66 @@ pub(crate) struct PreparedSnapshot {
     pub key_id: String,
     pub creator_device_id: String,
     pub state_hash: String,
+    pub frontiers: Vec<(String, i64)>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotUnavailableReason {
+    TooManyRetainedEvents,
+    StateTooLarge,
+    EncryptedDocumentTooLarge,
+}
+
+pub(crate) enum SnapshotPreparation {
+    Ready(PreparedSnapshot),
+    ConfirmedUnchanged(PreparedSnapshot),
+    Unavailable(SnapshotUnavailableReason),
+}
+
+#[cfg(test)]
+impl SnapshotPreparation {
+    fn expect_ready(self) -> PreparedSnapshot {
+        match self {
+            Self::Ready(snapshot) => snapshot,
+            Self::ConfirmedUnchanged(_) => panic!("expected a new snapshot, got unchanged state"),
+            Self::Unavailable(reason) => panic!("expected a new snapshot, got {reason:?}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SnapshotLimits {
+    events: usize,
+    state_bytes: usize,
+    encrypted_bytes: usize,
+}
+
+const DEFAULT_SNAPSHOT_LIMITS: SnapshotLimits = SnapshotLimits {
+    events: MAX_SNAPSHOT_EVENTS,
+    state_bytes: MAX_SNAPSHOT_STATE_BYTES,
+    encrypted_bytes: MAX_SNAPSHOT_BYTES,
+};
 
 pub(crate) async fn prepare_snapshot(
     storage: &Storage,
     key: &SyncGroupKey,
     created_at: DateTime<Utc>,
-) -> Result<Option<PreparedSnapshot>> {
+) -> Result<SnapshotPreparation> {
+    prepare_snapshot_with_limits(storage, key, created_at, DEFAULT_SNAPSHOT_LIMITS).await
+}
+
+async fn prepare_snapshot_with_limits(
+    storage: &Storage,
+    key: &SyncGroupKey,
+    created_at: DateTime<Utc>,
+    limits: SnapshotLimits,
+) -> Result<SnapshotPreparation> {
     let key_id = key.key_id();
     let creator_device_id = storage.sync_identity().await?.device_id;
-    let Some((frontiers, events)) = storage.sync_snapshot_material(MAX_SNAPSHOT_EVENTS).await?
-    else {
-        return Ok(None);
+    let Some((frontiers, events)) = storage.sync_snapshot_material(limits.events).await? else {
+        return Ok(SnapshotPreparation::Unavailable(
+            SnapshotUnavailableReason::TooManyRetainedEvents,
+        ));
     };
     let state = SnapshotState {
         protocol_version: SYNC_PROTOCOL_VERSION,
@@ -100,21 +149,20 @@ pub(crate) async fn prepare_snapshot(
             .collect(),
         events,
     };
-    validate_state(&state)?;
+    validate_state(&state, SNAPSHOT_VERSION)?;
     let state_bytes =
         serde_json::to_vec(&state).context("Impossible de sérialiser l'état de l'instantané")?;
-    if state_bytes.len() > MAX_SNAPSHOT_STATE_BYTES {
-        return Ok(None);
+    if state_bytes.len() > limits.state_bytes {
+        return Ok(SnapshotPreparation::Unavailable(
+            SnapshotUnavailableReason::StateTooLarge,
+        ));
     }
     let state_hash = hex_digest(Sha256::digest(&state_bytes));
-    if storage
+    let unchanged = storage
         .sync_snapshot_publication_hash(&key_id, &creator_device_id)
         .await?
         .as_deref()
-        == Some(&state_hash)
-    {
-        return Ok(None);
-    }
+        == Some(&state_hash);
     let document = SnapshotDocument {
         format: SNAPSHOT_FORMAT.to_string(),
         format_version: SNAPSHOT_VERSION,
@@ -125,16 +173,50 @@ pub(crate) async fn prepare_snapshot(
     let mut bytes =
         serde_json::to_vec(&encrypted).context("Impossible de sérialiser l'instantané chiffré")?;
     bytes.push(b'\n');
-    if bytes.len() > MAX_SNAPSHOT_BYTES {
-        return Ok(None);
+    if bytes.len() > limits.encrypted_bytes {
+        return Ok(SnapshotPreparation::Unavailable(
+            SnapshotUnavailableReason::EncryptedDocumentTooLarge,
+        ));
     }
-    Ok(Some(PreparedSnapshot {
+    let prepared = PreparedSnapshot {
         relative_path: snapshot_path(&key_id, &creator_device_id),
         bytes,
         key_id,
         creator_device_id,
         state_hash,
-    }))
+        frontiers: document
+            .state
+            .frontiers
+            .iter()
+            .map(|frontier| (frontier.device_id.clone(), frontier.contiguous_sequence))
+            .collect(),
+    };
+    if unchanged {
+        Ok(SnapshotPreparation::ConfirmedUnchanged(prepared))
+    } else {
+        Ok(SnapshotPreparation::Ready(prepared))
+    }
+}
+
+pub(crate) fn verify_snapshot(
+    relative_path: &str,
+    bytes: &[u8],
+    key: &SyncGroupKey,
+    expected_state_hash: &str,
+) -> Result<()> {
+    let encrypted = read_encrypted(relative_path, bytes)?;
+    validate_encrypted_header(&encrypted, &key.key_id())?;
+    if encrypted.state_hash != expected_state_hash {
+        bail!("L'instantané distant ne correspond pas à l'état confirmé");
+    }
+    let document = decrypt_document(&encrypted, key)?;
+    validate_document(&document)?;
+    let state_bytes = serde_json::to_vec(&document.state)
+        .context("Impossible de vérifier l'état de l'instantané")?;
+    if hex_digest(Sha256::digest(state_bytes)) != expected_state_hash {
+        bail!("L'empreinte de l'instantané est incohérente");
+    }
+    Ok(())
 }
 
 pub(crate) async fn import_snapshot(
@@ -154,15 +236,21 @@ pub(crate) async fn import_snapshot(
     {
         return Ok(SyncImportReport::default());
     }
+    verify_snapshot(relative_path, bytes, key, &encrypted.state_hash)?;
     let document = decrypt_document(&encrypted, key)?;
-    validate_document(&document)?;
-    let state_bytes = serde_json::to_vec(&document.state)
-        .context("Impossible de vérifier l'état de l'instantané")?;
-    if hex_digest(Sha256::digest(state_bytes)) != encrypted.state_hash {
-        bail!("L'empreinte de l'instantané est incohérente");
-    }
+    let frontiers = document
+        .state
+        .frontiers
+        .iter()
+        .map(|frontier| (frontier.device_id.clone(), frontier.contiguous_sequence))
+        .collect::<Vec<_>>();
     let report = storage
-        .import_sync_snapshot_events(&document.state.events, observed_at, MAX_SNAPSHOT_EVENTS)
+        .import_sync_checkpoint_events(
+            &document.state.events,
+            &frontiers,
+            observed_at,
+            MAX_SNAPSHOT_EVENTS,
+        )
         .await?;
     storage
         .record_sync_snapshot_import(
@@ -208,14 +296,19 @@ fn read_encrypted(relative_path: &str, bytes: &[u8]) -> Result<EncryptedSnapshot
 }
 
 fn validate_document(document: &SnapshotDocument) -> Result<()> {
-    if document.format != SNAPSHOT_FORMAT || document.format_version != SNAPSHOT_VERSION {
+    if document.format != SNAPSHOT_FORMAT
+        || !matches!(
+            document.format_version,
+            LEGACY_SNAPSHOT_VERSION | SNAPSHOT_VERSION
+        )
+    {
         bail!("Version d'instantané non prise en charge");
     }
     DateTime::parse_from_rfc3339(&document.created_at).context("Date d'instantané invalide")?;
-    validate_state(&document.state)
+    validate_state(&document.state, document.format_version)
 }
 
-fn validate_state(state: &SnapshotState) -> Result<()> {
+fn validate_state(state: &SnapshotState, format_version: u32) -> Result<()> {
     if state.protocol_version != SYNC_PROTOCOL_VERSION
         || state.frontiers.is_empty()
         || state.frontiers.len() > MAX_SNAPSHOT_DEVICES
@@ -223,7 +316,6 @@ fn validate_state(state: &SnapshotState) -> Result<()> {
     {
         bail!("État d'instantané invalide");
     }
-    let mut event_index = 0;
     let mut previous_device = None;
     for frontier in &state.frontiers {
         uuid::Uuid::parse_str(&frontier.device_id).context("Appareil d'instantané invalide")?;
@@ -232,20 +324,44 @@ fn validate_state(state: &SnapshotState) -> Result<()> {
         {
             bail!("Frontières d'instantané invalides");
         }
-        for expected in 1..=frontier.contiguous_sequence {
-            let event = state
-                .events
-                .get(event_index)
-                .context("L'instantané contient un trou de séquence")?;
-            if event.device_id != frontier.device_id || event.sequence != expected {
-                bail!("L'instantané contient un trou de séquence");
-            }
-            event_index += 1;
-        }
         previous_device = Some(frontier.device_id.as_str());
     }
-    if event_index != state.events.len() {
-        bail!("L'instantané contient des événements hors frontière");
+    if format_version == LEGACY_SNAPSHOT_VERSION {
+        let mut event_index = 0;
+        for frontier in &state.frontiers {
+            for expected in 1..=frontier.contiguous_sequence {
+                let event = state
+                    .events
+                    .get(event_index)
+                    .context("L'instantané contient un trou de séquence")?;
+                if event.device_id != frontier.device_id || event.sequence != expected {
+                    bail!("L'instantané contient un trou de séquence");
+                }
+                event_index += 1;
+            }
+        }
+        if event_index != state.events.len() {
+            bail!("L'instantané contient des événements hors frontière");
+        }
+    } else {
+        let frontier_by_device = state
+            .frontiers
+            .iter()
+            .map(|frontier| (frontier.device_id.as_str(), frontier.contiguous_sequence))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut previous_event = None;
+        for event in &state.events {
+            let identity = (event.device_id.as_str(), event.sequence);
+            if event.sequence <= 0
+                || frontier_by_device
+                    .get(event.device_id.as_str())
+                    .is_none_or(|frontier| event.sequence > *frontier)
+                || previous_event.is_some_and(|previous| previous >= identity)
+            {
+                bail!("Le checkpoint contient un événement hors frontière ou dupliqué");
+            }
+            previous_event = Some(identity);
+        }
     }
     Ok(())
 }
@@ -394,7 +510,7 @@ mod tests {
         let prepared = prepare_snapshot(&source, &key, observed_at)
             .await
             .unwrap()
-            .unwrap();
+            .expect_ready();
         let visible = String::from_utf8_lossy(&prepared.bytes);
         assert!(!visible.contains("snapshot.example"));
         assert!(!visible.contains("Private snapshot title"));
@@ -438,7 +554,7 @@ mod tests {
         let prepared = prepare_snapshot(&storage, &key, observed_at)
             .await
             .unwrap()
-            .unwrap();
+            .expect_ready();
         storage
             .record_sync_snapshot_publication(
                 &prepared.key_id,
@@ -448,22 +564,159 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            prepare_snapshot(&storage, &key, observed_at)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            prepare_snapshot(&storage, &key, observed_at).await.unwrap(),
+            SnapshotPreparation::ConfirmedUnchanged(_)
+        ));
     }
 
     #[tokio::test]
     async fn oversized_snapshot_is_skipped_without_blocking_the_journal() {
         let (storage, _) = source_with_state().await;
         assert!(storage.sync_snapshot_material(1).await.unwrap().is_none());
+        assert!(matches!(
+            prepare_snapshot_with_limits(
+                &storage,
+                &SyncGroupKey::from_bytes([0xb8; 32]),
+                Utc::now(),
+                SnapshotLimits {
+                    events: 1,
+                    ..DEFAULT_SNAPSHOT_LIMITS
+                },
+            )
+            .await
+            .unwrap(),
+            SnapshotPreparation::Unavailable(SnapshotUnavailableReason::TooManyRetainedEvents)
+        ));
+        assert!(matches!(
+            prepare_snapshot_with_limits(
+                &storage,
+                &SyncGroupKey::from_bytes([0xb9; 32]),
+                Utc::now(),
+                SnapshotLimits {
+                    state_bytes: 1,
+                    ..DEFAULT_SNAPSHOT_LIMITS
+                },
+            )
+            .await
+            .unwrap(),
+            SnapshotPreparation::Unavailable(SnapshotUnavailableReason::StateTooLarge)
+        ));
+        assert!(matches!(
+            prepare_snapshot_with_limits(
+                &storage,
+                &SyncGroupKey::from_bytes([0xba; 32]),
+                Utc::now(),
+                SnapshotLimits {
+                    encrypted_bytes: 1,
+                    ..DEFAULT_SNAPSHOT_LIMITS
+                },
+            )
+            .await
+            .unwrap(),
+            SnapshotPreparation::Unavailable(SnapshotUnavailableReason::EncryptedDocumentTooLarge)
+        ));
         assert_eq!(
             storage.local_sync_events_after(0, 10).await.unwrap().len(),
             3
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_keeps_only_winning_events_and_advances_sparse_frontier() {
+        let source = Storage::open_in_memory().await.unwrap();
+        source.enable_sync().await.unwrap();
+        let feed = source
+            .add_feed("https://compact.example/feed", None)
+            .await
+            .unwrap();
+        for index in 0..50 {
+            source
+                .set_feed_active(&feed.id, index % 2 != 0)
+                .await
+                .unwrap();
+        }
+        let identity = source.sync_identity().await.unwrap();
+        let frontier = identity.next_sequence - 1;
+        assert_eq!(frontier, 51);
+        let (_, compact_events) = source
+            .sync_snapshot_material(MAX_SNAPSHOT_EVENTS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(compact_events.len(), 2);
+
+        let key = SyncGroupKey::from_bytes([0xb6; 32]);
+        let prepared = prepare_snapshot(&source, &key, Utc::now())
+            .await
+            .unwrap()
+            .expect_ready();
+        let target = Storage::open_in_memory().await.unwrap();
+        target.enable_sync().await.unwrap();
+        let report = import_snapshot(
+            &target,
+            &key,
+            &prepared.relative_path,
+            &prepared.bytes,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.imported, 2);
+        assert_eq!(
+            target
+                .sync_import_cursor(&identity.device_id)
+                .await
+                .unwrap(),
+            frontier
+        );
+        assert!(target.list_feeds().await.unwrap()[0].is_active);
+    }
+
+    #[tokio::test]
+    async fn legacy_contiguous_snapshot_remains_importable() {
+        let (source, _) = source_with_state().await;
+        let identity = source.sync_identity().await.unwrap();
+        let events = source
+            .local_sync_events_after(0, MAX_SNAPSHOT_EVENTS)
+            .await
+            .unwrap();
+        let state = SnapshotState {
+            protocol_version: SYNC_PROTOCOL_VERSION,
+            frontiers: vec![SnapshotFrontier {
+                device_id: identity.device_id.clone(),
+                contiguous_sequence: identity.next_sequence - 1,
+            }],
+            events,
+        };
+        validate_state(&state, LEGACY_SNAPSHOT_VERSION).unwrap();
+        let state_bytes = serde_json::to_vec(&state).unwrap();
+        let state_hash = hex_digest(Sha256::digest(state_bytes));
+        let document = SnapshotDocument {
+            format: SNAPSHOT_FORMAT.to_string(),
+            format_version: LEGACY_SNAPSHOT_VERSION,
+            created_at: Utc::now().to_rfc3339(),
+            state,
+        };
+        let key = SyncGroupKey::from_bytes([0xb7; 32]);
+        let encrypted =
+            encrypt_document(&document, &state_hash, &key, &identity.device_id).unwrap();
+        let bytes = serde_json::to_vec(&encrypted).unwrap();
+        let target = Storage::open_in_memory().await.unwrap();
+        target.enable_sync().await.unwrap();
+
+        let report = import_snapshot(
+            &target,
+            &key,
+            &snapshot_path(&key.key_id(), &identity.device_id),
+            &bytes,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.imported, 3);
+        assert_eq!(target.list_feeds().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -473,7 +726,7 @@ mod tests {
         let prepared = prepare_snapshot(&source, &key, Utc::now())
             .await
             .unwrap()
-            .unwrap();
+            .expect_ready();
         let target = Storage::open_in_memory().await.unwrap();
         target.enable_sync().await.unwrap();
         assert!(
@@ -516,7 +769,7 @@ mod tests {
         let snapshot = prepare_snapshot(&source, &key, Utc::now())
             .await
             .unwrap()
-            .unwrap();
+            .expect_ready();
         source.set_feed_active(&feed.id, false).await.unwrap();
         let directory = tempfile::tempdir().unwrap();
         export_sync_directory(&source, directory.path(), &key)

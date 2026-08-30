@@ -107,4 +107,7 @@ export interface SyncTransportReport {
   duplicateEvents: number;
   appliedEvents: number;
   pendingEvents: number;
+  compactedEvents: number;
+  deletedSegments: number;
+  deferredSegmentDeletions: number;
 }

@@ -20,6 +20,9 @@ impl From<SyncTransportReport> for StoredSyncReport {
             duplicate_events: report.duplicate_events,
             applied_events: report.applied_events,
             pending_events: report.pending_events,
+            compacted_events: report.compacted_events,
+            deleted_segments: report.deleted_segments,
+            deferred_segment_deletions: report.deferred_segment_deletions,
         }
     }
 }
@@ -164,7 +167,10 @@ mod tests {
         }
     }
 
-    struct EmptyTransport;
+    #[derive(Default)]
+    struct EmptyTransport {
+        snapshot: Mutex<Option<(String, Vec<u8>)>>,
+    }
 
     impl SegmentTransport for EmptyTransport {
         async fn ensure_layout(&self, _key_id: &str, _device_id: &str) -> Result<()> {
@@ -191,6 +197,10 @@ mod tests {
             unreachable!("the transport exposes no segment")
         }
 
+        async fn delete_segment(&self, _relative_path: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn publish_acknowledgement(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
             Ok(())
         }
@@ -207,7 +217,8 @@ mod tests {
             unreachable!()
         }
 
-        async fn publish_snapshot(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
+        async fn publish_snapshot(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
+            *self.snapshot.lock().unwrap() = Some((relative_path.to_string(), bytes.to_vec()));
             Ok(())
         }
 
@@ -217,10 +228,19 @@ mod tests {
 
         async fn download_snapshot(
             &self,
-            _relative_path: &str,
-            _max_bytes: usize,
+            relative_path: &str,
+            max_bytes: usize,
         ) -> Result<Vec<u8>> {
-            unreachable!()
+            let (stored_path, bytes) = self
+                .snapshot
+                .lock()
+                .unwrap()
+                .clone()
+                .context("missing test snapshot")?;
+            if stored_path != relative_path || bytes.len() > max_bytes {
+                anyhow::bail!("invalid test snapshot request");
+            }
+            Ok(bytes)
         }
 
         async fn publish_roster(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
@@ -264,6 +284,10 @@ mod tests {
             _relative_path: &str,
             _max_bytes: usize,
         ) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+
+        async fn delete_segment(&self, _relative_path: &str) -> Result<()> {
             unreachable!()
         }
 
@@ -334,10 +358,14 @@ mod tests {
             .save(&SyncSecrets::new(key, "secret".to_string()).unwrap())
             .unwrap();
 
-        let report =
-            synchronize_configured_with_transport(&storage, &secrets, &EmptyTransport, Utc::now())
-                .await
-                .unwrap();
+        let report = synchronize_configured_with_transport(
+            &storage,
+            &secrets,
+            &EmptyTransport::default(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
         assert_eq!(report, SyncTransportReport::default());
         let status = storage.sync_runtime_status().await.unwrap();
         assert!(status.last_attempt_at.is_some());
@@ -350,10 +378,14 @@ mod tests {
     async fn configured_runtime_rejects_missing_or_mismatched_material() {
         let storage = Storage::open_in_memory().await.unwrap();
         let secrets = MemorySecretStore::default();
-        let missing =
-            synchronize_configured_with_transport(&storage, &secrets, &EmptyTransport, Utc::now())
-                .await
-                .unwrap_err();
+        let missing = synchronize_configured_with_transport(
+            &storage,
+            &secrets,
+            &EmptyTransport::default(),
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
         assert!(missing.to_string().contains("n'est pas configurée"));
 
         let expected_key = SyncGroupKey::from_bytes([0x24; 32]);
@@ -365,10 +397,14 @@ mod tests {
             })
             .await
             .unwrap();
-        let missing_secrets =
-            synchronize_configured_with_transport(&storage, &secrets, &EmptyTransport, Utc::now())
-                .await
-                .unwrap_err();
+        let missing_secrets = synchronize_configured_with_transport(
+            &storage,
+            &secrets,
+            &EmptyTransport::default(),
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
         assert!(missing_secrets.to_string().contains("secrets"));
 
         secrets
@@ -377,10 +413,14 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        let mismatch =
-            synchronize_configured_with_transport(&storage, &secrets, &EmptyTransport, Utc::now())
-                .await
-                .unwrap_err();
+        let mismatch = synchronize_configured_with_transport(
+            &storage,
+            &secrets,
+            &EmptyTransport::default(),
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
         assert!(mismatch.to_string().contains("ne correspond pas"));
         let status = storage.sync_runtime_status().await.unwrap();
         assert!(status.last_success_at.is_none());
@@ -475,9 +515,14 @@ mod tests {
             .save(&SyncSecrets::new(key, "secret".to_string()).unwrap())
             .unwrap();
         let success_at = Utc::now();
-        synchronize_configured_with_transport(&storage, &secrets, &EmptyTransport, success_at)
-            .await
-            .unwrap();
+        synchronize_configured_with_transport(
+            &storage,
+            &secrets,
+            &EmptyTransport::default(),
+            success_at,
+        )
+        .await
+        .unwrap();
 
         let failure_at = success_at + chrono::Duration::minutes(5);
         let error = synchronize_configured_with_transport(

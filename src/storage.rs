@@ -23,6 +23,7 @@ pub const MAX_EXTRACTION_ATTEMPTS_PER_REFRESH: usize = 20;
 pub const LOGO_RETRY_DAYS: i64 = 7;
 pub const MAX_LOGO_ATTEMPTS_PER_REFRESH: usize = 20;
 pub const MAX_SYNC_EVENTS_PER_READ: usize = 1_000;
+pub const MAX_SYNC_EVENTS_COMPACTED_PER_CYCLE: usize = 1_000;
 
 fn unique_article_ids(article_ids: &[String]) -> Vec<&str> {
     let mut seen = HashSet::new();
@@ -186,6 +187,9 @@ pub struct StoredSyncReport {
     pub duplicate_events: usize,
     pub applied_events: usize,
     pub pending_events: usize,
+    pub compacted_events: usize,
+    pub deleted_segments: usize,
+    pub deferred_segment_deletions: usize,
 }
 
 /// Persisted user-facing state of the manual synchronization runtime.
@@ -202,6 +206,27 @@ pub struct StoredSyncRuntimeError {
     pub stage: String,
     pub message: String,
     pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SyncRuntimeStatusRow {
+    last_attempt_at: Option<String>,
+    last_success_at: Option<String>,
+    last_error_stage: Option<String>,
+    last_error_message: Option<String>,
+    last_error_at: Option<String>,
+    uploaded_segments: i64,
+    reused_segments: i64,
+    exported_events: i64,
+    downloaded_segments: i64,
+    received_events: i64,
+    imported_events: i64,
+    duplicate_events: i64,
+    applied_events: i64,
+    pending_events: i64,
+    compacted_events: i64,
+    deleted_segments: i64,
+    deferred_segment_deletions: i64,
 }
 
 /// Represents one subscription as persisted by the application.
@@ -677,29 +702,15 @@ impl Storage {
 
     /// Returns the persisted outcome of the most recent manual sync attempts.
     pub async fn sync_runtime_status(&self) -> Result<StoredSyncRuntimeStatus> {
-        type StatusRow = (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-        );
-        let row: Option<StatusRow> = sqlx::query_as(
+        let row: Option<SyncRuntimeStatusRow> = sqlx::query_as(
             r#"
                 SELECT last_attempt_at, last_success_at,
                        last_error_stage, last_error_message, last_error_at,
                        uploaded_segments, reused_segments, exported_events,
                        downloaded_segments, received_events, imported_events,
-                       duplicate_events, applied_events, pending_events
+                       duplicate_events, applied_events, pending_events,
+                       compacted_events, deleted_segments,
+                       deferred_segment_deletions
                 FROM sync_runtime_status WHERE singleton = 1
             "#,
         )
@@ -719,9 +730,13 @@ impl Storage {
                 .context("Date d'état de synchronisation invalide")?
                 .with_timezone(&Utc))
         };
-        let last_attempt_at = row.0.map(&parse_date).transpose()?;
-        let last_success_at = row.1.map(&parse_date).transpose()?;
-        let last_error = match (row.2, row.3, row.4) {
+        let last_attempt_at = row.last_attempt_at.map(&parse_date).transpose()?;
+        let last_success_at = row.last_success_at.map(&parse_date).transpose()?;
+        let last_error = match (
+            row.last_error_stage,
+            row.last_error_message,
+            row.last_error_at,
+        ) {
             (Some(stage), Some(message), Some(occurred_at)) => Some(StoredSyncRuntimeError {
                 stage,
                 message,
@@ -731,15 +746,18 @@ impl Storage {
             _ => anyhow::bail!("État d'erreur de synchronisation incohérent"),
         };
         let last_report = last_success_at.map(|_| StoredSyncReport {
-            uploaded_segments: row.5 as usize,
-            reused_segments: row.6 as usize,
-            exported_events: row.7 as usize,
-            downloaded_segments: row.8 as usize,
-            received_events: row.9 as usize,
-            imported_events: row.10 as usize,
-            duplicate_events: row.11 as usize,
-            applied_events: row.12 as usize,
-            pending_events: row.13 as usize,
+            uploaded_segments: row.uploaded_segments as usize,
+            reused_segments: row.reused_segments as usize,
+            exported_events: row.exported_events as usize,
+            downloaded_segments: row.downloaded_segments as usize,
+            received_events: row.received_events as usize,
+            imported_events: row.imported_events as usize,
+            duplicate_events: row.duplicate_events as usize,
+            applied_events: row.applied_events as usize,
+            pending_events: row.pending_events as usize,
+            compacted_events: row.compacted_events as usize,
+            deleted_segments: row.deleted_segments as usize,
+            deferred_segment_deletions: row.deferred_segment_deletions as usize,
         });
         Ok(StoredSyncRuntimeStatus {
             last_attempt_at,
@@ -810,8 +828,10 @@ impl Storage {
                     singleton, last_attempt_at, last_success_at,
                     uploaded_segments, reused_segments, exported_events,
                     downloaded_segments, received_events, imported_events,
-                    duplicate_events, applied_events, pending_events
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duplicate_events, applied_events, pending_events,
+                    compacted_events, deleted_segments,
+                    deferred_segment_deletions
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(singleton) DO UPDATE SET
                     last_attempt_at = excluded.last_attempt_at,
                     last_success_at = excluded.last_success_at,
@@ -826,7 +846,10 @@ impl Storage {
                     imported_events = excluded.imported_events,
                     duplicate_events = excluded.duplicate_events,
                     applied_events = excluded.applied_events,
-                    pending_events = excluded.pending_events
+                    pending_events = excluded.pending_events,
+                    compacted_events = excluded.compacted_events,
+                    deleted_segments = excluded.deleted_segments,
+                    deferred_segment_deletions = excluded.deferred_segment_deletions
             "#,
         )
         .bind(succeeded_at.to_rfc3339())
@@ -840,6 +863,9 @@ impl Storage {
         .bind(report.duplicate_events as i64)
         .bind(report.applied_events as i64)
         .bind(report.pending_events as i64)
+        .bind(report.compacted_events as i64)
+        .bind(report.deleted_segments as i64)
+        .bind(report.deferred_segment_deletions as i64)
         .execute(&self.pool)
         .await
         .context("Impossible d'enregistrer le succès de synchronisation")?;
@@ -1696,8 +1722,9 @@ impl Storage {
         .unwrap_or(0))
     }
 
-    /// Reads a transactionally consistent set of contiguous events suitable
-    /// for an authenticated recovery snapshot.
+    /// Reads a transactionally consistent compact checkpoint. Journal
+    /// frontiers remain contiguous, while the payload retains only creation
+    /// events, current LWW winners, tombstones and unresolved dependencies.
     pub(crate) async fn sync_snapshot_material(
         &self,
         maximum_events: usize,
@@ -1731,44 +1758,60 @@ impl Storage {
         if frontiers.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             anyhow::bail!("Les frontières de l'instantané contiennent un appareil dupliqué");
         }
-        let event_count = frontiers.iter().try_fold(0_usize, |total, (_, frontier)| {
-            let frontier = usize::try_from(*frontier)
-                .context("Une frontière d'instantané est hors limites")?;
-            total
-                .checked_add(frontier)
-                .context("Le nombre d'événements de l'instantané déborde")
-        })?;
-        if event_count > maximum_events {
+        let frontier_by_device = frontiers.iter().cloned().collect::<HashMap<_, _>>();
+        let maximum_rows = i64::try_from(maximum_events)
+            .context("La limite d'événements de checkpoint est hors limites")?
+            .checked_add(1)
+            .context("La limite d'événements de checkpoint déborde")?;
+        let rows: Vec<SyncEventRow> = sqlx::query_as(
+            r#"
+                WITH retained(device_id, sequence) AS (
+                    SELECT event_device_id, event_sequence FROM sync_entity_versions
+                    UNION
+                    SELECT event_device_id, event_sequence FROM sync_tombstones
+                    UNION
+                    SELECT device_id, sequence FROM sync_pending_events
+                    UNION
+                    SELECT device_id, sequence FROM sync_events
+                    WHERE event_kind = 'subscription_created'
+                )
+                SELECT event.device_id, event.sequence,
+                       event.hlc_physical_ms, event.hlc_counter,
+                       event.protocol_version, event.event_kind,
+                       event.payload_json
+                FROM retained
+                INNER JOIN sync_events AS event
+                    ON event.device_id = retained.device_id
+                   AND event.sequence = retained.sequence
+                ORDER BY event.device_id, event.sequence
+                LIMIT ?
+            "#,
+        )
+        .bind(maximum_rows)
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de lire les événements compacts du checkpoint")?;
+        if rows.len() > maximum_events {
             transaction
                 .rollback()
                 .await
                 .context("Impossible de terminer la lecture de l'instantané")?;
             return Ok(None);
         }
-        let mut events = Vec::with_capacity(event_count);
-        for (device_id, frontier) in &frontiers {
-            let rows: Vec<SyncEventRow> = sqlx::query_as(
-                r#"
-                    SELECT device_id, sequence, hlc_physical_ms, hlc_counter,
-                           protocol_version, event_kind, payload_json
-                    FROM sync_events
-                    WHERE device_id = ? AND sequence <= ?
-                    ORDER BY sequence
-                "#,
-            )
-            .bind(device_id)
-            .bind(frontier)
-            .fetch_all(&mut *transaction)
-            .await
-            .context("Impossible de lire les événements de l'instantané")?;
-            if rows.len() != usize::try_from(*frontier).unwrap_or(usize::MAX) {
-                anyhow::bail!("Le journal contient un trou empêchant son instantané");
-            }
-            events.extend(
-                rows.into_iter()
-                    .map(sync_event_from_row)
-                    .collect::<Result<Vec<_>>>()?,
-            );
+        let events = rows
+            .into_iter()
+            .map(sync_event_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        if events.iter().any(|event| {
+            frontier_by_device
+                .get(&event.device_id)
+                .is_none_or(|frontier| event.sequence > *frontier)
+        }) {
+            transaction
+                .rollback()
+                .await
+                .context("Impossible de terminer la lecture de l'instantané")?;
+            return Ok(None);
         }
         transaction
             .commit()
@@ -2169,6 +2212,194 @@ impl Storage {
             .await
     }
 
+    /// Removes a bounded set of synchronization events made redundant by the
+    /// compact checkpoint. The authoritative roster and every acknowledgement
+    /// are read in the same transaction as the deletions so a newly observed
+    /// active device can never be omitted from the safety boundary.
+    ///
+    /// Current projection winners, tombstones, unresolved dependencies and
+    /// subscription creation events are retained. The latter are deliberately
+    /// conservative because they carry incarnation ancestry required when a
+    /// checkpoint is restored without the original journal.
+    pub(crate) async fn compact_sync_events(
+        &self,
+        key_id: &str,
+        checkpoint_frontiers: &[(String, i64)],
+        maximum_events: usize,
+    ) -> Result<usize> {
+        if key_id.len() != 64
+            || !key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!("Identifiant de clé de compaction invalide");
+        }
+        if maximum_events == 0 {
+            return Ok(0);
+        }
+        let mut checkpoint_by_device = HashMap::new();
+        for (device_id, sequence) in checkpoint_frontiers {
+            uuid::Uuid::parse_str(device_id)
+                .context("Identifiant d'appareil du checkpoint invalide")?;
+            if *sequence < 0
+                || checkpoint_by_device
+                    .insert(device_id.clone(), *sequence)
+                    .is_some()
+            {
+                anyhow::bail!("Frontières du checkpoint invalides");
+            }
+        }
+        if checkpoint_by_device.is_empty() {
+            anyhow::bail!("Le checkpoint ne contient aucune frontière");
+        }
+        let maximum_events = maximum_events.min(MAX_SYNC_EVENTS_COMPACTED_PER_CYCLE);
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Impossible de démarrer la compaction de synchronisation")?;
+        let (local_device_id, local_max_sequence): (String, i64) = sqlx::query_as(
+            "SELECT device_id, next_sequence - 1 FROM sync_local_state WHERE singleton = 1",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .context("Impossible de lire le journal local pour la compaction")?;
+        let required_observers: Vec<String> = sqlx::query_scalar(
+            r#"
+                SELECT device_id
+                FROM sync_roster_members
+                WHERE key_id = ? AND revoked_at IS NULL
+                ORDER BY device_id
+            "#,
+        )
+        .bind(key_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de lire le registre autoritaire pour la compaction")?;
+        if required_observers.is_empty()
+            || !required_observers
+                .iter()
+                .any(|device_id| device_id == &local_device_id)
+        {
+            anyhow::bail!("L'appareil local est absent du registre actif");
+        }
+
+        let remote_frontiers: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+                SELECT remote_device_id, contiguous_sequence
+                FROM sync_import_cursors
+                ORDER BY remote_device_id
+            "#,
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de lire les frontières importées pour la compaction")?;
+        let mut source_frontiers = remote_frontiers.iter().cloned().collect::<HashMap<_, _>>();
+        source_frontiers.insert(local_device_id.clone(), local_max_sequence);
+        source_frontiers.retain(|device_id, sequence| {
+            checkpoint_by_device
+                .get(device_id)
+                .is_some_and(|checkpoint| {
+                    *sequence = (*sequence).min(*checkpoint);
+                    true
+                })
+        });
+        let acknowledgements: Vec<(String, String, i64)> = sqlx::query_as(
+            r#"
+                SELECT observer_device_id, source_device_id, contiguous_sequence
+                FROM sync_acknowledgements
+                WHERE key_id = ?
+            "#,
+        )
+        .bind(key_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de lire les accusés pour la compaction")?;
+        let acknowledged = acknowledgements
+            .into_iter()
+            .map(|(observer, source, sequence)| ((observer, source), sequence))
+            .collect::<HashMap<_, _>>();
+
+        let mut sources = source_frontiers.into_iter().collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut candidates = Vec::new();
+        for (source_device_id, source_frontier) in sources {
+            if candidates.len() == maximum_events {
+                break;
+            }
+            let safe_through = required_observers
+                .iter()
+                .map(|observer_device_id| {
+                    if observer_device_id == &local_device_id {
+                        source_frontier
+                    } else {
+                        acknowledged
+                            .get(&(observer_device_id.clone(), source_device_id.clone()))
+                            .copied()
+                            .unwrap_or(0)
+                            .min(source_frontier)
+                    }
+                })
+                .min()
+                .unwrap_or(0);
+            if safe_through == 0 {
+                continue;
+            }
+            let remaining = i64::try_from(maximum_events - candidates.len())
+                .context("Limite de compaction hors limites")?;
+            let mut source_candidates: Vec<(String, i64)> = sqlx::query_as(
+                r#"
+                    SELECT event.device_id, event.sequence
+                    FROM sync_events AS event
+                    WHERE event.device_id = ?
+                      AND event.sequence <= ?
+                      AND event.event_kind <> 'subscription_created'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM sync_entity_versions AS version
+                          WHERE version.event_device_id = event.device_id
+                            AND version.event_sequence = event.sequence
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM sync_tombstones AS tombstone
+                          WHERE tombstone.event_device_id = event.device_id
+                            AND tombstone.event_sequence = event.sequence
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM sync_pending_events AS pending
+                          WHERE pending.device_id = event.device_id
+                            AND pending.sequence = event.sequence
+                      )
+                    ORDER BY event.sequence
+                    LIMIT ?
+                "#,
+            )
+            .bind(&source_device_id)
+            .bind(safe_through)
+            .bind(remaining)
+            .fetch_all(&mut *transaction)
+            .await
+            .context("Impossible de sélectionner les événements à compacter")?;
+            candidates.append(&mut source_candidates);
+        }
+
+        let mut deleted = 0usize;
+        for (device_id, sequence) in candidates {
+            let result =
+                sqlx::query("DELETE FROM sync_events WHERE device_id = ? AND sequence = ?")
+                    .bind(device_id)
+                    .bind(sequence)
+                    .execute(&mut *transaction)
+                    .await
+                    .context("Impossible de compacter un événement de synchronisation")?;
+            deleted += result.rows_affected() as usize;
+        }
+        transaction
+            .commit()
+            .await
+            .context("Impossible de valider la compaction de synchronisation")?;
+        Ok(deleted)
+    }
+
     /// Validates and atomically imports remote synchronization events.
     ///
     /// Remote application writes projections directly and therefore never
@@ -2186,13 +2417,21 @@ impl Storage {
         sync_merge::import_sync_events(&self.pool, events, observed_at).await
     }
 
-    pub(crate) async fn import_sync_snapshot_events(
+    pub(crate) async fn import_sync_checkpoint_events(
         &self,
         events: &[SyncEvent],
+        frontiers: &[(String, i64)],
         observed_at: DateTime<Utc>,
         maximum: usize,
     ) -> Result<SyncImportReport> {
-        sync_merge::import_sync_snapshot_events(&self.pool, events, observed_at, maximum).await
+        sync_merge::import_sync_checkpoint_events(
+            &self.pool,
+            events,
+            frontiers,
+            observed_at,
+            maximum,
+        )
+        .await
     }
 
     /// Imports the configured subscriptions as the active feed set.
@@ -4068,6 +4307,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_compaction_is_bounded_idempotent_and_preserves_checkpoint_state() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://local-compaction.example/feed", None)
+            .await
+            .unwrap();
+        for index in 0..25 {
+            storage
+                .set_feed_active(&feed.id, index % 2 == 0)
+                .await
+                .unwrap();
+        }
+        let key_id = "ac".repeat(32);
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 29, 16, 0, 0).unwrap();
+        storage
+            .seed_sync_roster(&key_id, observed_at)
+            .await
+            .unwrap();
+        let checkpoint_before = storage
+            .sync_snapshot_material(MAX_SYNC_EVENTS_PER_READ)
+            .await
+            .unwrap()
+            .unwrap();
+        let feeds_before = storage.list_feeds().await.unwrap();
+
+        assert_eq!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_before.0, 7)
+                .await
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_before.0, MAX_SYNC_EVENTS_PER_READ,)
+                .await
+                .unwrap(),
+            17
+        );
+        assert_eq!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_before.0, MAX_SYNC_EVENTS_PER_READ,)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            storage
+                .sync_snapshot_material(MAX_SYNC_EVENTS_PER_READ)
+                .await
+                .unwrap()
+                .unwrap(),
+            checkpoint_before
+        );
+        assert_eq!(storage.list_feeds().await.unwrap(), feeds_before);
+        assert_eq!(
+            storage.local_sync_events_after(0, 100).await.unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn local_compaction_waits_for_every_active_roster_member() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://blocked-compaction.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        storage.set_feed_active(&feed.id, true).await.unwrap();
+        let local = storage.sync_identity().await.unwrap();
+        let remote = "00000000-0000-4000-8000-000000000063";
+        let key_id = "bd".repeat(32);
+        let observed_at = Utc.with_ymd_and_hms(2026, 8, 29, 16, 30, 0).unwrap();
+        storage
+            .merge_sync_roster(
+                &key_id,
+                &[
+                    SyncRosterMember {
+                        device_id: local.device_id.clone(),
+                        revoked_at: None,
+                    },
+                    SyncRosterMember {
+                        device_id: remote.to_string(),
+                        revoked_at: None,
+                    },
+                ],
+                observed_at,
+            )
+            .await
+            .unwrap();
+
+        let checkpoint_frontiers = vec![(local.device_id.clone(), local.next_sequence - 1)];
+        assert_eq!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_frontiers, 100)
+                .await
+                .unwrap(),
+            0
+        );
+        storage
+            .record_sync_acknowledgement(&SyncAcknowledgement {
+                key_id: key_id.clone(),
+                observer_device_id: remote.to_string(),
+                source_device_id: local.device_id,
+                contiguous_sequence: local.next_sequence - 1,
+                observed_at,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_frontiers, 100)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn synchronization_roster_is_additive_and_revocation_never_regresses() {
         let storage = Storage::open_in_memory().await.unwrap();
         let key_id = "cd".repeat(32);
@@ -4192,7 +4553,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 15);
+        assert_eq!(migration_count, 17);
 
         storage.close().await;
     }

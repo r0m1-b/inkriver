@@ -647,25 +647,43 @@ Chaque cycle réussi publie également un document d'accusé de réception chiff
 et borné, qui décrit les préfixes contigus de journaux consommés par cet
 appareil. WebDAV remplace atomiquement ce document propre à l'appareil et les
 récepteurs ne conservent qu'une progression monotone après authentification par
-la clé de groupe. Ces accusés préparent une compaction sûre, mais InkRiver ne
-supprime encore aucun événement ni segment distant. Chaque appareil publie
+la clé de groupe. Ces accusés autorisent désormais une compaction locale bornée
+après publication ou nouvelle authentification du checkpoint de récupération.
+Chaque cycle supprime au plus 1 000 événements SQLite redondants tout en
+conservant les créations d'abonnements, les gagnants LWW courants, les pierres
+tombales et les dépendances non résolues. La même preuve permet ensuite de
+supprimer au plus 20 segments WebDAV entièrement couverts dans le seul journal
+de cet appareil. Un segment qui traverse la frontière sûre est conservé en
+entier et un échec de suppression reporte simplement le nettoyage restant à un
+cycle ultérieur. Chaque appareil publie
 désormais aussi un instantané de récupération authentifié lorsque son état
 synchronisé contigu change. Une installation neuve peut reconstruire ses
 projections depuis cet instantané sans télécharger les anciens segments ; un
 appareil en retard l'utilise lorsqu'il détecte un trou, puis applique les
-segments suivants. Les instantanés contiennent uniquement les événements de
-synchronisation, jamais les corps d'articles en cache, sont limités à 10 000
-événements et 8 Mio chiffrés, et sont omis plutôt que de bloquer la
+segments suivants. Les instantanés de version 2 ne conservent que les créations
+d'abonnements, les gagnants LWW courants, les pierres tombales et les dépendances
+non résolues, tout en préservant les frontières complètes des journaux. L'ancien
+format contigu de version 1 reste lisible. Les instantanés ne contiennent jamais
+les corps d'articles en cache, sont limités à 10 000 événements retenus et
+8 Mio chiffrés, et sont omis plutôt que de bloquer la
 synchronisation au-delà de ces limites. La découverte accepte jusqu'à 256
 appareils, mais chaque cycle ne télécharge qu'au plus huit instantanés
-prioritaires afin de borner le trafic de récupération. Une liste complète et
+prioritaires afin de borner le trafic de récupération. Avant toute compaction
+locale, le pipeline distingue un checkpoint nouvellement publié,
+un checkpoint inchangé retéléchargé et authentifié, et un checkpoint
+indisponible. Un fichier distant inchangé manquant ou corrompu est réparé
+atomiquement ; un checkpoint indisponible ne peut autoriser aucune suppression.
+Une liste complète et
 fiable des appareils est également échangée à chaque cycle dans un registre
 chiffré et authentifié propre à chaque appareil. L'appartenance ne peut que
 s'étendre et une révocation est définitive pour un UUID : un ancien document ne
 peut donc pas réactiver silencieusement un appareil. Tout détenteur de la clé de
 groupe partagée peut publier une telle révocation ; un appareil réinstallé
-rejoint donc le groupe avec un nouvel UUID. La compaction destructive reste
-désactivée jusqu'aux dernières validations de récupération et de suppression.
+rejoint donc le groupe avec un nouvel UUID. La compaction locale est
+transactionnelle, idempotente et bloquée par tout appareil actif qui n'a pas
+acquitté un journal. Le nettoyage WebDAV est lui aussi idempotent, borné et
+limité aux chemins de segments validés de l'appareil courant ; il ne transforme
+jamais un import réussi en échec de synchronisation.
 
 - le CLI optionnel appartient encore au paquet Rust principal au lieu d'être
   isolé dans un crate du workspace ;

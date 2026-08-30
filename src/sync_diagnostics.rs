@@ -57,6 +57,9 @@ struct SyncDiagnosticReport {
     duplicate_events: usize,
     applied_events: usize,
     pending_events: usize,
+    compacted_events: usize,
+    deleted_segments: usize,
+    deferred_segment_deletions: usize,
 }
 
 impl From<StoredSyncReport> for SyncDiagnosticReport {
@@ -71,6 +74,9 @@ impl From<StoredSyncReport> for SyncDiagnosticReport {
             duplicate_events: report.duplicate_events,
             applied_events: report.applied_events,
             pending_events: report.pending_events,
+            compacted_events: report.compacted_events,
+            deleted_segments: report.deleted_segments,
+            deferred_segment_deletions: report.deferred_segment_deletions,
         }
     }
 }

@@ -165,6 +165,9 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       duplicateEvents: 0,
       appliedEvents: 0,
       pendingEvents: 0,
+      compactedEvents: 0,
+      deletedSegments: 0,
+      deferredSegmentDeletions: 0,
     })),
     deleteSyncConfiguration: vi.fn(async () => ({
       ...emptySyncRuntime,
@@ -2763,6 +2766,9 @@ describe("InkRiverApp", () => {
         duplicateEvents: 0,
         appliedEvents: 3,
         pendingEvents: 0,
+        compactedEvents: 0,
+        deletedSegments: 0,
+        deferredSegmentDeletions: 0,
       },
     };
     const syncPairingStatus = vi
@@ -2781,6 +2787,9 @@ describe("InkRiverApp", () => {
         duplicateEvents: 0,
         appliedEvents: 3,
         pendingEvents: 0,
+        compactedEvents: 0,
+        deletedSegments: 0,
+        deferredSegmentDeletions: 0,
       })),
     });
     const { root } = await mounted(api);
@@ -2863,6 +2872,9 @@ describe("InkRiverApp", () => {
           duplicateEvents: 0,
           appliedEvents: 1,
           pendingEvents: 1,
+          compactedEvents: 0,
+          deletedSegments: 0,
+          deferredSegmentDeletions: 0,
         },
       })),
     });

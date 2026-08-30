@@ -204,6 +204,9 @@ pub struct SyncTransportReportDto {
     pub duplicate_events: usize,
     pub applied_events: usize,
     pub pending_events: usize,
+    pub compacted_events: usize,
+    pub deleted_segments: usize,
+    pub deferred_segment_deletions: usize,
 }
 
 impl From<SyncTransportReport> for SyncTransportReportDto {
@@ -218,6 +221,9 @@ impl From<SyncTransportReport> for SyncTransportReportDto {
             duplicate_events: report.duplicate_events,
             applied_events: report.applied_events,
             pending_events: report.pending_events,
+            compacted_events: report.compacted_events,
+            deleted_segments: report.deleted_segments,
+            deferred_segment_deletions: report.deferred_segment_deletions,
         }
     }
 }
@@ -234,6 +240,9 @@ impl From<StoredSyncReport> for SyncTransportReportDto {
             duplicate_events: report.duplicate_events,
             applied_events: report.applied_events,
             pending_events: report.pending_events,
+            compacted_events: report.compacted_events,
+            deleted_segments: report.deleted_segments,
+            deferred_segment_deletions: report.deferred_segment_deletions,
         }
     }
 }
@@ -1111,6 +1120,9 @@ mod tests {
                     exported_events: 2,
                     applied_events: 3,
                     pending_events: 1,
+                    compacted_events: 4,
+                    deleted_segments: 5,
+                    deferred_segment_deletions: 6,
                     ..StoredSyncReport::default()
                 },
             )
@@ -1124,6 +1136,16 @@ mod tests {
         );
         assert_eq!(status.last_report.as_ref().unwrap().exported_events, 2);
         assert_eq!(status.last_report.as_ref().unwrap().pending_events, 1);
+        assert_eq!(status.last_report.as_ref().unwrap().compacted_events, 4);
+        assert_eq!(status.last_report.as_ref().unwrap().deleted_segments, 5);
+        assert_eq!(
+            status
+                .last_report
+                .as_ref()
+                .unwrap()
+                .deferred_segment_deletions,
+            6
+        );
 
         let removed = delete_sync_configuration_with(&storage, &secrets)
             .await
@@ -1572,11 +1594,17 @@ mod tests {
             duplicate_events: 7,
             applied_events: 8,
             pending_events: 9,
+            compacted_events: 10,
+            deleted_segments: 11,
+            deferred_segment_deletions: 12,
         }))
         .unwrap();
         assert_eq!(sync["uploadedSegments"], 1);
         assert_eq!(sync["appliedEvents"], 8);
         assert_eq!(sync["pendingEvents"], 9);
+        assert_eq!(sync["compactedEvents"], 10);
+        assert_eq!(sync["deletedSegments"], 11);
+        assert_eq!(sync["deferredSegmentDeletions"], 12);
         assert!(sync.get("uploaded_segments").is_none());
     }
 

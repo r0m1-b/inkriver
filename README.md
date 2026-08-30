@@ -620,22 +620,38 @@ Each successful cycle also publishes an encrypted, bounded acknowledgement
 document describing the contiguous journal prefixes consumed by that device.
 WebDAV replaces this per-device document atomically, and receivers only retain
 monotonic progress after authentication with the group key. These
-acknowledgements prepare safe compaction, but InkRiver does not delete any
-synchronization event or remote segment yet. Each device now also publishes an
+acknowledgements now authorize bounded local compaction after a recovery
+checkpoint has been published or downloaded and authenticated again. Each
+cycle removes at most 1,000 redundant SQLite events while preserving
+subscription creations, current LWW winners, tombstones and unresolved
+dependencies. The same proof then removes at most 20 fully covered WebDAV
+segments from this device's own journal. A segment crossing the safe frontier
+is retained in full, and a remote deletion failure merely defers the remaining
+cleanup to a later cycle. Each device also publishes an
 authenticated recovery snapshot when its contiguous synchronized state changes.
 A fresh installation can rebuild its projections from that snapshot without
 downloading older segments, and a lagging device uses the latest snapshot when
-it detects a segment gap before applying subsequent segments. Snapshots contain
-only synchronization events—never cached article bodies—are limited to 10,000
-events and 8 MiB encrypted, and are skipped rather than blocking synchronization
-when those limits are exceeded. Snapshot discovery accepts up to 256 devices,
+it detects a segment gap before applying subsequent segments. Version-two
+snapshots retain only subscription creations, current LWW winners, tombstones
+and unresolved dependencies while preserving complete journal frontiers. The
+legacy contiguous version-one format remains readable. Snapshots never contain
+cached article bodies, are limited to 10,000 retained events and 8 MiB
+encrypted, and are skipped rather than blocking synchronization when those
+limits are exceeded. Snapshot discovery accepts up to 256 devices,
 while each synchronization cycle downloads at most eight prioritized snapshots
-to keep recovery traffic bounded. Every cycle also exchanges an encrypted,
+to keep recovery traffic bounded. Before local compaction, the pipeline
+distinguishes a newly published checkpoint, an unchanged checkpoint that
+is downloaded and authenticated again, and an unavailable checkpoint. A missing
+or corrupted unchanged remote file is atomically repaired; an unavailable one
+cannot authorize deletion. Every cycle also exchanges an encrypted,
 authenticated per-device membership roster. Membership grows monotonically and
 revocation is permanent for a device UUID, so an old document cannot silently
 reactivate a device. Any holder of the shared group key can publish such a
-revocation; a reinstalled device therefore joins with a new UUID. Destructive
-compaction remains disabled pending the final recovery and deletion checks.
+revocation; a reinstalled device therefore joins with a new UUID. Local
+compaction is transactional, idempotent and blocked by every active device that
+has not acknowledged a journal. WebDAV cleanup is likewise idempotent, bounded
+and restricted to the current device's validated segment paths; it never turns
+a successful import into a synchronization failure.
 
 - the optional CLI remains part of the main Rust package instead of a separate
   workspace crate;

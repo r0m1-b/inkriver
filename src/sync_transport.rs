@@ -1,4 +1,4 @@
-use crate::storage::Storage;
+use crate::storage::{MAX_SYNC_EVENTS_COMPACTED_PER_CYCLE, Storage};
 use crate::sync_acknowledgements::{
     MAX_ACKNOWLEDGEMENT_BYTES, prepare_acknowledgement, read_acknowledgement,
 };
@@ -9,7 +9,8 @@ use crate::sync_segments::{
     verify_prepared_segment_bytes,
 };
 use crate::sync_snapshots::{
-    MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_DEVICES, import_snapshot, prepare_snapshot, snapshot_creator,
+    MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_DEVICES, PreparedSnapshot, SnapshotPreparation,
+    import_snapshot, prepare_snapshot, snapshot_creator, verify_snapshot,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -19,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 const MAX_CONCURRENT_DOWNLOADS: usize = 4;
 const MAX_SEGMENTS_PER_SYNC: usize = 20;
 const MAX_SNAPSHOTS_PER_SYNC: usize = 8;
+const MAX_SEGMENT_DELETIONS_PER_SYNC: usize = 20;
 
 /// Outcome of publishing one immutable encrypted segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,10 @@ pub trait SegmentTransport: Sync {
         relative_path: &str,
         max_bytes: usize,
     ) -> impl Future<Output = Result<Vec<u8>>> + Send;
+
+    /// Idempotently deletes one validated immutable segment path. A missing
+    /// remote file is considered a successful cleanup.
+    fn delete_segment(&self, relative_path: &str) -> impl Future<Output = Result<()>> + Send;
 
     /// Atomically replaces the local device's encrypted acknowledgement.
     fn publish_acknowledgement(
@@ -120,6 +126,9 @@ pub struct SyncTransportReport {
     pub duplicate_events: usize,
     pub applied_events: usize,
     pub pending_events: usize,
+    pub compacted_events: usize,
+    pub deleted_segments: usize,
+    pub deferred_segment_deletions: usize,
 }
 
 /// Exchanges all currently available encrypted segments through one transport.
@@ -221,10 +230,12 @@ pub async fn synchronize_transport<T: SegmentTransport>(
     let mut cursors = HashMap::new();
     let mut expected_sequences = HashMap::new();
     let mut gap_devices = HashSet::new();
+    let mut local_segments = Vec::new();
     for path in &paths {
         let (device_id, first_sequence, last_sequence) =
             segment_path_identity(path, &prepared.key_id)?;
         if device_id == prepared.device_id {
+            local_segments.push((path.clone(), first_sequence, last_sequence));
             continue;
         }
         if device_is_revoked(storage, &prepared.key_id, device_id).await? {
@@ -370,21 +381,130 @@ pub async fn synchronize_transport<T: SegmentTransport>(
             .await?;
     }
 
-    if let Some(snapshot) = prepare_snapshot(storage, key, observed_at).await? {
-        transport
-            .publish_snapshot(&snapshot.relative_path, &snapshot.bytes)
-            .await
-            .context("Impossible de publier l'instantané de récupération")?;
-        storage
-            .record_sync_snapshot_publication(
-                &snapshot.key_id,
-                &snapshot.creator_device_id,
-                &snapshot.state_hash,
-                observed_at,
+    let checkpoint_frontiers =
+        ensure_recovery_checkpoint(storage, key, transport, observed_at).await?;
+    report.deferred_segment_deletions = local_segments.len();
+    if let Some(checkpoint_frontiers) = checkpoint_frontiers {
+        report.compacted_events = storage
+            .compact_sync_events(
+                &prepared.key_id,
+                &checkpoint_frontiers,
+                MAX_SYNC_EVENTS_COMPACTED_PER_CYCLE,
             )
             .await?;
+        delete_confirmed_local_segments(
+            storage,
+            &prepared.key_id,
+            &prepared.device_id,
+            &checkpoint_frontiers,
+            &local_segments,
+            transport,
+            &mut report,
+        )
+        .await?;
     }
     Ok(report)
+}
+
+async fn ensure_recovery_checkpoint<T: SegmentTransport>(
+    storage: &Storage,
+    key: &SyncGroupKey,
+    transport: &T,
+    observed_at: DateTime<Utc>,
+) -> Result<Option<Vec<(String, i64)>>> {
+    match prepare_snapshot(storage, key, observed_at).await? {
+        SnapshotPreparation::Ready(snapshot) => {
+            publish_and_verify_snapshot(&snapshot, key, transport, "publier").await?;
+            storage
+                .record_sync_snapshot_publication(
+                    &snapshot.key_id,
+                    &snapshot.creator_device_id,
+                    &snapshot.state_hash,
+                    observed_at,
+                )
+                .await?;
+            Ok(Some(snapshot.frontiers))
+        }
+        SnapshotPreparation::ConfirmedUnchanged(snapshot) => {
+            let remote_is_valid = match transport
+                .download_snapshot(&snapshot.relative_path, MAX_SNAPSHOT_BYTES)
+                .await
+            {
+                Ok(bytes) => {
+                    verify_snapshot(&snapshot.relative_path, &bytes, key, &snapshot.state_hash)
+                        .is_ok()
+                }
+                Err(_) => false,
+            };
+            if !remote_is_valid {
+                publish_and_verify_snapshot(&snapshot, key, transport, "réparer").await?;
+                storage
+                    .record_sync_snapshot_publication(
+                        &snapshot.key_id,
+                        &snapshot.creator_device_id,
+                        &snapshot.state_hash,
+                        observed_at,
+                    )
+                    .await?;
+            }
+            Ok(Some(snapshot.frontiers))
+        }
+        SnapshotPreparation::Unavailable(_reason) => Ok(None),
+    }
+}
+
+async fn publish_and_verify_snapshot<T: SegmentTransport>(
+    snapshot: &PreparedSnapshot,
+    key: &SyncGroupKey,
+    transport: &T,
+    action: &str,
+) -> Result<()> {
+    transport
+        .publish_snapshot(&snapshot.relative_path, &snapshot.bytes)
+        .await
+        .with_context(|| format!("Impossible de {action} l'instantané de récupération"))?;
+    let remote = transport
+        .download_snapshot(&snapshot.relative_path, MAX_SNAPSHOT_BYTES)
+        .await
+        .context("Impossible de vérifier l'instantané publié")?;
+    verify_snapshot(&snapshot.relative_path, &remote, key, &snapshot.state_hash)
+        .context("L'instantané publié ne peut pas être authentifié")
+}
+
+async fn delete_confirmed_local_segments<T: SegmentTransport>(
+    storage: &Storage,
+    key_id: &str,
+    local_device_id: &str,
+    checkpoint_frontiers: &[(String, i64)],
+    local_segments: &[(String, i64, i64)],
+    transport: &T,
+    report: &mut SyncTransportReport,
+) -> Result<()> {
+    let checkpoint_frontier = checkpoint_frontiers
+        .iter()
+        .find_map(|(device_id, sequence)| (device_id == local_device_id).then_some(*sequence))
+        .context("Le checkpoint confirmé ne couvre pas le journal local")?;
+    let safe = storage
+        .authoritative_sync_compaction_frontier(key_id, local_device_id, checkpoint_frontier)
+        .await?;
+    let mut candidates = local_segments
+        .iter()
+        .filter(|(_, _, last_sequence)| *last_sequence <= safe.safe_through_sequence)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.2
+            .cmp(&right.2)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    for (relative_path, _, _) in candidates.into_iter().take(MAX_SEGMENT_DELETIONS_PER_SYNC) {
+        if transport.delete_segment(relative_path).await.is_err() {
+            break;
+        }
+        report.deleted_segments += 1;
+        report.deferred_segment_deletions -= 1;
+    }
+    Ok(())
 }
 
 async fn device_is_revoked(storage: &Storage, key_id: &str, device_id: &str) -> Result<bool> {
@@ -459,6 +579,9 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemoryTransport {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        reject_snapshots: bool,
+        reject_deletions: bool,
+        deleted_paths: Arc<Mutex<Vec<String>>>,
     }
 
     impl SegmentTransport for MemoryTransport {
@@ -513,6 +636,18 @@ mod tests {
             Ok(bytes)
         }
 
+        async fn delete_segment(&self, relative_path: &str) -> Result<()> {
+            if self.reject_deletions {
+                bail!("segment deletion rejected for test");
+            }
+            self.files.lock().unwrap().remove(relative_path);
+            self.deleted_paths
+                .lock()
+                .unwrap()
+                .push(relative_path.to_string());
+            Ok(())
+        }
+
         async fn publish_acknowledgement(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
             self.files
                 .lock()
@@ -542,6 +677,9 @@ mod tests {
         }
 
         async fn publish_snapshot(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
+            if self.reject_snapshots {
+                bail!("snapshot publication rejected for test");
+            }
             self.files
                 .lock()
                 .unwrap()
@@ -635,6 +773,10 @@ mod tests {
             self.active.fetch_sub(1, Ordering::SeqCst);
             self.completed.fetch_add(1, Ordering::SeqCst);
             Ok(b"{}".to_vec())
+        }
+
+        async fn delete_segment(&self, _relative_path: &str) -> Result<()> {
+            Ok(())
         }
 
         async fn publish_acknowledgement(&self, _relative_path: &str, _bytes: &[u8]) -> Result<()> {
@@ -750,6 +892,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirmed_checkpoint_triggers_bounded_local_compaction() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://transport-compaction.example/feed", None)
+            .await
+            .unwrap();
+        for index in 0..12 {
+            storage
+                .set_feed_active(&feed.id, index % 2 == 0)
+                .await
+                .unwrap();
+        }
+        let key = SyncGroupKey::from_bytes([0xa2; 32]);
+        let transport = MemoryTransport::default();
+
+        let first = synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(first.compacted_events, 11);
+        assert_eq!(
+            storage.local_sync_events_after(0, 100).await.unwrap().len(),
+            2
+        );
+
+        let second = synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(second.compacted_events, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_publication_prevents_local_compaction() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://unconfirmed-compaction.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        storage.set_feed_active(&feed.id, true).await.unwrap();
+        let before = storage.local_sync_events_after(0, 100).await.unwrap();
+        let transport = MemoryTransport {
+            reject_snapshots: true,
+            ..MemoryTransport::default()
+        };
+
+        let error = synchronize_transport(
+            &storage,
+            &SyncGroupKey::from_bytes([0xa3; 32]),
+            &transport,
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("instantané"));
+        assert_eq!(
+            storage.local_sync_events_after(0, 100).await.unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_cleanup_waits_for_full_acknowledgement_of_a_segment() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://segment-frontier.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        storage.set_feed_active(&feed.id, true).await.unwrap();
+        let local = storage.sync_identity().await.unwrap();
+        let remote_id = "00000000-0000-4000-8000-000000000064";
+        let observed_at = Utc::now();
+        storage
+            .register_sync_device(remote_id, "Remote", observed_at)
+            .await
+            .unwrap();
+        let key = SyncGroupKey::from_bytes([0xa4; 32]);
+        let transport = MemoryTransport::default();
+
+        let blocked = synchronize_transport(&storage, &key, &transport, observed_at)
+            .await
+            .unwrap();
+        assert_eq!(blocked.deleted_segments, 0);
+        assert_eq!(blocked.deferred_segment_deletions, 1);
+        storage
+            .record_sync_acknowledgement(&crate::storage::SyncAcknowledgement {
+                key_id: key.key_id(),
+                observer_device_id: remote_id.to_string(),
+                source_device_id: local.device_id.clone(),
+                contiguous_sequence: 2,
+                observed_at,
+            })
+            .await
+            .unwrap();
+
+        let partial = synchronize_transport(&storage, &key, &transport, observed_at)
+            .await
+            .unwrap();
+        assert_eq!(partial.deleted_segments, 0);
+        assert_eq!(partial.deferred_segment_deletions, 1);
+        storage
+            .record_sync_acknowledgement(&crate::storage::SyncAcknowledgement {
+                key_id: key.key_id(),
+                observer_device_id: remote_id.to_string(),
+                source_device_id: local.device_id.clone(),
+                contiguous_sequence: local.next_sequence - 1,
+                observed_at,
+            })
+            .await
+            .unwrap();
+
+        let cleaned = synchronize_transport(&storage, &key, &transport, observed_at)
+            .await
+            .unwrap();
+        assert_eq!(cleaned.deleted_segments, 1);
+        assert_eq!(cleaned.deferred_segment_deletions, 0);
+        assert!(
+            transport
+                .deleted_paths
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|path| path.contains(&format!("/{}/", local.device_id)))
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_cleanup_failure_is_non_blocking_and_retried_later() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://deferred-cleanup.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        let failing = MemoryTransport {
+            reject_deletions: true,
+            ..MemoryTransport::default()
+        };
+        let key = SyncGroupKey::from_bytes([0xa5; 32]);
+
+        let deferred = synchronize_transport(&storage, &key, &failing, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(deferred.deleted_segments, 0);
+        assert_eq!(deferred.deferred_segment_deletions, 1);
+        let succeeding = MemoryTransport {
+            files: Arc::clone(&failing.files),
+            deleted_paths: Arc::clone(&failing.deleted_paths),
+            ..MemoryTransport::default()
+        };
+        let cleaned = synchronize_transport(&storage, &key, &succeeding, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(cleaned.deleted_segments, 1);
+        assert_eq!(cleaned.deferred_segment_deletions, 0);
+    }
+
+    #[tokio::test]
+    async fn remote_cleanup_never_deletes_another_device_journal() {
+        let local = Storage::open_in_memory().await.unwrap();
+        let remote = Storage::open_in_memory().await.unwrap();
+        local.enable_sync().await.unwrap();
+        remote.enable_sync().await.unwrap();
+        local
+            .add_feed("https://local-owner.example/feed", None)
+            .await
+            .unwrap();
+        remote
+            .add_feed("https://remote-owner.example/feed", None)
+            .await
+            .unwrap();
+        let key = SyncGroupKey::from_bytes([0xa7; 32]);
+        let local_export = prepare_sync_export(&local, &key).await.unwrap();
+        let remote_export = prepare_sync_export(&remote, &key).await.unwrap();
+        let local_path = local_export.segments[0].relative_path.clone();
+        let remote_path = remote_export.segments[0].relative_path.clone();
+        let transport = MemoryTransport::default();
+        {
+            let mut files = transport.files.lock().unwrap();
+            files.insert(remote_path.clone(), remote_export.segments[0].bytes.clone());
+        }
+
+        let report = synchronize_transport(&local, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(report.deleted_segments, 1);
+        let files = transport.files.lock().unwrap();
+        assert!(!files.contains_key(&local_path));
+        assert!(files.contains_key(&remote_path));
+    }
+
+    #[tokio::test]
+    async fn remote_cleanup_is_limited_to_twenty_segments_per_cycle() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://bounded-cleanup.example/feed", None)
+            .await
+            .unwrap();
+        for index in 0..24 {
+            storage
+                .set_feed_active(&feed.id, index % 2 == 0)
+                .await
+                .unwrap();
+        }
+        let local = storage.sync_identity().await.unwrap();
+        let key = SyncGroupKey::from_bytes([0xa6; 32]);
+        let key_id = key.key_id();
+        storage.seed_sync_roster(&key_id, Utc::now()).await.unwrap();
+        let segments = (1..local.next_sequence)
+            .map(|sequence| {
+                (
+                    format!(
+                        "v2/{key_id}/{}/{sequence:020}-{sequence:020}.json",
+                        local.device_id
+                    ),
+                    sequence,
+                    sequence,
+                )
+            })
+            .collect::<Vec<_>>();
+        let transport = MemoryTransport::default();
+        let mut report = SyncTransportReport {
+            deferred_segment_deletions: segments.len(),
+            ..SyncTransportReport::default()
+        };
+
+        delete_confirmed_local_segments(
+            &storage,
+            &key_id,
+            &local.device_id,
+            &[(local.device_id.clone(), local.next_sequence - 1)],
+            &segments,
+            &transport,
+            &mut report,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.deleted_segments, 20);
+        assert_eq!(report.deferred_segment_deletions, 5);
+    }
+
+    #[tokio::test]
     async fn distributed_roster_propagates_irreversible_device_revocation() {
         let key = SyncGroupKey::from_bytes([0x83; 32]);
         let transport = MemoryTransport::default();
@@ -815,6 +1204,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unchanged_checkpoint_is_verified_and_repaired_remotely() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        storage
+            .add_feed("https://checkpoint-repair.example/feed", None)
+            .await
+            .unwrap();
+        let key = SyncGroupKey::from_bytes([0x84; 32]);
+        let transport = MemoryTransport::default();
+        synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        let snapshot_path = transport
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .find(|path| path.contains("/snapshots/"))
+            .unwrap()
+            .clone();
+
+        transport.files.lock().unwrap().remove(&snapshot_path);
+        synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert!(transport.files.lock().unwrap().contains_key(&snapshot_path));
+
+        {
+            let mut files = transport.files.lock().unwrap();
+            let bytes = files.get_mut(&snapshot_path).unwrap();
+            let index = bytes.len() / 2;
+            bytes[index] ^= 1;
+        }
+        synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+
+        let restored = Storage::open_in_memory().await.unwrap();
+        restored.enable_sync().await.unwrap();
+        let bytes = transport
+            .files
+            .lock()
+            .unwrap()
+            .get(&snapshot_path)
+            .unwrap()
+            .clone();
+        crate::sync_snapshots::import_snapshot(&restored, &key, &snapshot_path, &bytes, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(restored.list_feeds().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn lagging_device_repairs_a_missing_segment_from_the_latest_snapshot() {
         let source = Storage::open_in_memory().await.unwrap();
         let lagging = Storage::open_in_memory().await.unwrap();
@@ -854,7 +1296,7 @@ mod tests {
         let repaired = synchronize_transport(&lagging, &key, &transport, Utc::now())
             .await
             .unwrap();
-        assert_eq!(repaired.imported_events, 2);
+        assert_eq!(repaired.imported_events, 1);
         assert_eq!(repaired.downloaded_segments, 0);
         assert_eq!(lagging.sync_import_cursor(&source_id).await.unwrap(), 3);
         assert!(lagging.list_feeds().await.unwrap()[0].is_active);

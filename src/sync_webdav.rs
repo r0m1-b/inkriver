@@ -350,6 +350,19 @@ impl SegmentTransport for WebDavTransport {
         read_bounded(response, max_bytes).await
     }
 
+    async fn delete_segment(&self, relative_path: &str) -> Result<()> {
+        validate_segment_path(relative_path)?;
+        let response = self
+            .request(Method::DELETE, self.url(relative_path)?)
+            .send()
+            .await
+            .context("Suppression WebDAV impossible")?;
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        bail!("DELETE returned HTTP status {}", response.status())
+    }
+
     async fn publish_acknowledgement(&self, relative_path: &str, bytes: &[u8]) -> Result<()> {
         if bytes.len() > crate::sync_acknowledgements::MAX_ACKNOWLEDGEMENT_BYTES {
             bail!("Synchronization acknowledgement exceeds the upload limit");
@@ -550,10 +563,30 @@ fn is_segment_file_name(name: &str) -> bool {
     let Some((first, last)) = range.split_once('-') else {
         return false;
     };
-    first.len() == 20
-        && last.len() == 20
-        && first.bytes().all(|byte| byte.is_ascii_digit())
-        && last.bytes().all(|byte| byte.is_ascii_digit())
+    if first.len() != 20
+        || last.len() != 20
+        || !first.bytes().all(|byte| byte.is_ascii_digit())
+        || !last.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let (Ok(first), Ok(last)) = (first.parse::<i64>(), last.parse::<i64>()) else {
+        return false;
+    };
+    first > 0 && last >= first
+}
+
+fn validate_segment_path(relative_path: &str) -> Result<()> {
+    validate_relative_path(relative_path)?;
+    let components = relative_path.split('/').collect::<Vec<_>>();
+    if components.len() != 4 || components[0] != "v2" {
+        bail!("Invalid synchronization segment path");
+    }
+    validate_key_and_device(components[1], components[2])?;
+    if !is_segment_file_name(components[3]) {
+        bail!("Invalid synchronization segment path");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -907,6 +940,38 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].href, "/dav/a&b/");
         assert!(entries[0].is_collection);
+    }
+
+    #[tokio::test]
+    async fn segment_deletion_is_idempotent_and_rejects_every_other_path() {
+        let server = FakeWebDav::start().await;
+        let transport = server.transport();
+        let key_id = "12".repeat(32);
+        let device_id = "00000000-0000-4000-8000-000000000012";
+        let path =
+            format!("v2/{key_id}/{device_id}/00000000000000000001-00000000000000000002.json");
+        transport.ensure_layout(&key_id, device_id).await.unwrap();
+        assert_eq!(
+            transport.publish_immutable(&path, b"{}").await.unwrap(),
+            SegmentPublishOutcome::Created
+        );
+
+        transport.delete_segment(&path).await.unwrap();
+        transport.delete_segment(&path).await.unwrap();
+        assert!(
+            !transport
+                .list_segments(&key_id)
+                .await
+                .unwrap()
+                .contains(&path)
+        );
+        for invalid in [
+            format!("v2/{key_id}/snapshots/{device_id}.json"),
+            format!("v2/{key_id}/{device_id}/../secret.json"),
+            format!("v2/{key_id}/{device_id}/not-a-segment.json"),
+        ] {
+            assert!(transport.delete_segment(&invalid).await.is_err());
+        }
     }
 
     #[tokio::test]
