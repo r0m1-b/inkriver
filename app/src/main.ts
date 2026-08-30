@@ -9,6 +9,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { InkRiverApp } from "./app";
 import { tauriApi } from "./api";
+import { saveSyncDiagnostic } from "./diagnostic_export";
 import "./styles.css";
 
 const root = document.querySelector<HTMLElement>("#app");
@@ -33,6 +34,7 @@ const app = new InkRiverApp(
   openUrl,
   (message) => window.confirm(message),
   scanPairingCode,
+  saveSyncDiagnostic,
 );
 void app.init();
 

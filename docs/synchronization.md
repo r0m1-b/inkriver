@@ -1,6 +1,6 @@
 # InkRiver synchronization contract
 
-Status: implemented through `SYNC-007`
+Status: implemented through protocol-compatibility lot 11 of `SYNC-011`
 
 Protocol version: draft `1`
 
@@ -394,8 +394,57 @@ network, so HTTPS is required outside an explicitly trusted local setup.
 One failed listing or download prevents that batch from reaching the merge
 transaction. Already confirmed uploads remain safely published and local
 reading or mutations remain available. WebDAV credentials and the group key
-are still supplied by the caller: secure storage and pairing arrive in
-`SYNC-008`, while Tauri controls and status presentation arrive in `SYNC-009`.
+remain outside the opaque transport itself. The higher-level runtime supplies
+them through the native secret storage and pairing implemented by `SYNC-008`;
+the Tauri controls and status presentation are implemented by `SYNC-009`.
+
+## Wire-format compatibility and upgrades
+
+The `v2/` WebDAV directory is a storage-layout version. It is independent from
+the event protocol and from each JSON document's own format version. Current
+readers and writers use the following matrix:
+
+| Remote document | Encrypted envelope | Decrypted payload | Event protocol |
+| --- | --- | --- | --- |
+| Immutable segment | v1 | v1 | v1 |
+| Acknowledgement | v1 | v1 | v1 |
+| Device roster | v1 | v1 | v1 |
+| Recovery checkpoint | v1 | v1 contiguous or v2 compact | v1 |
+
+Every envelope and payload names its format and version explicitly. A reader
+accepts only the versions listed above and rejects an unknown future version,
+an unknown field, or an unsupported event protocol before modifying SQLite.
+Changing authenticated public metadata also invalidates the document. Writers
+continue to emit only the newest format they implement; readers retain support
+for every older format that may still be the last recoverable remote state.
+The deterministic checkpoint fixtures in `tests/fixtures/sync/` protect both
+the legacy v1 representation and the compact v2 representation from accidental
+serialization drift.
+
+An incompatible segment, acknowledgement or roster evolution requires a new
+document format version; changing event meaning requires a new event protocol
+version as well. Additive-looking JSON changes are not silently accepted,
+because strict decoding prevents old clients from interpreting a partially
+understood security or compaction proof. A layout change likewise uses a new
+top-level directory and leaves the preceding layout readable during migration.
+
+A future checkpoint migration must publish the new format at a distinct,
+versioned path instead of overwriting `<device UUID>.json`. The migration will:
+
+1. teach the new reader to consume both the old and new checkpoint formats;
+2. publish and download-authenticate the new checkpoint while retaining the
+   last authenticated old checkpoint;
+3. advertise format support through a versioned, authenticated device
+   capability before relying on the new checkpoint for compaction;
+4. wait until every active device supports the new format and has acknowledged
+   a frontier recoverable from it;
+5. only then allow bounded cleanup of the superseded checkpoint.
+
+If publication, verification or capability convergence is incomplete, both
+local and remote cleanup remains blocked and the old checkpoint stays in
+place. InkRiver must therefore always leave at least one checkpoint readable by
+every active device; a future migration may consume more storage, but may not
+trade away recoverability.
 
 ## Explicitly outside version 1
 
@@ -409,8 +458,8 @@ are still supplied by the caller: secure storage and pairing arrive in
 - automatically recognizing two genuinely different feed URLs as one feed;
 - reviving state from an incarnation deleted before synchronization was
   enabled;
-- protocol compaction, snapshots, device revocation and key rotation, which are
-  reserved for later tickets already listed in `FR-012`.
+- cryptographic exclusion of a revoked device and group-key rotation, which
+  require a separate, explicitly versioned recovery workflow.
 
 ## Consequences for the next tickets
 
@@ -428,6 +477,6 @@ identities.
 `SYNC-005` implements the local-directory segment transport used by the offline
 Linux–Android simulation and usable directly with Syncthing. `SYNC-006`
 encrypts and authenticates its logical segments. `SYNC-007` adds the generic
-transport orchestrator and WebDAV implementation. `SYNC-008` must now provide
-secure secret storage and device pairing before `SYNC-009` exposes the workflow
-in the InkRiver interface.
+transport orchestrator and WebDAV implementation. `SYNC-008` provides secure
+secret storage and device pairing, and `SYNC-009` exposes the workflow in the
+InkRiver interface.

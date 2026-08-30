@@ -135,7 +135,8 @@ pub async fn export_sync_diagnostic_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SyncConfiguration;
+    use crate::article::{Article, ContentKind, Source};
+    use crate::storage::{StoredSyncReport, SyncConfiguration};
 
     #[tokio::test]
     async fn exported_diagnostic_excludes_secrets_and_personal_metadata() {
@@ -157,6 +158,58 @@ mod tests {
             )
             .await
             .unwrap();
+        let feed = storage
+            .add_feed("https://private-feed.example/alice.xml", None)
+            .await
+            .unwrap();
+        storage
+            .upsert_articles(&[Article {
+                id: format!("{}::private-entry", feed.id),
+                feed_id: feed.id,
+                title: Some("A private article title".to_string()),
+                author: Some("Alice Private".to_string()),
+                published_at: None,
+                url: Some("https://private-article.example/story".to_string()),
+                content: Some("Cached private article content".to_string()),
+                content_kind: ContentKind::Full,
+                source: Source::Other,
+            }])
+            .await
+            .unwrap();
+        let local_device_id = storage.sync_identity().await.unwrap().device_id;
+        let recorded_at = DateTime::parse_from_rfc3339("2026-08-30T09:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        storage
+            .record_sync_snapshot_publication(
+                &"ab".repeat(32),
+                &local_device_id,
+                &"cd".repeat(32),
+                recorded_at,
+            )
+            .await
+            .unwrap();
+        storage
+            .record_sync_snapshot_import(
+                &"ab".repeat(32),
+                "00000000-0000-4000-8000-000000000099",
+                &"ef".repeat(32),
+                recorded_at,
+            )
+            .await
+            .unwrap();
+        storage
+            .record_sync_success(
+                recorded_at,
+                StoredSyncReport {
+                    compacted_events: 12,
+                    deleted_segments: 3,
+                    deferred_segment_deletions: 2,
+                    ..StoredSyncReport::default()
+                },
+            )
+            .await
+            .unwrap();
 
         let json = export_sync_diagnostic_json(&storage, Utc::now())
             .await
@@ -171,8 +224,19 @@ mod tests {
             &key_id,
             "00000000-0000-4000-8000-000000000099",
             "private phone",
+            "private-feed.example",
+            "private-article.example",
+            "private article title",
+            "alice private",
+            "cached private article content",
         ] {
             assert!(!json.to_lowercase().contains(&forbidden.to_lowercase()));
         }
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["publishedSnapshots"], 1);
+        assert_eq!(value["importedSnapshots"], 1);
+        assert_eq!(value["lastReport"]["compactedEvents"], 12);
+        assert_eq!(value["lastReport"]["deletedSegments"], 3);
+        assert_eq!(value["lastReport"]["deferredSegmentDeletions"], 2);
     }
 }

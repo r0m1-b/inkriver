@@ -1,0 +1,49 @@
+{
+  "format": "inkriver-sync-snapshot",
+  "formatVersion": 2,
+  "createdAt": "2026-08-30T08:05:00+00:00",
+  "state": {
+    "protocolVersion": 1,
+    "frontiers": [
+      {
+        "deviceId": "00000000-0000-4000-8000-000000000102",
+        "contiguousSequence": 3
+      }
+    ],
+    "events": [
+      {
+        "deviceId": "00000000-0000-4000-8000-000000000102",
+        "sequence": 1,
+        "clock": {
+          "physicalMilliseconds": 1788077100000,
+          "logicalCounter": 0
+        },
+        "protocolVersion": 1,
+        "kind": "subscription_created",
+        "payload": {
+          "kind": "subscription_created",
+          "subscription_id": "00000000-0000-4000-8000-000000000202",
+          "normalized_url": "https://fixture.example/compact.xml",
+          "platform_hint": "other",
+          "is_active": true,
+          "parent_tombstone": null
+        }
+      },
+      {
+        "deviceId": "00000000-0000-4000-8000-000000000102",
+        "sequence": 3,
+        "clock": {
+          "physicalMilliseconds": 1788077102000,
+          "logicalCounter": 0
+        },
+        "protocolVersion": 1,
+        "kind": "subscription_active_set",
+        "payload": {
+          "kind": "subscription_active_set",
+          "subscription_id": "00000000-0000-4000-8000-000000000202",
+          "is_active": false
+        }
+      }
+    ]
+  }
+}

@@ -66,20 +66,20 @@ restauration depuis le checkpoint courant ne peut être supprimé.
 
 ## Lot 10 — Reprise après interruption et corruption
 
-- [ ] Tester une interruption après publication du checkpoint mais avant la
+- [x] Tester une interruption après publication du checkpoint mais avant la
   compaction locale.
-- [ ] Tester une interruption pendant la suppression locale.
-- [ ] Tester une interruption entre deux suppressions WebDAV.
-- [ ] Tester un checkpoint distant supprimé ou corrompu juste avant la
+- [x] Tester une interruption pendant la suppression locale.
+- [x] Tester une interruption entre deux suppressions WebDAV.
+- [x] Tester un checkpoint distant supprimé ou corrompu juste avant la
   compaction : aucune suppression ne doit avoir lieu avant sa réparation.
-- [ ] Tester une base SQLite locale perdue ou corrompue, recréée puis restaurée
+- [x] Tester une base SQLite locale perdue ou corrompue, recréée puis restaurée
   depuis WebDAV.
-- [ ] Tester un appareil très en retard après la disparition de tous les anciens
+- [x] Tester un appareil très en retard après la disparition de tous les anciens
   segments couverts.
-- [ ] Tester la restauration depuis le checkpoint, puis l'application des
+- [x] Tester la restauration depuis le checkpoint, puis l'application des
   segments plus récents.
-- [ ] Tester un appareil actif sans accusé : la frontière doit rester bloquée.
-- [ ] Tester qu'un appareil révoqué ne bloque plus la frontière et ne peut plus
+- [x] Tester un appareil actif sans accusé : la frontière doit rester bloquée.
+- [x] Tester qu'un appareil révoqué ne bloque plus la frontière et ne peut plus
   importer de nouvelles données.
 
 Critère de sortie : chaque point d'interruption laisse soit l'ancien état
@@ -87,12 +87,12 @@ récupérable, soit le nouveau, sans état intermédiaire irréparable.
 
 ## Lot 11 — Versionnement et migrations de protocole
 
-- [ ] Conserver des fixtures chiffrées ou déterministes des formats v1 et v2.
-- [ ] Tester explicitement l'import d'un checkpoint v1 après mise à niveau.
-- [ ] Tester le rejet sans effet de bord d'une version future inconnue.
-- [ ] Documenter la règle de compatibilité des segments, checkpoints, accusés et
+- [x] Conserver des fixtures chiffrées ou déterministes des formats v1 et v2.
+- [x] Tester explicitement l'import d'un checkpoint v1 après mise à niveau.
+- [x] Tester le rejet sans effet de bord d'une version future inconnue.
+- [x] Documenter la règle de compatibilité des segments, checkpoints, accusés et
   registres d'appareils.
-- [ ] Définir comment une future migration réécrira un checkpoint sans supprimer
+- [x] Définir comment une future migration réécrira un checkpoint sans supprimer
   le dernier format encore récupérable.
 
 Critère de sortie : une mise à niveau ne rend pas les données distantes
@@ -103,27 +103,27 @@ existantes illisibles et une version inconnue ne modifie pas SQLite.
 Ce lot est souhaitable pour Linux et Android, mais il n'est pas un prérequis à
 la sécurité de la compaction.
 
-- [ ] Exposer le diagnostic expurgé existant par une commande Tauri.
-- [ ] Permettre son enregistrement ou son partage depuis l'interface.
-- [ ] Ne jamais inclure clé, mot de passe, URL ou identifiant WebDAV, UUID ou nom
+- [x] Exposer le diagnostic expurgé existant par une commande Tauri.
+- [x] Permettre son enregistrement ou son partage depuis l'interface.
+- [x] Ne jamais inclure clé, mot de passe, URL ou identifiant WebDAV, UUID ou nom
   d'appareil, URL/titre d'article ou contenu en cache.
-- [ ] Inclure les compteurs de checkpoints et de compaction utiles au support.
-- [ ] Tester l'export sur desktop et le contrat TypeScript sur mobile.
+- [x] Inclure les compteurs de checkpoints et de compaction utiles au support.
+- [x] Tester l'export sur desktop et le contrat TypeScript sur mobile.
 
 Critère de sortie : l'utilisateur peut transmettre un diagnostic exploitable
 sans exposer ses secrets ni ses contenus.
 
 ## Lot 13 — Documentation opérationnelle
 
-- [ ] Documenter la sauvegarde et la restauration de SQLite.
-- [ ] Documenter la reconstruction d'un appareil depuis WebDAV.
-- [ ] Documenter la perte d'un appareil et sa révocation définitive.
-- [ ] Expliquer qu'un appareil réinstallé reçoit un nouvel UUID.
-- [ ] Documenter la perte de la clé de groupe et la perte du stockage WebDAV.
-- [ ] Décrire les métadonnées visibles par l'hébergeur WebDAV malgré le
+- [x] Documenter la sauvegarde et la restauration de SQLite.
+- [x] Documenter la reconstruction d'un appareil depuis WebDAV.
+- [x] Documenter la perte d'un appareil et sa révocation définitive.
+- [x] Expliquer qu'un appareil réinstallé reçoit un nouvel UUID.
+- [x] Documenter la perte de la clé de groupe et la perte du stockage WebDAV.
+- [x] Décrire les métadonnées visibles par l'hébergeur WebDAV malgré le
   chiffrement.
-- [ ] Documenter les limites de taille, de nombre d'appareils et de rétention.
-- [ ] Documenter les commandes de diagnostic et de vérification utiles.
+- [x] Documenter les limites de taille, de nombre d'appareils et de rétention.
+- [x] Documenter les commandes de diagnostic et de vérification utiles.
 
 ## Validation finale
 

@@ -41,6 +41,7 @@ export interface InkRiverApi {
   renameSyncDevice(deviceId: string, displayName: string): Promise<SyncPairingStatus>;
   revokeSyncDevice(deviceId: string): Promise<SyncPairingStatus>;
   synchronizeNow(): Promise<SyncTransportReport>;
+  exportSyncDiagnostic(): Promise<string>;
   deleteSyncConfiguration(): Promise<SyncPairingStatus>;
 }
 
@@ -77,5 +78,6 @@ export const tauriApi: InkRiverApi = {
     invoke("rename_sync_device", { deviceId, displayName }),
   revokeSyncDevice: (deviceId) => invoke("revoke_sync_device", { deviceId }),
   synchronizeNow: () => invoke("synchronize_now"),
+  exportSyncDiagnostic: () => invoke("export_sync_diagnostic"),
   deleteSyncConfiguration: () => invoke("delete_sync_configuration"),
 };

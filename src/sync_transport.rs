@@ -581,6 +581,7 @@ mod tests {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         reject_snapshots: bool,
         reject_deletions: bool,
+        fail_deletion_after: Option<usize>,
         deleted_paths: Arc<Mutex<Vec<String>>>,
     }
 
@@ -637,7 +638,11 @@ mod tests {
         }
 
         async fn delete_segment(&self, relative_path: &str) -> Result<()> {
-            if self.reject_deletions {
+            if self.reject_deletions
+                || self
+                    .fail_deletion_after
+                    .is_some_and(|maximum| self.deleted_paths.lock().unwrap().len() >= maximum)
+            {
                 bail!("segment deletion rejected for test");
             }
             self.files.lock().unwrap().remove(relative_path);
@@ -1136,6 +1141,176 @@ mod tests {
         .unwrap();
         assert_eq!(report.deleted_segments, 20);
         assert_eq!(report.deferred_segment_deletions, 5);
+    }
+
+    #[tokio::test]
+    async fn restart_between_checkpoint_and_local_compaction_preserves_recovery_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("interrupted.db");
+        let storage = Storage::open(&database_path).await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://checkpoint-interruption.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        storage.set_feed_active(&feed.id, true).await.unwrap();
+        let key = SyncGroupKey::from_bytes([0xa8; 32]);
+        let key_id = key.key_id();
+        let observed_at = Utc::now();
+        storage
+            .seed_sync_roster(&key_id, observed_at)
+            .await
+            .unwrap();
+        let transport = MemoryTransport::default();
+        let checkpoint_frontiers =
+            ensure_recovery_checkpoint(&storage, &key, &transport, observed_at)
+                .await
+                .unwrap()
+                .unwrap();
+        let before = storage.local_sync_events_after(0, 100).await.unwrap();
+        storage.close().await;
+
+        let reopened = Storage::open(&database_path).await.unwrap();
+        assert_eq!(
+            reopened.local_sync_events_after(0, 100).await.unwrap(),
+            before
+        );
+        assert_eq!(
+            reopened
+                .compact_sync_events(&key_id, &checkpoint_frontiers, 100)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(reopened.list_feeds().await.unwrap()[0].is_active);
+    }
+
+    #[tokio::test]
+    async fn interruption_between_remote_deletions_resumes_from_remaining_segments() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://delete-interruption.example/feed", None)
+            .await
+            .unwrap();
+        for index in 0..504 {
+            storage
+                .set_feed_active(&feed.id, index % 2 == 0)
+                .await
+                .unwrap();
+        }
+        let key = SyncGroupKey::from_bytes([0xa9; 32]);
+        let interrupted = MemoryTransport {
+            fail_deletion_after: Some(1),
+            ..MemoryTransport::default()
+        };
+
+        let first = synchronize_transport(&storage, &key, &interrupted, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(first.deleted_segments, 1);
+        assert_eq!(first.deferred_segment_deletions, 2);
+        let resumed = MemoryTransport {
+            files: Arc::clone(&interrupted.files),
+            deleted_paths: Arc::clone(&interrupted.deleted_paths),
+            ..MemoryTransport::default()
+        };
+        let second = synchronize_transport(&storage, &key, &resumed, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(second.deleted_segments, 2);
+        assert_eq!(second.deferred_segment_deletions, 0);
+    }
+
+    #[tokio::test]
+    async fn missing_checkpoint_is_repaired_before_any_newly_safe_segment_is_deleted() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://repair-before-delete.example/feed", None)
+            .await
+            .unwrap();
+        storage.set_feed_active(&feed.id, false).await.unwrap();
+        let remote_id = "00000000-0000-4000-8000-000000000065";
+        storage
+            .register_sync_device(remote_id, "Remote", Utc::now())
+            .await
+            .unwrap();
+        let local = storage.sync_identity().await.unwrap();
+        let key = SyncGroupKey::from_bytes([0xaa; 32]);
+        let transport = MemoryTransport::default();
+        let first = synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(first.deferred_segment_deletions, 1);
+        storage
+            .record_sync_acknowledgement(&crate::storage::SyncAcknowledgement {
+                key_id: key.key_id(),
+                observer_device_id: remote_id.to_string(),
+                source_device_id: local.device_id,
+                contiguous_sequence: local.next_sequence - 1,
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let snapshot_path = transport
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .find(|path| path.contains("/snapshots/"))
+            .unwrap()
+            .clone();
+        transport.files.lock().unwrap().remove(&snapshot_path);
+        let failed_repair = MemoryTransport {
+            files: Arc::clone(&transport.files),
+            deleted_paths: Arc::clone(&transport.deleted_paths),
+            reject_snapshots: true,
+            ..MemoryTransport::default()
+        };
+
+        assert!(
+            synchronize_transport(&storage, &key, &failed_repair, Utc::now())
+                .await
+                .is_err()
+        );
+        assert!(failed_repair.deleted_paths.lock().unwrap().is_empty());
+        let repaired = synchronize_transport(&storage, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert!(transport.files.lock().unwrap().contains_key(&snapshot_path));
+        assert_eq!(repaired.deleted_segments, 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_database_recovers_after_all_covered_segments_are_gone() {
+        let source = Storage::open_in_memory().await.unwrap();
+        source.enable_sync().await.unwrap();
+        let feed = source
+            .add_feed("https://checkpoint-only.example/feed", None)
+            .await
+            .unwrap();
+        source.set_feed_active(&feed.id, false).await.unwrap();
+        let key = SyncGroupKey::from_bytes([0xab; 32]);
+        let key_id = key.key_id();
+        let transport = MemoryTransport::default();
+        let published = synchronize_transport(&source, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(published.deleted_segments, 1);
+        assert!(transport.list_segments(&key_id).await.unwrap().is_empty());
+
+        let recovered = Storage::open_in_memory().await.unwrap();
+        recovered.enable_sync().await.unwrap();
+        let report = synchronize_transport(&recovered, &key, &transport, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(report.downloaded_segments, 0);
+        assert!(report.imported_events >= 1);
+        let feeds = recovered.list_feeds().await.unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert!(!feeds[0].is_active);
     }
 
     #[tokio::test]

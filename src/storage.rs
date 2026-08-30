@@ -4429,6 +4429,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_local_compaction_rolls_back_every_deletion() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        storage.enable_sync().await.unwrap();
+        let feed = storage
+            .add_feed("https://rollback-compaction.example/feed", None)
+            .await
+            .unwrap();
+        for index in 0..4 {
+            storage
+                .set_feed_active(&feed.id, index % 2 == 0)
+                .await
+                .unwrap();
+        }
+        let key_id = "ce".repeat(32);
+        storage.seed_sync_roster(&key_id, Utc::now()).await.unwrap();
+        let checkpoint_frontiers = storage
+            .sync_snapshot_material(MAX_SYNC_EVENTS_PER_READ)
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let before = storage.local_sync_events_after(0, 100).await.unwrap();
+        sqlx::query(
+            r#"
+                CREATE TRIGGER interrupt_sync_compaction
+                BEFORE DELETE ON sync_events
+                WHEN OLD.sequence = 3
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated interruption');
+                END
+            "#,
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        assert!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_frontiers, 100)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage.local_sync_events_after(0, 100).await.unwrap(),
+            before
+        );
+        sqlx::query("DROP TRIGGER interrupt_sync_compaction")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .compact_sync_events(&key_id, &checkpoint_frontiers, 100)
+                .await
+                .unwrap(),
+            3
+        );
+    }
+
+    #[tokio::test]
     async fn synchronization_roster_is_additive_and_revocation_never_regresses() {
         let storage = Storage::open_in_memory().await.unwrap();
         let key_id = "cd".repeat(32);

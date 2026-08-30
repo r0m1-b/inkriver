@@ -169,6 +169,9 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
       deletedSegments: 0,
       deferredSegmentDeletions: 0,
     })),
+    exportSyncDiagnostic: vi.fn(async () =>
+      JSON.stringify({ format: "inkriver-sync-diagnostic", formatVersion: 1 })
+    ),
     deleteSyncConfiguration: vi.fn(async () => ({
       ...emptySyncRuntime,
       configured: false,
@@ -233,14 +236,15 @@ async function mounted(
   opener = vi.fn(async () => undefined),
   confirmer = vi.fn(() => true),
   scanner: (() => Promise<string>) | null = null,
+  diagnosticSaver = vi.fn(async () => true),
 ) {
   document.body.innerHTML = '<div id="app"></div>';
   const root = document.querySelector<HTMLElement>("#app")!;
-  const app = new InkRiverApp(root, api, opener, confirmer, scanner);
+  const app = new InkRiverApp(root, api, opener, confirmer, scanner, diagnosticSaver);
   const initialization = app.init();
   expect(root.querySelector('[data-testid="loading"]')).not.toBeNull();
   await initialization;
-  return { root, app, api, opener, confirmer };
+  return { root, app, api, opener, confirmer, diagnosticSaver };
 }
 
 describe("InkRiverApp", () => {
@@ -2741,6 +2745,54 @@ describe("InkRiverApp", () => {
     await flush();
     expect(confirmer).toHaveBeenCalledWith(expect.stringContaining("Téléphone"));
     expect(api.revokeSyncDevice).toHaveBeenCalledWith("phone");
+  });
+
+  it("exports the redacted synchronization diagnostic through the native saver", async () => {
+    const json = JSON.stringify({
+      format: "inkriver-sync-diagnostic",
+      publishedSnapshots: 1,
+      lastReport: { compactedEvents: 4 },
+    });
+    const api = fakeApi({ exportSyncDiagnostic: vi.fn(async () => json) });
+    const diagnosticSaver = vi.fn(async () => true);
+    const { root } = await mounted(api, undefined, undefined, null, diagnosticSaver);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    const button = root.querySelector<HTMLButtonElement>(
+      '[data-action="export-sync-diagnostic"]',
+    )!;
+    expect(button.textContent).toContain("Enregistrer le diagnostic");
+    expect(root.querySelector(".sync-support")?.textContent).toContain("sans secrets");
+    button.click();
+    await flush();
+
+    expect(api.exportSyncDiagnostic).toHaveBeenCalledOnce();
+    expect(diagnosticSaver).toHaveBeenCalledWith(
+      json,
+      "inkriver-sync-diagnostic.json",
+    );
+    expect(root.textContent).toContain("Diagnostic enregistré.");
+    expect(root.querySelector(".sync-dialog")).not.toBeNull();
+  });
+
+  it("keeps the synchronization dialog open when diagnostic saving fails", async () => {
+    const diagnosticSaver = vi.fn(async () => {
+      throw new Error("Destination inaccessible");
+    });
+    const { root } = await mounted(undefined, undefined, undefined, null, diagnosticSaver);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLElement>('[data-action="open-sync"]')!.click();
+    await flush();
+
+    root.querySelector<HTMLButtonElement>('[data-action="export-sync-diagnostic"]')!.click();
+    await flush();
+
+    expect(root.querySelector(".sync-error")?.textContent).toContain(
+      "Destination inaccessible",
+    );
+    expect(root.querySelector(".sync-dialog")).not.toBeNull();
   });
 
   it("synchronizes manually, reloads projections and keeps subscription management open", async () => {

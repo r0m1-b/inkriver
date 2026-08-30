@@ -42,6 +42,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
   password separate and storing synchronization secrets in the native vault.
 - manually or automatically exchange encrypted changes through the configured
   WebDAV server without leaving or replacing the current cached view.
+- save a redacted synchronization support diagnostic from the Linux or Android
+  interface without exporting secrets, device identities, or article content.
 
 ## Ubuntu prerequisites
 
@@ -607,6 +609,12 @@ online, or foreground event occurs. The manual action always remains available.
 The last attempt, successful counters, pending state, and detailed error are
 persisted across restarts. Removing the local configuration keeps
 subscriptions, articles, and remote WebDAV files.
+The same dialog can save a JSON support diagnostic through the system file
+picker. It contains only application and protocol versions, dates, aggregate
+counts, checkpoint activity, and compaction results; it excludes credentials,
+WebDAV locations and identifiers, device UUIDs and names, subscription and
+article metadata, and cached content. As with any diagnostic file, review it
+before sharing it.
 Pairing deliberately excludes the WebDAV password: a new device imports the
 group key and non-secret endpoint settings from the QR, then asks for that
 password separately. Linux stores the resulting bundle in Secret Service;
@@ -652,6 +660,12 @@ compaction is transactional, idempotent and blocked by every active device that
 has not acknowledged a journal. WebDAV cleanup is likewise idempotent, bounded
 and restricted to the current device's validated segment paths; it never turns
 a successful import into a synchronization failure.
+The version compatibility matrix and non-destructive checkpoint migration
+rules are specified in the
+[synchronization contract](docs/synchronization.md#wire-format-compatibility-and-upgrades).
+Backup, WebDAV recovery, device-loss, privacy, limits and diagnostic procedures
+are collected in the
+[synchronization operations guide](docs/synchronization-operations.md).
 
 - the optional CLI remains part of the main Rust package instead of a separate
   workspace crate;

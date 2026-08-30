@@ -5,6 +5,7 @@ use inkriver::storage::{
     ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, StoredSyncReport,
     StoredSyncRuntimeError, SubscriptionError, SyncDevice,
 };
+use inkriver::sync_diagnostics::export_sync_diagnostic_json;
 use inkriver::sync_pairing::{
     accept_pairing_invitation, configure_new_sync_group, create_pairing_invitation,
     encode_pairing_invitation, render_pairing_qr_svg,
@@ -613,6 +614,15 @@ async fn sync_pairing_status_from(storage: &Storage) -> Result<SyncPairingStatus
     })
 }
 
+async fn export_sync_diagnostic_from(
+    storage: &Storage,
+    generated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<String, ApiError> {
+    export_sync_diagnostic_json(storage, generated_at)
+        .await
+        .map_err(ApiError::storage)
+}
+
 fn pairing_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     let code = if message.contains("existe déjà") {
@@ -925,6 +935,11 @@ async fn synchronize_now(state: State<'_, AppState>) -> Result<SyncTransportRepo
 }
 
 #[tauri::command]
+async fn export_sync_diagnostic(state: State<'_, AppState>) -> Result<String, ApiError> {
+    export_sync_diagnostic_from(&state.storage, chrono::Utc::now()).await
+}
+
+#[tauri::command]
 async fn delete_sync_configuration(
     state: State<'_, AppState>,
 ) -> Result<SyncPairingStatusDto, ApiError> {
@@ -941,7 +956,10 @@ fn open_storage(database_path: &Path) -> Result<Storage, Box<dyn std::error::Err
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_opener::init());
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder
@@ -977,6 +995,7 @@ pub fn run() {
             rename_sync_device,
             revoke_sync_device,
             synchronize_now,
+            export_sync_diagnostic,
             delete_sync_configuration,
         ])
         .run(tauri::generate_context!())
@@ -1162,6 +1181,41 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_adapter_exports_redacted_camel_case_json() {
+        let (_directory, storage) = storage_with_article().await;
+        let generated_at = Utc.with_ymd_and_hms(2026, 8, 30, 10, 0, 0).unwrap();
+        storage
+            .record_sync_success(
+                generated_at,
+                StoredSyncReport {
+                    compacted_events: 7,
+                    deleted_segments: 2,
+                    ..StoredSyncReport::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let json = export_sync_diagnostic_from(&storage, generated_at)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["format"], "inkriver-sync-diagnostic");
+        assert_eq!(value["generatedAt"], "2026-08-30T10:00:00+00:00");
+        assert_eq!(value["lastReport"]["compactedEvents"], 7);
+        assert_eq!(value["lastReport"]["deletedSegments"], 2);
+        for forbidden in [
+            "space.example",
+            "Observer Mars",
+            "Claire",
+            "Mars est orangée",
+        ] {
+            assert!(!json.contains(forbidden));
+        }
     }
 
     #[test]

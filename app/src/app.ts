@@ -18,6 +18,7 @@ import type {
 type OpenOriginal = (url: string) => Promise<void>;
 type ConfirmAction = (message: string) => boolean;
 type ScanPairingCode = () => Promise<string>;
+type SaveDiagnostic = (contents: string, suggestedName: string) => Promise<boolean>;
 type ArticleView = "all" | "favorites" | "unread";
 type MainView = "articles" | "feeds";
 type MobileArticleScreen = "timeline" | "reader";
@@ -311,6 +312,7 @@ export class InkRiverApp {
   private pendingPairingInvitation = "";
   private syncError: string | null = null;
   private syncBusy = false;
+  private diagnosticExportBusy = false;
   private deletingFeedId: string | null = null;
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
@@ -341,6 +343,7 @@ export class InkRiverApp {
     private readonly openOriginal: OpenOriginal,
     private readonly confirmAction: ConfirmAction,
     private readonly scanPairingCode: ScanPairingCode | null = null,
+    private readonly saveDiagnostic: SaveDiagnostic | null = null,
   ) {
     let preferenceStorage: PreferenceStorage | null = null;
     try {
@@ -1541,10 +1544,12 @@ export class InkRiverApp {
       </div>`;
     }
 
+    const support = `<section class="sync-support"><div><h3>Diagnostic de support</h3><p>Enregistre un rapport technique JSON sans secrets, adresses, identifiants d’appareil ni contenu d’article.</p></div><button type="button" data-action="export-sync-diagnostic" ${this.syncBusy || this.diagnosticExportBusy ? "disabled" : ""}>${this.diagnosticExportBusy ? "Enregistrement…" : "Enregistrer le diagnostic"}</button></section>`;
     return `<div class="modal-backdrop sync-backdrop" data-action="close-sync-backdrop"><section class="subscriptions sync-dialog" role="dialog" aria-modal="true" aria-labelledby="sync-dialog-title">
       <header><div><span class="eyebrow">Appareils</span><h2 id="sync-dialog-title">Synchronisation</h2></div><button type="button" class="icon-button" data-action="close-sync" aria-label="Fermer">×</button></header>
       ${this.syncError ? `<div class="sync-error" role="alert">${escapeHtml(this.syncError)}</div>` : ""}
       ${content}
+      ${support}
     </section></div>`;
   }
 
@@ -1691,6 +1696,28 @@ export class InkRiverApp {
       }
     } finally {
       this.syncBusy = false;
+      this.render();
+    }
+  }
+
+  private async exportSyncDiagnostic(): Promise<void> {
+    if (this.syncBusy || this.diagnosticExportBusy) return;
+    if (!this.saveDiagnostic) {
+      this.syncError = "L’enregistrement de diagnostics n’est pas disponible.";
+      this.render();
+      return;
+    }
+    this.diagnosticExportBusy = true;
+    this.syncError = null;
+    this.render();
+    try {
+      const contents = await this.api.exportSyncDiagnostic();
+      const saved = await this.saveDiagnostic(contents, "inkriver-sync-diagnostic.json");
+      if (saved) this.showNotice("Diagnostic enregistré.");
+    } catch (error) {
+      this.syncError = errorMessage(error);
+    } finally {
+      this.diagnosticExportBusy = false;
       this.render();
     }
   }
@@ -2054,6 +2081,9 @@ export class InkRiverApp {
     });
     this.root.querySelector<HTMLElement>('[data-action="synchronize-now"]')?.addEventListener("click", () => {
       void this.synchronizeNow();
+    });
+    this.root.querySelector<HTMLElement>('[data-action="export-sync-diagnostic"]')?.addEventListener("click", () => {
+      void this.exportSyncDiagnostic();
     });
     this.root.querySelector<HTMLInputElement>('[data-action="automatic-sync"]')?.addEventListener("change", (event) => {
       this.setAutomaticSyncEnabled((event.currentTarget as HTMLInputElement).checked);

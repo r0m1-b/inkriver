@@ -47,6 +47,9 @@ Consulter [CHANGELOG.md](CHANGELOG.md) pour l'historique des versions.
   WebDAV demandé séparément et secrets conservés dans le coffre natif.
 - échange manuel des changements chiffrés par le serveur WebDAV configuré,
   sans quitter ni remplacer la vue locale en cache.
+- enregistrement depuis l'interface Linux ou Android d'un diagnostic de
+  synchronisation expurgé, sans secrets, identité d'appareil ni contenu
+  d'article.
 
 ## Prérequis sous Ubuntu
 
@@ -633,7 +636,14 @@ nouveau changement ou événement réseau/premier plan. L'action manuelle reste
 toujours disponible. La dernière tentative, les compteurs du dernier succès,
 l'état partiel et l'erreur détaillée sont persistés après redémarrage. Supprimer
 la configuration locale conserve
-les abonnements, les articles et les fichiers WebDAV distants. L'appairage exclut volontairement le mot de passe
+les abonnements, les articles et les fichiers WebDAV distants. La même boîte de
+dialogue peut enregistrer un diagnostic d'assistance JSON avec le sélecteur de
+fichiers du système. Il contient seulement les versions de l'application et du
+protocole, les dates, des compteurs agrégés, l'activité des checkpoints et les
+résultats de compaction ; il exclut les identifiants et secrets WebDAV, les URL,
+UUID et noms d'appareils, les métadonnées d'abonnement ou d'article et le
+contenu en cache. Comme pour tout diagnostic, il convient de le relire avant de
+le transmettre. L'appairage exclut volontairement le mot de passe
 WebDAV : le nouvel appareil importe par QR la clé de groupe et les réglages non
 secrets, puis demande ce mot de passe séparément. Le paquet obtenu est conservé
 dans Secret Service sous Linux et protégé par Android Keystore sous Android ;
@@ -684,6 +694,12 @@ transactionnelle, idempotente et bloquée par tout appareil actif qui n'a pas
 acquitté un journal. Le nettoyage WebDAV est lui aussi idempotent, borné et
 limité aux chemins de segments validés de l'appareil courant ; il ne transforme
 jamais un import réussi en échec de synchronisation.
+La matrice de compatibilité des versions et les règles de migration non
+destructive des checkpoints sont précisées dans le
+[contrat de synchronisation](docs/synchronization.md#wire-format-compatibility-and-upgrades).
+Les procédures de sauvegarde, récupération WebDAV, perte d'appareil,
+confidentialité, limites et diagnostic sont réunies dans le
+[guide d'exploitation de la synchronisation](docs/synchronization-operations.fr.md).
 
 - le CLI optionnel appartient encore au paquet Rust principal au lieu d'être
   isolé dans un crate du workspace ;

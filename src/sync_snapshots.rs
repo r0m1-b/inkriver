@@ -228,6 +228,7 @@ pub(crate) async fn import_snapshot(
 ) -> Result<SyncImportReport> {
     let encrypted = read_encrypted(relative_path, bytes)?;
     validate_encrypted_header(&encrypted, &key.key_id())?;
+    verify_snapshot(relative_path, bytes, key, &encrypted.state_hash)?;
     if storage
         .sync_snapshot_import_hash(&encrypted.key_id, &encrypted.creator_device_id)
         .await?
@@ -236,7 +237,6 @@ pub(crate) async fn import_snapshot(
     {
         return Ok(SyncImportReport::default());
     }
-    verify_snapshot(relative_path, bytes, key, &encrypted.state_hash)?;
     let document = decrypt_document(&encrypted, key)?;
     let frontiers = document
         .state
@@ -473,6 +473,28 @@ mod tests {
     use crate::article::{Article, ContentKind, Source};
     use crate::sync_segments::{export_sync_directory, import_sync_directory};
 
+    const SNAPSHOT_V1_FIXTURE: &str = include_str!("../tests/fixtures/sync/snapshot-v1.json");
+    const SNAPSHOT_V2_FIXTURE: &str = include_str!("../tests/fixtures/sync/snapshot-v2.json");
+
+    fn fixture_document(contents: &str) -> SnapshotDocument {
+        let document: SnapshotDocument = serde_json::from_str(contents).unwrap();
+        validate_document(&document).unwrap();
+        document
+    }
+
+    fn encrypted_fixture(
+        document: &SnapshotDocument,
+        key: &SyncGroupKey,
+        creator_device_id: &str,
+    ) -> Vec<u8> {
+        let state_bytes = serde_json::to_vec(&document.state).unwrap();
+        let state_hash = hex_digest(Sha256::digest(state_bytes));
+        serde_json::to_vec(
+            &encrypt_document(document, &state_hash, key, creator_device_id).unwrap(),
+        )
+        .unwrap()
+    }
+
     async fn source_with_state() -> (Storage, String) {
         let storage = Storage::open_in_memory().await.unwrap();
         storage.enable_sync().await.unwrap();
@@ -676,47 +698,109 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_contiguous_snapshot_remains_importable() {
-        let (source, _) = source_with_state().await;
-        let identity = source.sync_identity().await.unwrap();
-        let events = source
-            .local_sync_events_after(0, MAX_SNAPSHOT_EVENTS)
-            .await
-            .unwrap();
-        let state = SnapshotState {
-            protocol_version: SYNC_PROTOCOL_VERSION,
-            frontiers: vec![SnapshotFrontier {
-                device_id: identity.device_id.clone(),
-                contiguous_sequence: identity.next_sequence - 1,
-            }],
-            events,
-        };
-        validate_state(&state, LEGACY_SNAPSHOT_VERSION).unwrap();
-        let state_bytes = serde_json::to_vec(&state).unwrap();
-        let state_hash = hex_digest(Sha256::digest(state_bytes));
-        let document = SnapshotDocument {
-            format: SNAPSHOT_FORMAT.to_string(),
-            format_version: LEGACY_SNAPSHOT_VERSION,
-            created_at: Utc::now().to_rfc3339(),
-            state,
-        };
+        let document = fixture_document(SNAPSHOT_V1_FIXTURE);
+        let creator_device_id = document.state.frontiers[0].device_id.clone();
         let key = SyncGroupKey::from_bytes([0xb7; 32]);
-        let encrypted =
-            encrypt_document(&document, &state_hash, &key, &identity.device_id).unwrap();
-        let bytes = serde_json::to_vec(&encrypted).unwrap();
+        let bytes = encrypted_fixture(&document, &key, &creator_device_id);
         let target = Storage::open_in_memory().await.unwrap();
         target.enable_sync().await.unwrap();
 
         let report = import_snapshot(
             &target,
             &key,
-            &snapshot_path(&key.key_id(), &identity.device_id),
+            &snapshot_path(&key.key_id(), &creator_device_id),
             &bytes,
             Utc::now(),
         )
         .await
         .unwrap();
-        assert_eq!(report.imported, 3);
-        assert_eq!(target.list_feeds().await.unwrap().len(), 1);
+        assert_eq!(report.imported, 1);
+        let feeds = target.list_feeds().await.unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].url, "https://fixture.example/feed.xml");
+        assert!(feeds[0].is_active);
+    }
+
+    #[tokio::test]
+    async fn compact_v2_fixture_remains_importable() {
+        let document = fixture_document(SNAPSHOT_V2_FIXTURE);
+        let creator_device_id = document.state.frontiers[0].device_id.clone();
+        let key = SyncGroupKey::from_bytes([0xbb; 32]);
+        let bytes = encrypted_fixture(&document, &key, &creator_device_id);
+        let target = Storage::open_in_memory().await.unwrap();
+        target.enable_sync().await.unwrap();
+
+        let report = import_snapshot(
+            &target,
+            &key,
+            &snapshot_path(&key.key_id(), &creator_device_id),
+            &bytes,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.imported, 2);
+        assert_eq!(
+            target.sync_import_cursor(&creator_device_id).await.unwrap(),
+            3
+        );
+        let feeds = target.list_feeds().await.unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].url, "https://fixture.example/compact.xml");
+        assert!(!feeds[0].is_active);
+    }
+
+    #[tokio::test]
+    async fn future_snapshot_version_is_rejected_without_sqlite_side_effect() {
+        let valid_document = fixture_document(SNAPSHOT_V2_FIXTURE);
+        let creator_device_id = valid_document.state.frontiers[0].device_id.clone();
+        let key = SyncGroupKey::from_bytes([0xbc; 32]);
+        let target = Storage::open_in_memory().await.unwrap();
+        target.enable_sync().await.unwrap();
+        import_snapshot(
+            &target,
+            &key,
+            &snapshot_path(&key.key_id(), &creator_device_id),
+            &encrypted_fixture(&valid_document, &key, &creator_device_id),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        let import_hash_before = target
+            .sync_snapshot_import_hash(&key.key_id(), &creator_device_id)
+            .await
+            .unwrap();
+
+        let mut future_document = valid_document;
+        future_document.format_version = SNAPSHOT_VERSION + 1;
+        let bytes = encrypted_fixture(&future_document, &key, &creator_device_id);
+
+        let result = import_snapshot(
+            &target,
+            &key,
+            &snapshot_path(&key.key_id(), &creator_device_id),
+            &bytes,
+            Utc::now(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let feeds = target.list_feeds().await.unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].url, "https://fixture.example/compact.xml");
+        assert!(!feeds[0].is_active);
+        assert_eq!(
+            target.sync_import_cursor(&creator_device_id).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            target
+                .sync_snapshot_import_hash(&key.key_id(), &creator_device_id)
+                .await
+                .unwrap(),
+            import_hash_before
+        );
     }
 
     #[tokio::test]
