@@ -33,9 +33,9 @@ const ARTICLE_IMAGE_FOCUS_MESSAGE = "inkriver:article-image-focus";
 const ARTICLE_TEXT_SIZE_MESSAGE = "inkriver:article-text-size";
 // Keep ARTICLE_BRIDGE_CSP_HASH synchronized with this exact script. The hash is
 // also declared in tauri.conf.json because about:srcdoc inherits the app CSP.
-export const ARTICLE_BRIDGE_SCRIPT = `function reportArticleHeight(){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"inkriver:article-height",height:height},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"inkriver:article-image",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}var readerSwipeStartX=null,readerSwipeStartY=null,readerSwipeDistanceX=0,readerSwipeDistanceY=0,readerSwipeHorizontal=false,readerSwipeSuppressClick=false;function resetReaderSwipe(){readerSwipeStartX=null;readerSwipeStartY=null;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;}document.addEventListener("click",function(event){if(readerSwipeSuppressClick){event.preventDefault();event.stopPropagation();return;}var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"inkriver:article-link",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);document.addEventListener("touchstart",function(event){var touch=event.touches[0];if(!touch||event.touches.length!==1||touch.clientX<=32||touch.clientX>=window.innerWidth-32)return;readerSwipeStartX=touch.clientX;readerSwipeStartY=touch.clientY;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;},{passive:true});document.addEventListener("touchmove",function(event){var touch=event.touches[0];if(!touch||readerSwipeStartX===null||readerSwipeStartY===null)return;readerSwipeDistanceX=touch.clientX-readerSwipeStartX;readerSwipeDistanceY=touch.clientY-readerSwipeStartY;if(!readerSwipeHorizontal){if(Math.abs(readerSwipeDistanceX)<12&&Math.abs(readerSwipeDistanceY)<12)return;if(Math.abs(readerSwipeDistanceX)<=Math.abs(readerSwipeDistanceY)){resetReaderSwipe();return;}readerSwipeHorizontal=true;}event.preventDefault();},{passive:false});document.addEventListener("touchend",function(){if(readerSwipeHorizontal&&Math.abs(readerSwipeDistanceX)>=72&&Math.abs(readerSwipeDistanceX)>Math.abs(readerSwipeDistanceY)*1.25){readerSwipeSuppressClick=true;window.parent.postMessage({type:"inkriver:article-swipe",direction:readerSwipeDistanceX<0?"next":"previous"},"*");setTimeout(function(){readerSwipeSuppressClick=false;},400);}resetReaderSwipe();});document.addEventListener("touchcancel",resetReaderSwipe);window.addEventListener("message",function(event){var message=event.data;if(!message)return;if(message.type==="inkriver:article-image-focus"&&typeof message.imageId==="string"){var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();return;}if(message.type==="inkriver:article-text-size"&&[16,18,22].includes(message.fontSize)){document.documentElement.style.setProperty("--article-font-size",message.fontSize+"px");reportArticleHeight();}});window.addEventListener("load",reportArticleHeight);new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
+export const ARTICLE_BRIDGE_SCRIPT = `function reportArticleHeight(ready){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"inkriver:article-height",height:height,ready:ready===true},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"inkriver:article-image",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}var readerSwipeStartX=null,readerSwipeStartY=null,readerSwipeDistanceX=0,readerSwipeDistanceY=0,readerSwipeHorizontal=false,readerSwipeSuppressClick=false;function resetReaderSwipe(){readerSwipeStartX=null;readerSwipeStartY=null;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;}document.addEventListener("click",function(event){if(readerSwipeSuppressClick){event.preventDefault();event.stopPropagation();return;}var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"inkriver:article-link",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);document.addEventListener("touchstart",function(event){var touch=event.touches[0];if(!touch||event.touches.length!==1||touch.clientX<=32||touch.clientX>=window.innerWidth-32)return;readerSwipeStartX=touch.clientX;readerSwipeStartY=touch.clientY;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;},{passive:true});document.addEventListener("touchmove",function(event){var touch=event.touches[0];if(!touch||readerSwipeStartX===null||readerSwipeStartY===null)return;readerSwipeDistanceX=touch.clientX-readerSwipeStartX;readerSwipeDistanceY=touch.clientY-readerSwipeStartY;if(!readerSwipeHorizontal){if(Math.abs(readerSwipeDistanceX)<12&&Math.abs(readerSwipeDistanceY)<12)return;if(Math.abs(readerSwipeDistanceX)<=Math.abs(readerSwipeDistanceY)){resetReaderSwipe();return;}readerSwipeHorizontal=true;}event.preventDefault();},{passive:false});document.addEventListener("touchend",function(){if(readerSwipeHorizontal&&Math.abs(readerSwipeDistanceX)>=72&&Math.abs(readerSwipeDistanceX)>Math.abs(readerSwipeDistanceY)*1.25){readerSwipeSuppressClick=true;window.parent.postMessage({type:"inkriver:article-swipe",direction:readerSwipeDistanceX<0?"next":"previous"},"*");setTimeout(function(){readerSwipeSuppressClick=false;},400);}resetReaderSwipe();});document.addEventListener("touchcancel",resetReaderSwipe);window.addEventListener("message",function(event){var message=event.data;if(!message)return;if(message.type==="inkriver:article-image-focus"&&typeof message.imageId==="string"){var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();return;}if(message.type==="inkriver:article-text-size"&&[16,18,22].includes(message.fontSize)){document.documentElement.style.setProperty("--article-font-size",message.fontSize+"px");reportArticleHeight();}});window.addEventListener("load",function(){reportArticleHeight(true);});new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
 export const ARTICLE_BRIDGE_CSP_HASH =
-  "sha256-8b0wyZIXBCd8O3mxyLbKe7IpZDocfs69A0osrD/NKfw=";
+  "sha256-ShFXWfVeXxpF10qgDn+P9vDPdWTM0SBq46MLDbMEHa4=";
 const ARTICLE_TEXT_SIZE_STORAGE_KEY = "inkriver.articleTextSize";
 const ARTICLE_TEXT_SIZES: readonly ArticleTextSize[] = ["small", "medium", "large"];
 const ARTICLE_TEXT_SIZE_CONFIG: Record<ArticleTextSize, { label: string; pixels: number }> = {
@@ -292,6 +292,8 @@ export class InkRiverApp {
   private articleView: ArticleView = "all";
   private articleTextSize: ArticleTextSize = "medium";
   private pendingTextSizeProgress: number | null = null;
+  private readonly readerProgressByArticleId = new Map<string, number>();
+  private pendingReaderProgress: number | null = null;
   private readonly preferenceStorage: PreferenceStorage | null;
   private automaticSyncEnabled = false;
   private readonly automaticSyncScheduler: AutomaticSyncScheduler;
@@ -314,6 +316,7 @@ export class InkRiverApp {
   private syncBusy = false;
   private diagnosticExportBusy = false;
   private deletingFeedId: string | null = null;
+  private readonly expandedFeedIds = new Set<string>();
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
   private archiveConfirmationArticleIds: string[] = [];
@@ -383,6 +386,7 @@ export class InkRiverApp {
         type?: unknown;
         href?: unknown;
         height?: unknown;
+        ready?: unknown;
         src?: unknown;
         alt?: unknown;
         imageId?: unknown;
@@ -396,6 +400,7 @@ export class InkRiverApp {
         if (Number.isFinite(height) && height > 0 && height <= MAX_ARTICLE_FRAME_HEIGHT) {
           frame.style.height = `${height}px`;
           this.restoreTextSizeProgress();
+          if (message.ready === true) this.restoreReaderProgress();
           const reader = this.root.querySelector<HTMLElement>(".reader");
           if (reader) this.updateReaderProgress(reader);
         }
@@ -445,6 +450,7 @@ export class InkRiverApp {
   private async selectArticle(
     articleId: string,
     preserveNavigationContext = false,
+    currentReaderProgressSaved = false,
   ): Promise<void> {
     if (!preserveNavigationContext) {
       this.readerArticleIds = this.visibleArticles().map((article) => article.id);
@@ -454,11 +460,14 @@ export class InkRiverApp {
       this.render();
       return;
     }
+    if (!currentReaderProgressSaved) this.saveReaderProgress();
     this.discardImageZoom();
     this.pendingTextSizeProgress = null;
+    this.pendingReaderProgress = null;
     this.error = null;
     try {
       this.selected = await this.api.getArticle(articleId);
+      this.pendingReaderProgress = this.readerProgressByArticleId.get(articleId) ?? null;
       if (!this.selected.isRead) {
         await this.setArticleReadState(articleId, true);
       }
@@ -491,10 +500,11 @@ export class InkRiverApp {
     ) return;
     const articleId = this.readerNavigationTargets()[direction];
     if (!articleId) return;
+    this.saveReaderProgress();
     this.readerNavigationPending = true;
     this.render();
     try {
-      await this.selectArticle(articleId, true);
+      await this.selectArticle(articleId, true, true);
     } finally {
       this.readerNavigationPending = false;
       this.render();
@@ -676,6 +686,28 @@ export class InkRiverApp {
       this.updateReaderTopButton(reader);
     }
     this.pendingTextSizeProgress = null;
+  }
+
+  private saveReaderProgress(): void {
+    if (!this.selected) return;
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    if (!reader || reader.dataset.readerArticleId !== this.selected.id) return;
+    const maxScroll = Math.max(0, reader.scrollHeight - reader.clientHeight);
+    const progress = maxScroll > 0
+      ? Math.min(1, Math.max(0, reader.scrollTop / maxScroll))
+      : 0;
+    this.readerProgressByArticleId.set(this.selected.id, progress);
+  }
+
+  private restoreReaderProgress(): void {
+    if (this.pendingReaderProgress === null) return;
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    if (reader) {
+      const maxScroll = Math.max(0, reader.scrollHeight - reader.clientHeight);
+      reader.scrollTop = this.pendingReaderProgress * maxScroll;
+      this.updateReaderTopButton(reader);
+    }
+    this.pendingReaderProgress = null;
   }
 
   private async setArticleFavoriteState(articleId: string, isFavorite: boolean): Promise<void> {
@@ -1232,6 +1264,7 @@ export class InkRiverApp {
       return '<div class="state" data-testid="empty">Aucun article enregistré.<button class="text-button" data-action="add-subscription">Ajouter un abonnement</button></div>';
     }
     const visibleArticles = this.visibleArticles();
+    const selectionActive = this.selectedArticleIds.size > 0;
     if (visibleArticles.length === 0) {
       if (this.articleView === "unread") {
         return '<div class="state" data-testid="unread-empty"><strong>Aucun article non lu.</strong><span>Sélectionnez « Tous » pour retrouver les articles lus.</span></div>';
@@ -1247,9 +1280,15 @@ export class InkRiverApp {
         const readPending = this.updatingReadArticleIds.has(article.id);
         const archivePending = this.archivingArticleId === article.id;
         const multiSelected = this.selectedArticleIds.has(article.id);
-        const selectionAttributes = this.selectedArticleIds.size > 0
+        const selectionAttributes = selectionActive
           ? ` aria-pressed="${multiSelected}"`
           : "";
+        const favoriteLabel = selectionActive
+          ? `${article.isFavorite ? "Article favori" : "Article non favori"} : ${title}`
+          : `${favoriteAction} : ${title}`;
+        const favoriteTitle = selectionActive
+          ? article.isFavorite ? "Article favori" : "Article non favori"
+          : favoriteAction;
 
         return `<article class="article-row ${article.isRead ? "read" : "unread"} ${this.selected?.id === article.id ? "selected" : ""} ${multiSelected ? "multi-selected" : ""}" data-article-row-id="${escapeHtml(article.id)}">
           <span class="article-swipe-action" aria-hidden="true">${archiveIcon()}<span data-swipe-archive-label>Glissez pour archiver</span></span>
@@ -1261,7 +1300,7 @@ export class InkRiverApp {
           </span>
           </button>
           <span class="article-row-actions">
-            <button type="button" class="article-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="timeline-favorite" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${favoriteAction} : ${title}`)}" title="${favoriteAction}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
+            <button type="button" class="article-icon-button favorite ${article.isFavorite ? "active" : ""}" data-action="timeline-favorite" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(favoriteLabel)}" title="${favoriteTitle}" aria-pressed="${article.isFavorite}" aria-busy="${favoritePending}" ${selectionActive || favoritePending || archivePending ? "disabled" : ""}>${favoriteIcon(article.isFavorite)}</button>
             <button type="button" class="article-icon-button read-state-icon ${article.isRead ? "active" : ""}" data-action="timeline-read" data-state-article-id="${escapeHtml(article.id)}" aria-label="${escapeHtml(`${readAction} : ${title}`)}" title="${readAction}" aria-pressed="${article.isRead}" aria-busy="${readPending}" ${readPending || archivePending ? "disabled" : ""}>${readIcon(article.isRead)}</button>
             <button type="button" class="article-icon-button danger" data-action="timeline-archive" data-article-id="${escapeHtml(article.id)}" title="Archiver l’article" aria-label="${escapeHtml(`Archiver l’article : ${title}`)}" aria-busy="${archivePending}" ${archivePending ? "disabled" : ""}>${archiveIcon()}</button>
           </span>
@@ -1453,8 +1492,20 @@ export class InkRiverApp {
     const feeds = this.feeds.length
       ? this.feeds
           .map(
-            (feed) => `<article class="feed-card ${feed.isActive ? "active" : "inactive"}" data-feed-card-id="${escapeHtml(feed.id)}">
-              <header><div>${renderSourceBadge(feed.platform, feed.logoDataUrl)}<span class="feed-status">${feed.isActive ? "Actif" : "Inactif"}</span></div><h2>${escapeHtml(feed.title ?? "Flux non actualisé")}</h2></header>
+            (feed) => {
+              const expanded = this.expandedFeedIds.has(feed.id);
+              const hasError = feed.lastError !== null;
+              const healthLabel = hasError ? "Flux en erreur" : "Flux opérationnel";
+              const detailsId = `feed-details-${feed.id}`;
+              return `<article class="feed-card ${feed.isActive ? "active" : "inactive"}${expanded ? " expanded" : ""}" data-feed-card-id="${escapeHtml(feed.id)}">
+              <header class="feed-summary"><button type="button" class="feed-summary-toggle" data-action="toggle-feed-details" data-feed-id="${escapeHtml(feed.id)}" aria-expanded="${expanded}" aria-controls="${escapeHtml(detailsId)}">
+                ${renderSourceBadge(feed.platform, feed.logoDataUrl)}
+                <h2>${escapeHtml(feed.title ?? "Flux non actualisé")}</h2>
+                <span class="feed-health ${hasError ? "error" : "ok"}" role="img" aria-label="${healthLabel}" title="${healthLabel}">${checkIcon()}</span>
+                <span class="feed-expansion-arrow" aria-hidden="true"></span>
+              </button></header>
+              <div class="feed-details" id="${escapeHtml(detailsId)}" ${expanded ? "" : "hidden"}>
+              <span class="feed-status">${feed.isActive ? "Actif" : "Inactif"}</span>
               <dl>
                 <div><dt>URL du flux</dt><dd>${escapeHtml(feed.url)}</dd></div>
                 <div><dt>Auteur</dt><dd>${escapeHtml(feed.author ?? "Inconnu")}</dd></div>
@@ -1464,11 +1515,26 @@ export class InkRiverApp {
               </dl>
               ${feed.lastError ? `<section class="feed-error" aria-label="Dernière erreur"><strong>Dernière erreur · ${escapeHtml(feed.lastError.stage)}</strong><time>${displayDateTime(feed.lastError.occurredAt)}</time><p>${escapeHtml(feed.lastError.message)}</p></section>` : ""}
               <footer class="feed-actions"><button type="button" class="feed-refresh-button" data-action="refresh-feed" data-feed-id="${escapeHtml(feed.id)}" title="${feed.isActive ? "Actualiser ce flux" : "Réactivez ce flux pour l’actualiser"}" aria-label="${feed.isActive ? "Actualiser ce flux" : "Réactivez ce flux pour l’actualiser"}" aria-busy="${this.refreshingFeedId === feed.id}" ${!feed.isActive || this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${refreshIcon()}</button><button data-action="toggle-feed" data-feed-id="${escapeHtml(feed.id)}" data-next-active="${!feed.isActive}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${feed.isActive ? "Désactiver" : "Réactiver"}</button><button class="danger" data-action="delete-feed" data-feed-id="${escapeHtml(feed.id)}" ${this.refreshing || this.deletingFeedId !== null ? "disabled" : ""}>${this.deletingFeedId === feed.id ? "Suppression…" : "Supprimer"}</button></footer>
-            </article>`,
+              </div>
+            </article>`;
+            },
           )
           .join("")
       : '<div class="state" data-testid="feeds-empty">Aucun abonnement.<button class="text-button" data-action="add-subscription">Ajouter un abonnement</button></div>';
-    return `<section class="feed-management" data-testid="feed-management"><header><div><span class="eyebrow">Sources</span><h1>Gestion des abonnements</h1><p>Consultez l’état des flux et leur dernier rafraîchissement.</p></div><div class="feed-management-actions"><button data-action="open-sync">Synchronisation</button><button class="primary" data-action="add-subscription">Ajouter un abonnement</button></div></header><div class="feed-grid">${feeds}</div></section>`;
+    return `<section class="feed-management" data-testid="feed-management"><header><div><span class="eyebrow">Sources</span><h1>Gestion des abonnements</h1><p>Consultez l’état des flux et leur dernier rafraîchissement.</p></div><div class="feed-management-actions"><button data-action="open-sync" hidden>Synchronisation</button><button class="primary" data-action="add-subscription">Ajouter un abonnement</button></div></header><div class="feed-grid">${feeds}</div></section>`;
+  }
+
+  private toggleFeedDetails(feedId: string): void {
+    if (!this.feeds.some((feed) => feed.id === feedId)) return;
+    if (this.expandedFeedIds.has(feedId)) {
+      this.expandedFeedIds.delete(feedId);
+    } else {
+      this.expandedFeedIds.add(feedId);
+    }
+    this.render();
+    Array.from(
+      this.root.querySelectorAll<HTMLButtonElement>('[data-action="toggle-feed-details"]'),
+    ).find((button) => button.dataset.feedId === feedId)?.focus();
   }
 
   private renderSyncDialog(): string {
@@ -2110,6 +2176,9 @@ export class InkRiverApp {
       this.render();
     });
     this.root.querySelector<HTMLElement>('[data-action="refresh"]')?.addEventListener("click", () => void this.refresh());
+    this.root.querySelectorAll<HTMLElement>('[data-action="toggle-feed-details"]').forEach((element) => {
+      element.addEventListener("click", () => this.toggleFeedDetails(element.dataset.feedId!));
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="refresh-feed"]').forEach((element) => {
       element.addEventListener("click", () => void this.refreshFeed(element.dataset.feedId!));
     });

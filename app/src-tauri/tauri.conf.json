@@ -11,7 +11,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'sha256-8b0wyZIXBCd8O3mxyLbKe7IpZDocfs69A0osrD/NKfw='; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; frame-src 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'sha256-ShFXWfVeXxpF10qgDn+P9vDPdWTM0SBq46MLDbMEHa4='; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; frame-src 'self'"
     },
     "windows": [
       {

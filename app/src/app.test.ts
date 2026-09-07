@@ -406,7 +406,57 @@ describe("InkRiverApp", () => {
     }
   });
 
-  it("enters mobile multi-selection after a stationary long press", async () => {
+  it("restores each article's reading position during mobile navigation", async () => {
+    const restoreViewport = installMobileViewport();
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [structuredClone(summary), structuredClone(secondSummary)]),
+      getArticle: vi.fn(async (articleId) =>
+        structuredClone(articleId === secondDetail.id ? secondDetail : detail),
+      ),
+    });
+    try {
+      const { root } = await mounted(api);
+      root.querySelector<HTMLElement>('[data-article-id="space::mars"]')!.click();
+      await flush();
+
+      let reader = root.querySelector<HTMLElement>(".reader")!;
+      Object.defineProperty(reader, "clientHeight", { configurable: true, value: 500 });
+      Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 2500 });
+      reader.scrollTop = 1000;
+
+      root.querySelector<HTMLButtonElement>('[data-action="reader-next"]')!.click();
+      await flush();
+      expect(root.querySelector(".reader-article h1")?.textContent).toBe(secondSummary.title);
+
+      reader = root.querySelector<HTMLElement>(".reader")!;
+      Object.defineProperty(reader, "clientHeight", { configurable: true, value: 500 });
+      Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 1500 });
+      reader.scrollTop = 300;
+      root.querySelector<HTMLButtonElement>('[data-action="reader-previous"]')!.click();
+      await flush();
+
+      reader = root.querySelector<HTMLElement>(".reader")!;
+      const frame = root.querySelector<HTMLIFrameElement>(".article-content")!;
+      Object.defineProperty(reader, "clientHeight", { configurable: true, value: 500 });
+      Object.defineProperty(reader, "scrollHeight", { configurable: true, value: 2500 });
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 600, ready: false },
+        source: frame.contentWindow,
+      }));
+      expect(reader.scrollTop).toBe(0);
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "inkriver:article-height", height: 2000, ready: true },
+        source: frame.contentWindow,
+      }));
+
+      expect(root.querySelector(".reader-article h1")?.textContent).toBe(summary.title);
+      expect(reader.scrollTop).toBe(1000);
+    } finally {
+      restoreViewport();
+    }
+  });
+
+  it("enters mobile multi-selection while keeping favorite states visible and read-only", async () => {
     const restoreViewport = installMobileViewport();
     try {
       const api = fakeApi({
@@ -431,6 +481,24 @@ describe("InkRiverApp", () => {
       expect(firstRow.querySelector('[data-action="select-article"]')?.getAttribute("aria-pressed"))
         .toBe("true");
       expect(firstRow.querySelector(".article-row-actions")).not.toBeNull();
+      const firstFavorite = firstRow.querySelector<HTMLButtonElement>(
+        '[data-action="timeline-favorite"]',
+      )!;
+      const favoriteRow = root.querySelector<HTMLElement>(
+        `[data-article-row-id="${secondSummary.id}"]`,
+      )!;
+      const favoriteIndicator = favoriteRow.querySelector<HTMLButtonElement>(
+        '[data-action="timeline-favorite"]',
+      )!;
+      expect(firstFavorite.disabled).toBe(true);
+      expect(firstFavorite.getAttribute("aria-label")).toContain("Article non favori");
+      expect(favoriteIndicator.disabled).toBe(true);
+      expect(favoriteIndicator.classList).toContain("active");
+      expect(favoriteIndicator.getAttribute("aria-label")).toContain("Article favori");
+      expect(firstRow.querySelector('[data-action="timeline-read"]')).not.toBeNull();
+      expect(firstRow.querySelector('[data-action="timeline-archive"]')).not.toBeNull();
+      favoriteIndicator.click();
+      expect(api.setArticleFavorite).not.toHaveBeenCalled();
 
       root.querySelector<HTMLElement>(`[data-article-id="${secondSummary.id}"]`)!.click();
       expect(root.querySelectorAll(".article-row.multi-selected")).toHaveLength(2);
@@ -1897,26 +1965,61 @@ describe("InkRiverApp", () => {
   it("renders subscription metadata and the persisted detailed error", async () => {
     const failedFeed: Feed = {
       ...structuredClone(feed),
+      id: "failed-feed",
       lastError: {
         stage: "HTTP request",
         message: "La connexion a expiré",
         occurredAt: "2026-08-12T17:45:00Z",
       },
     };
-    const api = fakeApi({ listFeeds: vi.fn(async () => [failedFeed]) });
+    const api = fakeApi({
+      listFeeds: vi.fn(async () => [structuredClone(feed), failedFeed]),
+    });
     const { root } = await mounted(api);
 
     root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
 
-    const card = root.querySelector<HTMLElement>('[data-feed-card-id="stable-feed-id"]')!;
-    expect(card.textContent).toContain("Carnet du ciel");
-    expect(card.textContent).toContain("Claire du Ciel");
-    expect(card.textContent).toContain("Une lettre pour observer le ciel");
-    expect(card.textContent).toContain(feed.url);
-    expect(card.textContent).toContain("Dernière publication");
-    expect(card.textContent).toContain("Dernière actualisation réussie");
-    expect(card.querySelector(".feed-error")?.textContent).toContain("HTTP request");
-    expect(card.querySelector(".feed-error")?.textContent).toContain("La connexion a expiré");
+    const healthyCard = root.querySelector<HTMLElement>(
+      '[data-feed-card-id="stable-feed-id"]',
+    )!;
+    expect(healthyCard.querySelector(".feed-health.ok")?.getAttribute("aria-label"))
+      .toBe("Flux opérationnel");
+    expect(healthyCard.querySelector<HTMLElement>(".feed-details")?.hidden).toBe(true);
+
+    const card = root.querySelector<HTMLElement>('[data-feed-card-id="failed-feed"]')!;
+    const summary = card.querySelector<HTMLButtonElement>('[data-action="toggle-feed-details"]')!;
+    const details = card.querySelector<HTMLElement>(".feed-details")!;
+    expect(summary.textContent).toContain("Carnet du ciel");
+    expect(summary.getAttribute("aria-expanded")).toBe("false");
+    expect(summary.querySelector(".feed-health.error")?.getAttribute("aria-label"))
+      .toBe("Flux en erreur");
+    expect(details.hidden).toBe(true);
+
+    summary.click();
+    expect(summary.isConnected).toBe(false);
+    const expandedCard = root.querySelector<HTMLElement>('[data-feed-card-id="failed-feed"]')!;
+    expect(expandedCard.querySelector('[data-action="toggle-feed-details"]')?.getAttribute(
+      "aria-expanded",
+    )).toBe("true");
+    expect(expandedCard.querySelector<HTMLElement>(".feed-details")?.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>(
+      '[data-feed-card-id="stable-feed-id"] .feed-details',
+    )?.hidden).toBe(true);
+    expect(expandedCard.textContent).toContain("Carnet du ciel");
+    expect(expandedCard.textContent).toContain("Claire du Ciel");
+    expect(expandedCard.textContent).toContain("Une lettre pour observer le ciel");
+    expect(expandedCard.textContent).toContain(feed.url);
+    expect(expandedCard.textContent).toContain("Dernière publication");
+    expect(expandedCard.textContent).toContain("Dernière actualisation réussie");
+    expect(expandedCard.querySelector(".feed-error")?.textContent).toContain("HTTP request");
+    expect(expandedCard.querySelector(".feed-error")?.textContent).toContain("La connexion a expiré");
+  });
+
+  it("temporarily hides synchronization from subscription management", async () => {
+    const { root } = await mounted();
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+
+    expect(root.querySelector<HTMLButtonElement>('[data-action="open-sync"]')?.hidden).toBe(true);
   });
 
   it("reloads persisted feed errors after a partial refresh", async () => {
@@ -3179,6 +3282,7 @@ describe("view helpers", () => {
     expect(document).toContain('style="--article-font-size:16px"');
     expect(document).toContain("font-size:var(--article-font-size)");
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
+    expect(document).toContain('window.addEventListener("load",function(){reportArticleHeight(true);})');
     expect(document).toContain('document.addEventListener("click"');
     expect(document).toContain('document.addEventListener("keydown"');
     expect(document).toContain('document.addEventListener("touchstart"');
