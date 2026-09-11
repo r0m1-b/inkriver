@@ -8,7 +8,9 @@
 target/
 /app/node_modules/
 /app/dist/
-/app/src-tauri/gen/
+/app/src-tauri/gen/**
+!/app/src-tauri/gen/**/
+!/app/src-tauri/gen/android/app/src/main/java/io/github/r0m1_b/inkriver/MainActivity.kt
 
 # Local development and Codex working files
 /AGENTS.md

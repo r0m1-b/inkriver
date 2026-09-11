@@ -1,4 +1,5 @@
 use crate::article::{Article, Source};
+use crate::article_html::enrich_x_cards_in_articles;
 use crate::config::{Config, FeedConfig, Platform};
 use crate::feed::MISSING_ENTRY_ID;
 use crate::feed::{Feed, FeedMetadata};
@@ -224,7 +225,9 @@ where
 
 /// Asynchronously downloads all feeds and reports successes and failures separately.
 pub async fn collect_articles(config: &Config) -> CollectionReport {
-    collect_articles_with_loader(config, load_feed_from_http).await
+    let mut report = collect_articles_with_loader(config, load_feed_from_http).await;
+    enrich_x_cards_in_articles(&mut report.articles).await;
+    report
 }
 
 /// Formats the compact article representation used by the current CLI.

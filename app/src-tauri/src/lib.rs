@@ -2,8 +2,9 @@ use base64::Engine;
 use inkriver::config::Platform;
 use inkriver::refresh::{self, RefreshReport};
 use inkriver::storage::{
-    ArticleSummary, DeleteFeedResult, Storage, StoredArticle, StoredFeed, StoredSyncReport,
-    StoredSyncRuntimeError, SubscriptionError, SyncDevice,
+    ArticleSummary, DeleteFeedResult, LabelError, Storage, StoredArticle, StoredCategory,
+    StoredFeed, StoredLabel, StoredSyncReport, StoredSyncRuntimeError, SubscriptionError,
+    SyncDevice,
 };
 use inkriver::sync_diagnostics::export_sync_diagnostic_json;
 use inkriver::sync_pairing::{
@@ -58,6 +59,7 @@ pub struct ArticleSummaryDto {
     pub source: String,
     pub is_read: bool,
     pub is_favorite: bool,
+    pub labels: Vec<LabelDto>,
 }
 
 impl From<ArticleSummary> for ArticleSummaryDto {
@@ -72,6 +74,7 @@ impl From<ArticleSummary> for ArticleSummaryDto {
             source: summary.source.as_str().to_string(),
             is_read: summary.is_read,
             is_favorite: summary.is_favorite,
+            labels: summary.labels.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -90,6 +93,7 @@ pub struct ArticleDetailDto {
     pub source: String,
     pub is_read: bool,
     pub is_favorite: bool,
+    pub labels: Vec<LabelDto>,
 }
 
 impl From<StoredArticle> for ArticleDetailDto {
@@ -106,6 +110,7 @@ impl From<StoredArticle> for ArticleDetailDto {
             source: stored.article.source.as_str().to_string(),
             is_read: stored.is_read,
             is_favorite: stored.is_favorite,
+            labels: stored.labels.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -124,6 +129,39 @@ pub struct FeedDto {
     pub last_success_at: Option<String>,
     pub last_error: Option<StoredFeedErrorDto>,
     pub logo_data_url: Option<String>,
+    pub category: Option<CategoryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryDto {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelDto {
+    pub id: String,
+    pub name: String,
+}
+
+impl From<StoredLabel> for LabelDto {
+    fn from(label: StoredLabel) -> Self {
+        Self {
+            id: label.id,
+            name: label.name,
+        }
+    }
+}
+
+impl From<StoredCategory> for CategoryDto {
+    fn from(category: StoredCategory) -> Self {
+        Self {
+            id: category.id,
+            name: category.name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -271,6 +309,7 @@ impl From<StoredFeed> for FeedDto {
                     base64::engine::general_purpose::STANDARD.encode(png)
                 )
             }),
+            category: feed.category.map(Into::into),
         }
     }
 }
@@ -361,6 +400,21 @@ fn subscription_error(error: SubscriptionError) -> ApiError {
             format!("Réactivez l’abonnement avant de l’actualiser : {id}"),
         ),
         SubscriptionError::Database(message) => ApiError::new("storage", message),
+    }
+}
+
+fn label_error(error: LabelError) -> ApiError {
+    match error {
+        LabelError::InvalidName(message) => ApiError::new("invalid_label", message),
+        LabelError::EmptySelection => ApiError::new("invalid_request", "Sélection d'articles vide"),
+        LabelError::ArticleNotFound(id) => ApiError::new(
+            "article_not_found",
+            format!("Article introuvable ou archivé : {id}"),
+        ),
+        LabelError::LabelNotFound(id) => {
+            ApiError::new("label_not_found", format!("Étiquette introuvable : {id}"))
+        }
+        LabelError::Database(message) => ApiError::new("storage", message),
     }
 }
 
@@ -532,17 +586,72 @@ async fn list_feeds_from(storage: &Storage) -> Result<Vec<FeedDto>, ApiError> {
         .map_err(ApiError::storage)
 }
 
+async fn list_categories_from(storage: &Storage) -> Result<Vec<CategoryDto>, ApiError> {
+    storage
+        .list_categories()
+        .await
+        .map(|categories| categories.into_iter().map(Into::into).collect())
+        .map_err(ApiError::storage)
+}
+
+async fn list_labels_from(storage: &Storage) -> Result<Vec<LabelDto>, ApiError> {
+    storage
+        .list_labels()
+        .await
+        .map(|labels| labels.into_iter().map(Into::into).collect())
+        .map_err(ApiError::storage)
+}
+
+async fn add_article_label_in(
+    storage: &Storage,
+    article_ids: &[String],
+    name: &str,
+) -> Result<LabelDto, ApiError> {
+    storage
+        .add_label_to_articles(article_ids, name)
+        .await
+        .map(Into::into)
+        .map_err(label_error)
+}
+
+async fn remove_article_label_in(
+    storage: &Storage,
+    article_ids: &[String],
+    label_id: &str,
+) -> Result<(), ApiError> {
+    storage
+        .remove_label_from_articles(article_ids, label_id)
+        .await
+        .map(|_| ())
+        .map_err(label_error)
+}
+
 async fn add_feed_to(
     storage: &Storage,
     url: &str,
     platform: Option<&str>,
+    category_name: Option<&str>,
 ) -> Result<FeedDto, ApiError> {
     let platform = parse_platform(platform)?;
-    storage
+    let category_name = category_name.map(str::trim).filter(|name| !name.is_empty());
+    if category_name.is_some_and(|name| name.chars().count() > 80) {
+        return Err(ApiError::new(
+            "invalid_category",
+            "Le nom de catégorie ne peut pas dépasser 80 caractères",
+        ));
+    }
+    let feed = storage
         .add_feed(url, platform)
         .await
-        .map(Into::into)
-        .map_err(subscription_error)
+        .map_err(subscription_error)?;
+    match category_name {
+        Some(name) => storage
+            .set_feed_category(&feed.id, Some(name))
+            .await
+            .map(Into::into)
+            .map_err(subscription_error),
+        None => Ok(feed.into()),
+    }
 }
 
 async fn set_feed_active_in(
@@ -552,6 +661,18 @@ async fn set_feed_active_in(
 ) -> Result<FeedDto, ApiError> {
     storage
         .set_feed_active(feed_id, is_active)
+        .await
+        .map(Into::into)
+        .map_err(subscription_error)
+}
+
+async fn set_feed_category_in(
+    storage: &Storage,
+    feed_id: &str,
+    category_name: Option<&str>,
+) -> Result<FeedDto, ApiError> {
+    storage
+        .set_feed_category(feed_id, category_name)
         .await
         .map(Into::into)
         .map_err(subscription_error)
@@ -811,12 +932,47 @@ async fn list_feeds(state: State<'_, AppState>) -> Result<Vec<FeedDto>, ApiError
 }
 
 #[tauri::command]
+async fn list_categories(state: State<'_, AppState>) -> Result<Vec<CategoryDto>, ApiError> {
+    list_categories_from(&state.storage).await
+}
+
+#[tauri::command]
+async fn list_labels(state: State<'_, AppState>) -> Result<Vec<LabelDto>, ApiError> {
+    list_labels_from(&state.storage).await
+}
+
+#[tauri::command]
+async fn add_article_label(
+    state: State<'_, AppState>,
+    article_ids: Vec<String>,
+    name: String,
+) -> Result<LabelDto, ApiError> {
+    add_article_label_in(&state.storage, &article_ids, &name).await
+}
+
+#[tauri::command]
+async fn remove_article_label(
+    state: State<'_, AppState>,
+    article_ids: Vec<String>,
+    label_id: String,
+) -> Result<(), ApiError> {
+    remove_article_label_in(&state.storage, &article_ids, &label_id).await
+}
+
+#[tauri::command]
 async fn add_feed(
     state: State<'_, AppState>,
     url: String,
     platform: Option<String>,
+    category_name: Option<String>,
 ) -> Result<FeedDto, ApiError> {
-    add_feed_to(&state.storage, &url, platform.as_deref()).await
+    add_feed_to(
+        &state.storage,
+        &url,
+        platform.as_deref(),
+        category_name.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -826,6 +982,15 @@ async fn set_feed_active(
     is_active: bool,
 ) -> Result<FeedDto, ApiError> {
     set_feed_active_in(&state.storage, &feed_id, is_active).await
+}
+
+#[tauri::command]
+async fn set_feed_category(
+    state: State<'_, AppState>,
+    feed_id: String,
+    category_name: Option<String>,
+) -> Result<FeedDto, ApiError> {
+    set_feed_category_in(&state.storage, &feed_id, category_name.as_deref()).await
 }
 
 #[tauri::command]
@@ -985,8 +1150,13 @@ pub fn run() {
             archive_article,
             archive_articles,
             list_feeds,
+            list_categories,
+            list_labels,
+            add_article_label,
+            remove_article_label,
             add_feed,
             set_feed_active,
+            set_feed_category,
             delete_feed,
             sync_pairing_status,
             configure_sync_group,
@@ -1263,6 +1433,7 @@ mod tests {
             },
             is_read: false,
             is_favorite: false,
+            labels: Vec::new(),
         });
 
         assert_eq!(dto.content_kind, "extracted");
@@ -1273,6 +1444,57 @@ mod tests {
         let (_directory, storage) = test_storage().await;
         let error = get_article_from(&storage, "missing").await.unwrap_err();
         assert_eq!(error.code, "article_not_found");
+    }
+
+    #[tokio::test]
+    async fn label_adapters_assign_list_and_remove_local_labels() {
+        let (_directory, storage) = storage_with_article().await;
+        let article_ids = vec!["space::mars".to_string()];
+
+        let label = add_article_label_in(&storage, &article_ids, " À relire ")
+            .await
+            .unwrap();
+        assert_eq!(label.name, "À relire");
+        assert_eq!(
+            list_labels_from(&storage).await.unwrap(),
+            vec![label.clone()]
+        );
+        assert_eq!(
+            get_article_from(&storage, "space::mars")
+                .await
+                .unwrap()
+                .labels,
+            vec![label.clone()]
+        );
+        assert_eq!(
+            list_articles_from(&storage).await.unwrap()[0].labels,
+            vec![label.clone()]
+        );
+
+        remove_article_label_in(&storage, &article_ids, &label.id)
+            .await
+            .unwrap();
+        assert!(
+            get_article_from(&storage, "space::mars")
+                .await
+                .unwrap()
+                .labels
+                .is_empty()
+        );
+        assert_eq!(
+            add_article_label_in(&storage, &[], "Important")
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+        assert_eq!(
+            add_article_label_in(&storage, &article_ids, "   ")
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_label"
+        );
     }
 
     #[tokio::test]
@@ -1477,9 +1699,14 @@ mod tests {
     #[tokio::test]
     async fn feed_adapters_add_list_and_deactivate_subscriptions() {
         let (_directory, storage) = test_storage().await;
-        let added = add_feed_to(&storage, " https://letters.substack.com/feed#latest ", None)
-            .await
-            .unwrap();
+        let added = add_feed_to(
+            &storage,
+            " https://letters.substack.com/feed#latest ",
+            None,
+            Some("Intelligence artificielle"),
+        )
+        .await
+        .unwrap();
         assert_eq!(added.platform, "substack");
         assert_eq!(added.url, "https://letters.substack.com/feed");
         assert_eq!(
@@ -1487,12 +1714,33 @@ mod tests {
             vec![added.clone()]
         );
 
+        let category = added.category.clone().unwrap();
+        assert_eq!(category.name, "Intelligence artificielle");
+        assert_eq!(
+            list_categories_from(&storage).await.unwrap(),
+            vec![category]
+        );
+        let oversized_category = "x".repeat(81);
+        assert_eq!(
+            add_feed_to(
+                &storage,
+                "https://another.example/feed",
+                None,
+                Some(&oversized_category),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "invalid_category"
+        );
+        assert_eq!(list_feeds_from(&storage).await.unwrap().len(), 1);
+
         let inactive = set_feed_active_in(&storage, &added.id, false)
             .await
             .unwrap();
         assert!(!inactive.is_active);
         assert_eq!(
-            add_feed_to(&storage, "file:///tmp/feed", None)
+            add_feed_to(&storage, "file:///tmp/feed", None, None)
                 .await
                 .unwrap_err()
                 .code,
@@ -1582,6 +1830,7 @@ mod tests {
             last_success_at: None,
             last_error: None,
             logo_png: Some(vec![0x89, b'P', b'N', b'G']),
+            category: None,
         });
 
         assert_eq!(
@@ -1606,6 +1855,7 @@ mod tests {
             last_success_at: None,
             last_error: None,
             logo_data_url: None,
+            category: None,
         })
         .unwrap();
         assert_eq!(value["isActive"], true);

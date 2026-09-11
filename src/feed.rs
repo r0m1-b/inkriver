@@ -1,4 +1,5 @@
 use crate::article::{ContentKind, Source};
+use crate::article_html::sanitize_article_html;
 use sha2::{Digest, Sha256};
 
 /// Marks an identifier synthesized by the parser for an entry without GUID.
@@ -153,14 +154,14 @@ impl Feed {
             .and_then(|content| content.body.as_deref())
             .filter(|body| !body.trim().is_empty())
         {
-            Some(body) => (Some(ammonia::clean(body)), ContentKind::Full),
+            Some(body) => (Some(sanitize_article_html(body)), ContentKind::Full),
             None => match entry
                 .summary
                 .as_ref()
                 .map(|summary| summary.content.as_str())
                 .filter(|summary| !summary.trim().is_empty())
             {
-                Some(summary) => (Some(ammonia::clean(summary)), ContentKind::Excerpt),
+                Some(summary) => (Some(sanitize_article_html(summary)), ContentKind::Excerpt),
                 None => (None, ContentKind::Missing),
             },
         };
@@ -538,6 +539,24 @@ mod tests {
         assert!(!content.contains("javascript:"));
         assert!(content.contains("<strong>text</strong>"));
         assert!(content.contains("href=\"https://example.com/read\""));
+    }
+
+    #[test]
+    fn article_replaces_supported_feed_embeds_with_static_media() {
+        let feed = &mock_feeds()[0];
+        let mut entry = feed.entries[0].clone();
+        entry.content.as_mut().unwrap().body = Some(
+            r#"<p>Une vidéo :</p><iframe src="https://youtu.be/dQw4w9WgXcQ"></iframe><blockquote class="twitter-tweet"><p>Un tweet cité.</p><a href="https://x.com/example/status/1840000000000000000">Voir</a></blockquote>"#
+                .to_string(),
+        );
+
+        let article = feed.article_from_entry(&entry);
+        let content = article.content.unwrap();
+
+        assert!(!content.contains("iframe"));
+        assert!(content.contains("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"));
+        assert!(content.contains("https://x.com/example/status/1840000000000000000"));
+        assert!(content.contains("Un tweet cité."));
     }
 
     /// Verifies that fallback summaries receive the same HTML sanitization.

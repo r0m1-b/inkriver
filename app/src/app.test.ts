@@ -17,7 +17,7 @@ import {
   writeArticleTextSize,
 } from "./app";
 import type { InkRiverApi } from "./api";
-import type { ArticleDetail, ArticleSummary, Feed, RefreshReport } from "./types";
+import type { ArticleDetail, ArticleSummary, Category, Feed, Label, RefreshReport } from "./types";
 
 const summary: ArticleSummary = {
   id: "space::mars",
@@ -29,6 +29,7 @@ const summary: ArticleSummary = {
   source: "substack",
   isRead: false,
   isFavorite: false,
+  labels: [],
 };
 
 const detail: ArticleDetail = {
@@ -63,6 +64,17 @@ const feed: Feed = {
   lastSuccessAt: "2026-08-08T12:05:00Z",
   lastError: null,
   logoDataUrl: null,
+  category: null,
+};
+
+const aiCategory: Category = {
+  id: "category-ai",
+  name: "Intelligence artificielle",
+};
+
+const researchLabel: Label = {
+  id: "label-research",
+  name: "À approfondir",
 };
 
 const emptySyncRuntime = {
@@ -108,8 +120,16 @@ function fakeApi(overrides: Partial<InkRiverApi> = {}): InkRiverApi {
     archiveArticle: vi.fn(async () => undefined),
     archiveArticles: vi.fn(async () => undefined),
     listFeeds: vi.fn(async () => [structuredClone(feed)]),
+    listCategories: vi.fn(async () => []),
+    listLabels: vi.fn(async () => []),
+    addArticleLabel: vi.fn(async (_articleIds, name) => ({
+      id: `label-${name.toLocaleLowerCase("fr-FR")}`,
+      name,
+    })),
+    removeArticleLabel: vi.fn(async () => undefined),
     addFeed: vi.fn(async () => structuredClone(feed)),
     setFeedActive: vi.fn(async () => structuredClone(feed)),
+    setFeedCategory: vi.fn(async () => structuredClone(feed)),
     deleteFeed: vi.fn(async () => ({ feedId: feed.id, deletedArticles: 1 })),
     syncPairingStatus: vi.fn(async () => ({
       ...emptySyncRuntime,
@@ -248,22 +268,302 @@ async function mounted(
 }
 
 describe("InkRiverApp", () => {
-  it("renders the InkRiver logo in the application header", async () => {
+  it("replaces the InkRiver logo with the feed menu and current context", async () => {
     const { root } = await mounted();
-    const logo = root.querySelector<HTMLImageElement>(".brand-logo");
+    const menu = root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!;
 
-    expect(logo?.getAttribute("src")).toBe("/inkriver-logo.png");
-    expect(logo?.getAttribute("alt")).toBe("");
-    expect(root.querySelector(".brand small")?.textContent).toBe("All your feeds. One flow.");
+    expect(root.querySelector(".brand-logo")).toBeNull();
+    expect(menu.getAttribute("aria-label")).toBe("Ouvrir le menu des flux");
+    expect(menu.querySelector("svg")).not.toBeNull();
+    expect(root.querySelector(".app-context-title")?.textContent).toBe("InkRiver");
+  });
+
+  it("filters every article view by feed and returns to all feeds", async () => {
+    const securityCategory: Category = {
+      id: "category-security",
+      name: "Cybersécurité",
+    };
+    const categorizedFeed: Feed = {
+      ...structuredClone(feed),
+      category: structuredClone(aiCategory),
+    };
+    const otherFeed: Feed = {
+      ...structuredClone(feed),
+      id: "other-feed",
+      title: "Sécurité numérique",
+      platform: "other",
+      url: "https://security.example/feed",
+      category: securityCategory,
+    };
+    const otherArticle: ArticleSummary = {
+      ...structuredClone(summary),
+      id: "security::incident",
+      feedId: otherFeed.id,
+      title: "Analyser un incident",
+      source: "other",
+      isFavorite: true,
+    };
+    const api = fakeApi({
+      listFeeds: vi.fn(async () => [categorizedFeed, otherFeed]),
+      listCategories: vi.fn(async () => [structuredClone(aiCategory), securityCategory]),
+      listArticles: vi.fn(async () => [
+        structuredClone(summary),
+        structuredClone(secondSummary),
+        otherArticle,
+      ]),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    const filterMenu = root.querySelector<HTMLElement>(".feed-filter-menu")!;
+    expect(filterMenu.getAttribute("role")).toBe("dialog");
+    expect(filterMenu.querySelectorAll('[data-action="select-feed-filter"]')).toHaveLength(3);
+    expect(filterMenu.textContent).toContain("Tous les flux");
+    expect(filterMenu.textContent).toContain("Carnet du ciel");
+    expect(filterMenu.textContent).toContain("Sécurité numérique");
+    expect(filterMenu.textContent).toContain("Catégories");
+    expect(filterMenu.textContent).toContain("Intelligence artificielle");
+    expect(filterMenu.textContent).toContain("Cybersécurité");
+    expect(filterMenu.querySelectorAll('[data-action="select-feed-filter"] .source-logo'))
+      .toHaveLength(3);
+
+    Array.from(filterMenu.querySelectorAll<HTMLElement>('[data-action="select-category-filter"]'))
+      .find((option) => option.dataset.categoryId === aiCategory.id)!
+      .click();
+    expect(root.querySelector(".app-context-title")?.textContent).toBe(aiCategory.name);
+    expect(root.querySelectorAll("[data-article-row-id]")).toHaveLength(2);
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="security::incident"]')).toBeNull();
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    const reopenedFilterMenu = root.querySelector<HTMLElement>(".feed-filter-menu")!;
+
+    Array.from(reopenedFilterMenu.querySelectorAll<HTMLElement>('[data-action="select-feed-filter"]'))
+      .find((option) => option.dataset.feedId === otherFeed.id)!
+      .click();
+
+    expect(root.querySelector(".feed-filter-menu")).toBeNull();
+    expect(root.querySelector(".app-context-title")?.textContent).toBe(otherFeed.title);
+    expect(root.querySelector('[data-article-row-id="security::incident"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::mars"]')).toBeNull();
+    expect(root.querySelector('[data-article-view="favorites"]')?.textContent).toContain("1");
+    expect(root.querySelector('[data-article-view="unread"]')?.textContent).toContain("1");
+
+    root.querySelector<HTMLElement>('[data-article-view="favorites"]')!.click();
+    expect(root.querySelector('[data-article-row-id="security::incident"]')).not.toBeNull();
+    expect(root.querySelector('[data-article-row-id="space::venus"]')).toBeNull();
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="select-feed-filter"]:not([data-feed-id])',
+    )!.click();
+    expect(root.querySelector(".app-context-title")?.textContent).toBe("InkRiver");
+    expect(root.querySelectorAll("[data-article-row-id]")).toHaveLength(2);
+    expect(root.querySelector('[data-article-row-id="space::venus"]')).not.toBeNull();
+  });
+
+  it("expands and collapses feed, category and label filters independently", async () => {
+    const api = fakeApi({
+      listCategories: vi.fn(async () => [structuredClone(aiCategory)]),
+      listLabels: vi.fn(async () => [structuredClone(researchLabel)]),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    const feedsToggle = root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-feed-filter-section"][data-section="feeds"]',
+    )!;
+    const categoriesToggle = root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-feed-filter-section"][data-section="categories"]',
+    )!;
+    const labelsToggle = root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-feed-filter-section"][data-section="labels"]',
+    )!;
+    const feeds = root.querySelector<HTMLElement>("#feed-filter-feeds")!;
+    const categories = root.querySelector<HTMLElement>("#feed-filter-categories")!;
+    const labels = root.querySelector<HTMLElement>("#feed-filter-labels")!;
+
+    expect(feedsToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(categoriesToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(labelsToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(feeds.hidden).toBe(false);
+    expect(categories.hidden).toBe(false);
+    expect(labels.hidden).toBe(false);
+
+    feedsToggle.click();
+    expect(feedsToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(feeds.hidden).toBe(true);
+    expect(categories.hidden).toBe(false);
+    expect(labels.hidden).toBe(false);
+
+    categoriesToggle.click();
+    expect(categoriesToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(categories.hidden).toBe(true);
+    labelsToggle.click();
+    expect(labelsToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(labels.hidden).toBe(true);
+    const allFeeds = root.querySelector<HTMLButtonElement>(
+      '[data-action="select-feed-filter"]:not([data-feed-id])',
+    )!;
+    expect(allFeeds.closest("[hidden]")).toBeNull();
+    expect(allFeeds.textContent).toContain("Tous les flux");
+
+    root.querySelector<HTMLButtonElement>('[data-action="close-feed-filter"]')!.click();
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    expect(root.querySelector<HTMLElement>("#feed-filter-feeds")?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#feed-filter-categories")?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#feed-filter-labels")?.hidden).toBe(true);
+  });
+
+  it("adds, reuses and removes labels from the opened article", async () => {
+    let assigned = false;
+    const articleWithCurrentLabels = (): ArticleDetail => ({
+      ...structuredClone(detail),
+      labels: assigned ? [structuredClone(researchLabel)] : [],
+    });
+    const summaryWithCurrentLabels = (): ArticleSummary => ({
+      ...structuredClone(summary),
+      labels: assigned ? [structuredClone(researchLabel)] : [],
+    });
+    const addArticleLabel = vi.fn<InkRiverApi["addArticleLabel"]>(async () => {
+      assigned = true;
+      return structuredClone(researchLabel);
+    });
+    const removeArticleLabel = vi.fn<InkRiverApi["removeArticleLabel"]>(async () => {
+      assigned = false;
+    });
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [summaryWithCurrentLabels()]),
+      getArticle: vi.fn(async () => articleWithCurrentLabels()),
+      listLabels: vi.fn(async () => assigned ? [structuredClone(researchLabel)] : []),
+      addArticleLabel,
+      removeArticleLabel,
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLButtonElement>('[data-action="select-article"]')!.click();
+    await flush();
+    expect(root.querySelectorAll(".article-label-editor")).toHaveLength(2);
+    expect(root.querySelectorAll(".article-label-empty")).toHaveLength(2);
+    const form = root.querySelector<HTMLFormElement>(".article-label-editor.bottom [data-article-label-form]")!;
+    const addButton = form.querySelector<HTMLButtonElement>(".article-label-add")!;
+    expect(addButton.textContent).toBe("+");
+    expect(addButton.getAttribute("aria-label")).toBe("Ajouter l’étiquette");
+    form.querySelector<HTMLInputElement>('#article-label-input-bottom')!.value = researchLabel.name;
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flush();
+    await flush();
+
+    expect(addArticleLabel).toHaveBeenCalledWith([summary.id], researchLabel.name);
+    expect(root.querySelectorAll(".article-label-chip")).toHaveLength(2);
+    expect(root.querySelector(".article-label-chip")?.textContent).toContain(researchLabel.name);
+    root.querySelector<HTMLButtonElement>(
+      '.article-label-editor.bottom [data-action="remove-article-label"]',
+    )!.click();
+    await flush();
+    await flush();
+
+    expect(removeArticleLabel).toHaveBeenCalledWith([summary.id], researchLabel.id);
+    expect(root.querySelectorAll(".article-label-empty")).toHaveLength(2);
+  });
+
+  it("uses an in-flow mobile-safe label suggestion list", async () => {
+    const api = fakeApi({
+      listLabels: vi.fn(async () => [structuredClone(researchLabel)]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLButtonElement>('[data-action="select-article"]')!.click();
+    await flush();
+
+    const form = root.querySelector<HTMLFormElement>(
+      ".article-label-editor.bottom [data-article-label-form]",
+    )!;
+    const input = form.querySelector<HTMLInputElement>('input[name="label"]')!;
+    const suggestions = form.querySelector<HTMLElement>(".article-label-suggestions")!;
+    const option = suggestions.querySelector<HTMLButtonElement>("[data-label-suggestion]")!;
+    expect(root.querySelector("datalist")).toBeNull();
+    expect(input.hasAttribute("list")).toBe(false);
+    expect(form.contains(suggestions)).toBe(true);
+
+    input.focus();
+    expect(suggestions.hidden).toBe(false);
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    input.value = "introuvable";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(suggestions.hidden).toBe(true);
+
+    input.value = "appro";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(suggestions.hidden).toBe(false);
+    option.click();
+    expect(input.value).toBe(researchLabel.name);
+    expect(suggestions.hidden).toBe(true);
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps the focused label field above the mobile keyboard viewport", async () => {
+    const restoreViewport = installMobileViewport();
+    try {
+      const { root } = await mounted(fakeApi({
+        listLabels: vi.fn(async () => [structuredClone(researchLabel)]),
+      }));
+      root.querySelector<HTMLButtonElement>('[data-action="select-article"]')!.click();
+      await flush();
+      const reader = root.querySelector<HTMLElement>(".reader")!;
+      const input = root.querySelector<HTMLInputElement>(
+        '.article-label-editor.bottom input[name="label"]',
+      )!;
+      let bottom = window.innerHeight - 10;
+      Object.defineProperty(input, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ top: bottom - 44, bottom }),
+      });
+
+      reader.scrollTop = 0;
+      input.focus();
+      expect(reader.scrollTop).toBe(74);
+
+      bottom = window.innerHeight + 40;
+      window.dispatchEvent(new Event("resize"));
+      expect(reader.scrollTop).toBe(198);
+    } finally {
+      restoreViewport();
+    }
+  });
+
+  it("filters the timeline by an article label", async () => {
+    const labeled = { ...structuredClone(summary), labels: [structuredClone(researchLabel)] };
+    const unlabeled = { ...structuredClone(secondSummary), labels: [] };
+    const api = fakeApi({
+      listArticles: vi.fn(async () => [labeled, unlabeled]),
+      listLabels: vi.fn(async () => [structuredClone(researchLabel)]),
+    });
+    const { root } = await mounted(api);
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    root.querySelector<HTMLButtonElement>(
+      `[data-action="select-label-filter"][data-label-id="${researchLabel.id}"]`,
+    )!.click();
+
+    expect(root.querySelector(".app-context-title")?.textContent).toBe(researchLabel.name);
+    expect(root.querySelector(`[data-article-row-id="${summary.id}"]`)).not.toBeNull();
+    expect(root.querySelector(`[data-article-row-id="${secondSummary.id}"]`)).toBeNull();
   });
 
   it("provides compact mobile subscription actions and a back button", async () => {
     const restoreViewport = installMobileViewport();
     try {
       const { root, api } = await mounted();
+      const feedMenuButton = root.querySelector<HTMLButtonElement>(
+        '[data-action="open-feed-filter"]',
+      )!;
+
+      feedMenuButton.click();
+      expect(root.querySelector(".feed-filter-menu")).not.toBeNull();
+      root.querySelector<HTMLButtonElement>('[data-action="close-feed-filter"]')!.click();
+      expect(root.querySelector(".feed-filter-menu")).toBeNull();
       const addButton = root.querySelector<HTMLButtonElement>(".mobile-add-subscription")!;
       const settingsButton = root.querySelector<HTMLButtonElement>(".mobile-settings")!;
-
       expect(addButton.getAttribute("aria-label")).toBe("Ajouter un abonnement");
       expect(addButton.querySelector("svg")).not.toBeNull();
       expect(settingsButton.getAttribute("aria-label")).toBe("Gestion des abonnements");
@@ -2022,6 +2322,41 @@ describe("InkRiverApp", () => {
     expect(root.querySelector<HTMLButtonElement>('[data-action="open-sync"]')?.hidden).toBe(true);
   });
 
+  it("creates or reuses a category while assigning it to a feed", async () => {
+    const politicsCategory: Category = { id: "category-politics", name: "Politique" };
+    const listCategories = vi
+      .fn<InkRiverApi["listCategories"]>()
+      .mockResolvedValueOnce([structuredClone(aiCategory)])
+      .mockResolvedValueOnce([structuredClone(aiCategory), politicsCategory]);
+    const api = fakeApi({
+      listCategories,
+      setFeedCategory: vi.fn(async () => ({
+        ...structuredClone(feed),
+        category: politicsCategory,
+      })),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="subscriptions"]')!.click();
+    root.querySelector<HTMLButtonElement>('[data-action="toggle-feed-details"]')!.click();
+
+    const form = root.querySelector<HTMLFormElement>("[data-feed-category-form]")!;
+    const input = form.querySelector<HTMLInputElement>('input[name="category"]')!;
+    expect(input.getAttribute("list")).toBe("feed-category-options");
+    expect(root.querySelector<HTMLOptionElement>("#feed-category-options option")?.value)
+      .toBe(aiCategory.name);
+    input.value = " Politique ";
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flush();
+
+    expect(api.setFeedCategory).toHaveBeenCalledWith(feed.id, "Politique");
+    expect(listCategories).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(
+      "Catégorie « Politique » attribuée",
+    );
+    root.querySelector<HTMLButtonElement>('[data-action="open-feed-filter"]')!.click();
+    expect(root.querySelector(".feed-filter-menu")?.textContent).toContain("Politique");
+  });
+
   it("reloads persisted feed errors after a partial refresh", async () => {
     const failedFeed: Feed = {
       ...structuredClone(feed),
@@ -2086,6 +2421,42 @@ describe("InkRiverApp", () => {
     root.querySelector<HTMLElement>('[data-action="toggle-feed"]')!.click();
     await flush();
     expect(api.setFeedActive).toHaveBeenCalledWith("stable-feed-id", false);
+  });
+
+  it("optionally assigns a new or existing category while adding a feed", async () => {
+    const categorizedFeed = {
+      ...structuredClone(feed),
+      category: structuredClone(aiCategory),
+    };
+    const listCategories = vi.fn(async () => [structuredClone(aiCategory)]);
+    const api = fakeApi({
+      listCategories,
+      addFeed: vi.fn(async () => categorizedFeed),
+      listFeeds: vi.fn(async () => [categorizedFeed]),
+    });
+    const { root } = await mounted(api);
+    root.querySelector<HTMLElement>('[data-action="add-subscription"]')!.click();
+
+    const form = root.querySelector<HTMLFormElement>("#feed-form")!;
+    root.querySelector<HTMLInputElement>('input[name="url"]')!.value =
+      "https://ai.example/feed";
+    root.querySelector<HTMLSelectElement>('select[name="platform"]')!.value = "other";
+    const categoryInput = root.querySelector<HTMLInputElement>('input[name="category"]')!;
+    expect(categoryInput.placeholder).toBe("Nouvelle ou existante");
+    expect(root.querySelector<HTMLOptionElement>("#new-feed-category-options option")?.value)
+      .toBe(aiCategory.name);
+    categoryInput.value = aiCategory.name;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flush();
+
+    expect(api.addFeed).toHaveBeenCalledWith(
+      "https://ai.example/feed",
+      "other",
+      aiCategory.name,
+    );
+    expect(listCategories).toHaveBeenCalledTimes(2);
+    expect(api.refreshFeed).toHaveBeenCalledWith(categorizedFeed.id);
+    expect(root.querySelector(".add-subscription")).toBeNull();
   });
 
   it("renders an accessible per-feed refresh button and disables it for inactive feeds", async () => {
@@ -3258,6 +3629,38 @@ describe("view helpers", () => {
     );
   });
 
+  it("renders YouTube thumbnails as static external media cards", () => {
+    const content = prepareArticleContent(
+      '<figure><a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"><img src="https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"></a><figcaption><a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">Voir la vidéo</a></figcaption></figure>',
+    );
+    const document = new DOMParser().parseFromString(content, "text/html");
+    const card = document.querySelector("figure");
+    const image = document.querySelector("img")!;
+
+    expect(card?.classList.contains("inkriver-youtube")).toBe(true);
+    expect(image.dataset.zoomableImage).toBeUndefined();
+    expect(image.hasAttribute("role")).toBe(false);
+    expect(document.querySelector("a")?.dataset.externalHref).toBe(
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    );
+  });
+
+  it("renders embedded tweets as static external media cards", () => {
+    const content = prepareArticleContent(
+      '<blockquote><p>Un message important.</p><a href="https://twitter.com/example/status/1840000000000000000">October 1, 2026</a></blockquote>',
+    );
+    const document = new DOMParser().parseFromString(content, "text/html");
+    const card = document.querySelector("blockquote");
+
+    expect(card?.classList.contains("inkriver-x")).toBe(true);
+    expect(card?.querySelector(".inkriver-media-label")?.textContent).toBe(
+      "Publication sur X",
+    );
+    expect(card?.querySelector("a")?.dataset.externalHref).toBe(
+      "https://twitter.com/example/status/1840000000000000000",
+    );
+  });
+
   it("builds a hash-protected iframe bridge for links and text sizing", () => {
     const document = buildArticleDocument(
       '<a href="https://example.com/read">Read</a>',
@@ -3281,6 +3684,8 @@ describe("view helpers", () => {
     expect(document).toContain("[16,18,22].includes(message.fontSize)");
     expect(document).toContain('style="--article-font-size:16px"');
     expect(document).toContain("font-size:var(--article-font-size)");
+    expect(document).toContain(".inkriver-youtube");
+    expect(document).toContain(".inkriver-x");
     expect(document).toContain('window.parent.postMessage({type:"inkriver:article-height"');
     expect(document).toContain('window.addEventListener("load",function(){reportArticleHeight(true);})');
     expect(document).toContain('document.addEventListener("click"');

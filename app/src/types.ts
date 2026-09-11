@@ -11,6 +11,7 @@ export interface ArticleSummary {
   source: Platform;
   isRead: boolean;
   isFavorite: boolean;
+  labels: Label[];
 }
 
 export interface ArticleDetail extends ArticleSummary {
@@ -30,6 +31,17 @@ export interface Feed {
   lastSuccessAt: string | null;
   lastError: FeedStatusError | null;
   logoDataUrl: string | null;
+  category: Category | null;
+}
+
+export interface Category {
+  id: string;
+  name: string;
+}
+
+export interface Label {
+  id: string;
+  name: string;
 }
 
 export interface FeedStatusError {

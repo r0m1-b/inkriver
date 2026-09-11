@@ -1,3 +1,4 @@
+use crate::article_html;
 use crate::config::Config;
 use crate::enrichment;
 use crate::feed_logo;
@@ -126,6 +127,7 @@ async fn store_collection(
             enrichment::enrich_articles(storage, refreshed_at).await?,
         )
     };
+    article_html::enrich_stored_x_cards(storage).await?;
 
     Ok(RefreshReport {
         active_feeds: config.feeds.len(),

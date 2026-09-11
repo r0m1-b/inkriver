@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::article_html::sanitize_article_html;
+
 /// Minimum readable text required before web content can replace an RSS fallback.
 pub const MIN_EXTRACTED_TEXT_CHARS: usize = 2_000;
 
@@ -77,7 +79,7 @@ fn extract_article_content_with_minimum(
     Ok(ExtractedContent {
         title: article.title,
         byline: article.byline,
-        html: ammonia::clean(&article.content),
+        html: sanitize_article_html(&article.content),
         text,
         character_count,
     })
@@ -141,5 +143,21 @@ mod tests {
 
         assert!(matches!(error, ContentExtractionError::Extraction(_)));
         assert!(error.to_string().contains("Invalid URL"));
+    }
+
+    #[test]
+    fn preserves_supported_media_from_an_extracted_page_as_a_static_card() {
+        let html = r#"<!doctype html><html><head><title>Article vidéo</title></head><body><main><article><h1>Article vidéo</h1><p>Cette analyse suffisamment détaillée présente une vidéo utile et explique pourquoi elle apporte un éclairage important au texte principal.</p><iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe><p>La suite de l'article développe encore le contexte afin que le contenu soit reconnu comme la partie principale de cette page.</p></article></main></body></html>"#;
+
+        let extracted =
+            extract_article_content_with_minimum(html, "https://journal.example/article", 80)
+                .unwrap();
+
+        assert!(!extracted.html.contains("iframe"));
+        assert!(
+            extracted
+                .html
+                .contains("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+        );
     }
 }

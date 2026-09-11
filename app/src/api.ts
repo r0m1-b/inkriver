@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ArticleDetail,
   ArticleSummary,
+  Category,
   DeleteFeedResult,
   Feed,
+  Label,
   Platform,
   RefreshReport,
   PairingInvitation,
@@ -22,8 +24,13 @@ export interface InkRiverApi {
   archiveArticle(articleId: string): Promise<void>;
   archiveArticles(articleIds: string[]): Promise<void>;
   listFeeds(): Promise<Feed[]>;
-  addFeed(url: string, platform?: Platform): Promise<Feed>;
+  listCategories(): Promise<Category[]>;
+  listLabels(): Promise<Label[]>;
+  addArticleLabel(articleIds: string[], name: string): Promise<Label>;
+  removeArticleLabel(articleIds: string[], labelId: string): Promise<void>;
+  addFeed(url: string, platform?: Platform, categoryName?: string | null): Promise<Feed>;
   setFeedActive(feedId: string, isActive: boolean): Promise<Feed>;
+  setFeedCategory(feedId: string, categoryName: string | null): Promise<Feed>;
   deleteFeed(feedId: string): Promise<DeleteFeedResult>;
   syncPairingStatus(): Promise<SyncPairingStatus>;
   configureSyncGroup(
@@ -59,9 +66,18 @@ export const tauriApi: InkRiverApi = {
   archiveArticle: (articleId) => invoke("archive_article", { articleId }),
   archiveArticles: (articleIds) => invoke("archive_articles", { articleIds }),
   listFeeds: () => invoke("list_feeds"),
-  addFeed: (url, platform) => invoke("add_feed", { url, platform }),
+  listCategories: () => invoke("list_categories"),
+  listLabels: () => invoke("list_labels"),
+  addArticleLabel: (articleIds, name) =>
+    invoke("add_article_label", { articleIds, name }),
+  removeArticleLabel: (articleIds, labelId) =>
+    invoke("remove_article_label", { articleIds, labelId }),
+  addFeed: (url, platform, categoryName) =>
+    invoke("add_feed", { url, platform, categoryName }),
   setFeedActive: (feedId, isActive) =>
     invoke("set_feed_active", { feedId, isActive }),
+  setFeedCategory: (feedId, categoryName) =>
+    invoke("set_feed_category", { feedId, categoryName }),
   deleteFeed: (feedId) => invoke("delete_feed", { feedId }),
   syncPairingStatus: () => invoke("sync_pairing_status"),
   configureSyncGroup: (webdavBaseUrl, webdavUsername, webdavPassword, deviceName) =>

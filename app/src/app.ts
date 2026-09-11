@@ -8,7 +8,9 @@ import type {
   ApiError,
   ArticleDetail,
   ArticleSummary,
+  Category,
   Feed,
+  Label,
   PairingInvitation,
   Platform,
   RefreshReport,
@@ -36,6 +38,7 @@ const ARTICLE_TEXT_SIZE_MESSAGE = "inkriver:article-text-size";
 export const ARTICLE_BRIDGE_SCRIPT = `function reportArticleHeight(ready){var root=document.documentElement;var body=document.body;var height=Math.max(root.scrollHeight,root.offsetHeight,body?body.scrollHeight:0,body?body.offsetHeight:0);window.parent.postMessage({type:"inkriver:article-height",height:height,ready:ready===true},"*");}function openArticleImage(image){var src=image.currentSrc||image.getAttribute("src");if(!src)return;window.parent.postMessage({type:"inkriver:article-image",src:src,alt:image.getAttribute("alt")||"",imageId:image.getAttribute("data-zoomable-image")||""},"*");}var readerSwipeStartX=null,readerSwipeStartY=null,readerSwipeDistanceX=0,readerSwipeDistanceY=0,readerSwipeHorizontal=false,readerSwipeSuppressClick=false;function resetReaderSwipe(){readerSwipeStartX=null;readerSwipeStartY=null;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;}document.addEventListener("click",function(event){if(readerSwipeSuppressClick){event.preventDefault();event.stopPropagation();return;}var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(image){event.preventDefault();event.stopPropagation();openArticleImage(image);return;}var link=target&&target.closest?target.closest("a[data-external-href],a[data-internal-fragment]"):null;if(!link)return;event.preventDefault();var href=link.getAttribute("data-external-href");if(href){window.parent.postMessage({type:"inkriver:article-link",href:href},"*");return;}var fragment=link.getAttribute("data-internal-fragment");if(!fragment)return;var destination=document.getElementById(fragment)||document.getElementsByName(fragment)[0];if(destination)destination.scrollIntoView({block:"start",inline:"nearest"});},true);document.addEventListener("keydown",function(event){if(event.key!=="Enter"&&event.key!==" ")return;var target=event.target;var image=target&&target.closest?target.closest("img[data-zoomable-image]"):null;if(!image)return;event.preventDefault();openArticleImage(image);},true);document.addEventListener("touchstart",function(event){var touch=event.touches[0];if(!touch||event.touches.length!==1||touch.clientX<=32||touch.clientX>=window.innerWidth-32)return;readerSwipeStartX=touch.clientX;readerSwipeStartY=touch.clientY;readerSwipeDistanceX=0;readerSwipeDistanceY=0;readerSwipeHorizontal=false;},{passive:true});document.addEventListener("touchmove",function(event){var touch=event.touches[0];if(!touch||readerSwipeStartX===null||readerSwipeStartY===null)return;readerSwipeDistanceX=touch.clientX-readerSwipeStartX;readerSwipeDistanceY=touch.clientY-readerSwipeStartY;if(!readerSwipeHorizontal){if(Math.abs(readerSwipeDistanceX)<12&&Math.abs(readerSwipeDistanceY)<12)return;if(Math.abs(readerSwipeDistanceX)<=Math.abs(readerSwipeDistanceY)){resetReaderSwipe();return;}readerSwipeHorizontal=true;}event.preventDefault();},{passive:false});document.addEventListener("touchend",function(){if(readerSwipeHorizontal&&Math.abs(readerSwipeDistanceX)>=72&&Math.abs(readerSwipeDistanceX)>Math.abs(readerSwipeDistanceY)*1.25){readerSwipeSuppressClick=true;window.parent.postMessage({type:"inkriver:article-swipe",direction:readerSwipeDistanceX<0?"next":"previous"},"*");setTimeout(function(){readerSwipeSuppressClick=false;},400);}resetReaderSwipe();});document.addEventListener("touchcancel",resetReaderSwipe);window.addEventListener("message",function(event){var message=event.data;if(!message)return;if(message.type==="inkriver:article-image-focus"&&typeof message.imageId==="string"){var image=document.querySelector('img[data-zoomable-image="'+CSS.escape(message.imageId)+'"]');if(image)image.focus();return;}if(message.type==="inkriver:article-text-size"&&[16,18,22].includes(message.fontSize)){document.documentElement.style.setProperty("--article-font-size",message.fontSize+"px");reportArticleHeight();}});window.addEventListener("load",function(){reportArticleHeight(true);});new ResizeObserver(reportArticleHeight).observe(document.documentElement);reportArticleHeight();`;
 export const ARTICLE_BRIDGE_CSP_HASH =
   "sha256-ShFXWfVeXxpF10qgDn+P9vDPdWTM0SBq46MLDbMEHa4=";
+const ARTICLE_MEDIA_STYLES = `.inkriver-media{margin:1.65em 0;overflow:hidden;border:1px solid #d6dee7;border-radius:14px;background:#f7f9fb;box-shadow:0 7px 22px rgb(3 29 59 / 10%)}.inkriver-youtube>a:first-of-type{position:relative;display:block;color:inherit}.inkriver-youtube>a:first-of-type::after{position:absolute;top:50%;left:50%;display:grid;place-items:center;width:62px;height:44px;color:#fff;border-radius:13px;background:#e62117;box-shadow:0 5px 18px rgb(0 0 0 / 30%);content:"▶";font:700 22px/1 sans-serif;transform:translate(-50%,-50%)}.inkriver-youtube img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover}.inkriver-youtube figcaption{padding:11px 15px;font:700 .82em/1.4 Inter,ui-sans-serif,system-ui,sans-serif}.inkriver-x{padding:18px 20px;border-left:4px solid #172536}.inkriver-media-label{display:flex;align-items:center;gap:8px;margin-bottom:12px;font:750 .78em/1.2 Inter,ui-sans-serif,system-ui,sans-serif}.inkriver-media-label::before{display:grid;place-items:center;width:24px;height:24px;color:#fff;border-radius:50%;background:#172536;content:"X";font:700 13px/1 sans-serif}.inkriver-x p{margin:.65em 0}.inkriver-x .inkriver-media-link{display:block;margin-top:12px;font:700 .76em/1.4 Inter,ui-sans-serif,system-ui,sans-serif}@media(prefers-color-scheme:dark){.inkriver-media{border-color:#294158;background:#173049;box-shadow:0 7px 22px rgb(0 0 0 / 24%)}.inkriver-x{border-left-color:#eef4fa}.inkriver-media-label::before{color:#172536;background:#eef4fa}}`;
 const ARTICLE_TEXT_SIZE_STORAGE_KEY = "inkriver.articleTextSize";
 const ARTICLE_TEXT_SIZES: readonly ArticleTextSize[] = ["small", "medium", "large"];
 const ARTICLE_TEXT_SIZE_CONFIG: Record<ArticleTextSize, { label: string; pixels: number }> = {
@@ -205,7 +208,9 @@ export function resolveArticleImageUrl(
 
 export function prepareArticleContent(content: string): string {
   const document = new DOMParser().parseFromString(content, "text/html");
+  enhanceArticleMedia(document);
   document.querySelectorAll<HTMLImageElement>("img[src]").forEach((image, index) => {
+    if (image.closest(".inkriver-media")) return;
     image.dataset.zoomableImage = String(index);
     image.tabIndex = 0;
     image.setAttribute("role", "button");
@@ -229,13 +234,67 @@ export function prepareArticleContent(content: string): string {
   return document.body.innerHTML;
 }
 
+function hostMatches(host: string, domain: string): boolean {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+function mediaUrl(rawUrl: string): URL | null {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function isYoutubeUrl(rawUrl: string): boolean {
+  const url = mediaUrl(rawUrl);
+  if (!url) return false;
+  const host = url.hostname.toLowerCase();
+  return hostMatches(host, "youtu.be") ||
+    hostMatches(host, "youtube.com") ||
+    hostMatches(host, "youtube-nocookie.com");
+}
+
+function isXStatusUrl(rawUrl: string): boolean {
+  const url = mediaUrl(rawUrl);
+  if (!url) return false;
+  const host = url.hostname.toLowerCase();
+  return (hostMatches(host, "x.com") || hostMatches(host, "twitter.com")) &&
+    url.pathname.split("/").includes("status");
+}
+
+function enhanceArticleMedia(document: Document): void {
+  document.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((link) => {
+    const href = link.getAttribute("href");
+    if (!href || !isYoutubeUrl(href) || !link.querySelector("img")) return;
+    const card = link.closest("figure");
+    if (!card) return;
+    card.classList.add("inkriver-media", "inkriver-youtube");
+    link.classList.add("inkriver-media-link");
+    link.setAttribute("aria-label", "Ouvrir la vidéo sur YouTube");
+  });
+
+  document.querySelectorAll<HTMLQuoteElement>("blockquote").forEach((quote) => {
+    const link = [...quote.querySelectorAll<HTMLAnchorElement>("a[href]")]
+      .find((candidate) => isXStatusUrl(candidate.getAttribute("href") ?? ""));
+    if (!link) return;
+    quote.classList.add("inkriver-media", "inkriver-x");
+    link.classList.add("inkriver-media-link");
+    const label = document.createElement("div");
+    label.className = "inkriver-media-label";
+    label.textContent = "Publication sur X";
+    quote.prepend(label);
+  });
+}
+
 export function buildArticleDocument(
   content: string,
   textSize: ArticleTextSize = "medium",
 ): string {
   const preparedContent = prepareArticleContent(content);
   const fontSize = ARTICLE_TEXT_SIZE_CONFIG[textSize].pixels;
-  return `<!doctype html><html style="--article-font-size:${fontSize}px"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src '${ARTICLE_BRIDGE_CSP_HASH}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font-family:Georgia,serif;font-size:var(--article-font-size);line-height:1.75;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#172536;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #c94708;outline-offset:3px}a{color:#c94708}pre{white-space:pre-wrap}@media(max-width:720px){body{padding:8px 18px 48px}}@media(prefers-color-scheme:dark){body{color:#eef4fa}a{color:#ff955f}img[data-zoomable-image]:focus-visible{outline-color:#ff7a2f}}</style><script>${ARTICLE_BRIDGE_SCRIPT}</script></head><body>${preparedContent}</body></html>`;
+  return `<!doctype html><html style="--article-font-size:${fontSize}px"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src '${ARTICLE_BRIDGE_CSP_HASH}'; base-uri 'none'; form-action 'none'"><style>html,body{overflow:hidden}body{font-family:Georgia,serif;font-size:var(--article-font-size);line-height:1.75;max-width:720px;margin:0 auto;padding:8px 32px 64px;color:#172536;background:transparent}img{max-width:100%;height:auto}img[data-zoomable-image]{cursor:zoom-in}img[data-zoomable-image]:focus-visible{outline:3px solid #c94708;outline-offset:3px}a{color:#c94708}pre{white-space:pre-wrap}${ARTICLE_MEDIA_STYLES}@media(max-width:720px){body{padding:8px 18px 48px}}@media(prefers-color-scheme:dark){body{color:#eef4fa}a{color:#ff955f}img[data-zoomable-image]:focus-visible{outline-color:#ff7a2f}}</style><script>${ARTICLE_BRIDGE_SCRIPT}</script></head><body>${preparedContent}</body></html>`;
 }
 
 function favoriteIcon(isFavorite: boolean): string {
@@ -272,6 +331,22 @@ function settingsIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.25A3.75 3.75 0 1 1 12 15.75 3.75 3.75 0 0 1 12 8.25Zm7.15 5.18.06-1.43-.06-1.43 2.03-1.58-2-3.46-2.52 1a8.15 8.15 0 0 0-2.47-1.43L13.8 2.4h-4l-.39 2.7a8.15 8.15 0 0 0-2.47 1.43l-2.52-1-2 3.46 2.03 1.58L4.39 12l.06 1.43-2.03 1.58 2 3.46 2.52-1a8.15 8.15 0 0 0 2.47 1.43l.39 2.7h4l.39-2.7a8.15 8.15 0 0 0 2.47-1.43l2.52 1 2-3.46-2.03-1.58Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function menuIcon(): string {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+}
+
+function allFeedsIcon(): string {
+  return '<svg class="source-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2" fill="currentColor"/><path d="M4 11a9 9 0 0 1 9 9M4 5a15 15 0 0 1 15 15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+}
+
+function categoryIcon(): string {
+  return '<svg class="source-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H10l2 2h5.5A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+}
+
+function labelIcon(): string {
+  return '<svg class="source-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H13l7 7-9 9-7-7z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/></svg>';
+}
+
 function checkIcon(): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
@@ -288,8 +363,17 @@ function textZoomIcon(sign: "plus" | "minus"): string {
 export class InkRiverApp {
   private articles: ArticleSummary[] = [];
   private feeds: Feed[] = [];
+  private categories: Category[] = [];
+  private labels: Label[] = [];
   private selected: ArticleDetail | null = null;
   private articleView: ArticleView = "all";
+  private selectedFeedFilterId: string | null = null;
+  private selectedCategoryFilterId: string | null = null;
+  private selectedLabelFilterId: string | null = null;
+  private feedFilterOpen = false;
+  private feedFilterFeedsExpanded = true;
+  private feedFilterCategoriesExpanded = true;
+  private feedFilterLabelsExpanded = true;
   private articleTextSize: ArticleTextSize = "medium";
   private pendingTextSizeProgress: number | null = null;
   private readonly readerProgressByArticleId = new Map<string, number>();
@@ -317,12 +401,15 @@ export class InkRiverApp {
   private diagnosticExportBusy = false;
   private deletingFeedId: string | null = null;
   private readonly expandedFeedIds = new Set<string>();
+  private readonly updatingFeedCategoryIds = new Set<string>();
   private archivingArticleId: string | null = null;
   private archiveConfirmationArticleId: string | null = null;
   private archiveConfirmationArticleIds: string[] = [];
   private archiveActionOrigin: ArchiveActionOrigin = "reader-header";
   private readonly selectedArticleIds = new Set<string>();
   private batchArticleActionPending = false;
+  private articleLabelPending = false;
+  private stopTrackingFocusedLabelInput: (() => void) | null = null;
   private zoomedImage: { url: string; alt: string; imageId: string } | null = null;
   private imageZoomAppearing = false;
   private imageZoomDismissing = false;
@@ -434,9 +521,11 @@ export class InkRiverApp {
   async init(): Promise<void> {
     this.render();
     try {
-      [this.articles, this.feeds] = await Promise.all([
+      [this.articles, this.feeds, this.categories, this.labels] = await Promise.all([
         this.api.listArticles(),
         this.api.listFeeds(),
+        this.api.listCategories(),
+        this.api.listLabels(),
       ]);
     } catch (error) {
       this.error = errorMessage(error);
@@ -524,6 +613,60 @@ export class InkRiverApp {
     await this.setArticleFavoriteState(this.selected.id, !this.selected.isFavorite);
   }
 
+  private async reloadArticleAndLabels(articleId: string): Promise<void> {
+    const [articles, labels, detail] = await Promise.all([
+      this.api.listArticles(),
+      this.api.listLabels(),
+      this.api.getArticle(articleId),
+    ]);
+    this.articles = articles;
+    this.labels = labels;
+    if (this.selected?.id === articleId) this.selected = detail;
+  }
+
+  private async addArticleLabel(form: HTMLFormElement): Promise<void> {
+    if (!this.selected || this.articleLabelPending) return;
+    const articleId = this.selected.id;
+    const data = new FormData(form);
+    const name = String(data.get("label") ?? "").trim();
+    if (!name) return;
+    this.articleLabelPending = true;
+    this.error = null;
+    this.clearNotice();
+    this.render();
+    try {
+      await this.api.addArticleLabel([articleId], name);
+      await this.reloadArticleAndLabels(articleId);
+      this.showNotice(`Étiquette « ${name} » ajoutée.`);
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.articleLabelPending = false;
+      this.render();
+    }
+  }
+
+  private async removeArticleLabel(labelId: string): Promise<void> {
+    if (!this.selected || this.articleLabelPending) return;
+    const articleId = this.selected.id;
+    const label = this.selected.labels.find((candidate) => candidate.id === labelId);
+    if (!label) return;
+    this.articleLabelPending = true;
+    this.error = null;
+    this.clearNotice();
+    this.render();
+    try {
+      await this.api.removeArticleLabel([articleId], labelId);
+      await this.reloadArticleAndLabels(articleId);
+      this.showNotice(`Étiquette « ${label.name} » retirée.`);
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.articleLabelPending = false;
+      this.render();
+    }
+  }
+
   private showArticleView(view: ArticleView): void {
     if (this.articleView === view) return;
     this.articleView = view;
@@ -534,13 +677,164 @@ export class InkRiverApp {
   }
 
   private visibleArticles(): ArticleSummary[] {
+    const articles = this.articlesForSelectedScope();
     if (this.articleView === "favorites") {
-      return this.articles.filter((article) => article.isFavorite);
+      return articles.filter((article) => article.isFavorite);
     }
     if (this.articleView === "unread") {
-      return this.articles.filter((article) => !article.isRead);
+      return articles.filter((article) => !article.isRead);
+    }
+    return articles;
+  }
+
+  private selectedFeedFilter(): Feed | null {
+    if (this.selectedFeedFilterId === null) return null;
+    return this.feeds.find((feed) => feed.id === this.selectedFeedFilterId) ?? null;
+  }
+
+  private selectedCategoryFilter(): Category | null {
+    if (this.selectedCategoryFilterId === null) return null;
+    return this.categories.find((category) => category.id === this.selectedCategoryFilterId) ?? null;
+  }
+
+  private selectedLabelFilter(): Label | null {
+    if (this.selectedLabelFilterId === null) return null;
+    return this.labels.find((label) => label.id === this.selectedLabelFilterId) ?? null;
+  }
+
+  private articlesForSelectedScope(): ArticleSummary[] {
+    const feed = this.selectedFeedFilter();
+    if (feed) return this.articles.filter((article) => article.feedId === feed.id);
+    const category = this.selectedCategoryFilter();
+    if (category) {
+      const feedIds = new Set(
+        this.feeds
+          .filter((candidate) => candidate.category?.id === category.id)
+          .map((candidate) => candidate.id),
+      );
+      return this.articles.filter((article) => feedIds.has(article.feedId));
+    }
+    const label = this.selectedLabelFilter();
+    if (label) {
+      return this.articles.filter((article) =>
+        article.labels.some((candidate) => candidate.id === label.id)
+      );
     }
     return this.articles;
+  }
+
+  private applyFeedFilter(feedId: string | null): void {
+    if (feedId !== null && !this.feeds.some((feed) => feed.id === feedId)) return;
+    this.selectedFeedFilterId = feedId;
+    this.selectedCategoryFilterId = null;
+    this.selectedLabelFilterId = null;
+    this.feedFilterOpen = false;
+    this.discardImageZoom();
+    this.clearArticleSelection();
+    this.readerArticleIds = [];
+    this.mainView = "articles";
+    this.mobileArticleScreen = "timeline";
+    if (
+      this.selected &&
+      feedId !== null &&
+      this.selected.feedId !== feedId
+    ) {
+      this.selected = null;
+    }
+    this.render();
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    if (timeline) timeline.scrollTop = 0;
+  }
+
+  private applyCategoryFilter(categoryId: string): void {
+    if (!this.categories.some((category) => category.id === categoryId)) return;
+    this.selectedFeedFilterId = null;
+    this.selectedCategoryFilterId = categoryId;
+    this.selectedLabelFilterId = null;
+    this.feedFilterOpen = false;
+    this.discardImageZoom();
+    this.clearArticleSelection();
+    this.readerArticleIds = [];
+    this.mainView = "articles";
+    this.mobileArticleScreen = "timeline";
+    if (
+      this.selected &&
+      !this.feeds.some(
+        (feed) => feed.id === this.selected?.feedId && feed.category?.id === categoryId,
+      )
+    ) {
+      this.selected = null;
+    }
+    this.render();
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    if (timeline) timeline.scrollTop = 0;
+  }
+
+  private applyLabelFilter(labelId: string): void {
+    if (!this.labels.some((label) => label.id === labelId)) return;
+    this.selectedFeedFilterId = null;
+    this.selectedCategoryFilterId = null;
+    this.selectedLabelFilterId = labelId;
+    this.feedFilterOpen = false;
+    this.discardImageZoom();
+    this.clearArticleSelection();
+    this.readerArticleIds = [];
+    this.mainView = "articles";
+    this.mobileArticleScreen = "timeline";
+    if (
+      this.selected &&
+      !this.selected.labels.some((label) => label.id === labelId)
+    ) {
+      this.selected = null;
+    }
+    this.render();
+    const timeline = this.root.querySelector<HTMLElement>(".timeline");
+    if (timeline) timeline.scrollTop = 0;
+  }
+
+  private keepLabelInputAboveKeyboard(input: HTMLInputElement): void {
+    this.stopTrackingFocusedLabelInput?.();
+    this.stopTrackingFocusedLabelInput = null;
+    if (!this.isMobileViewport()) return;
+    const view = this.root.ownerDocument.defaultView;
+    const reader = this.root.querySelector<HTMLElement>(".reader");
+    if (!view || !reader) return;
+    const reposition = () => {
+      if (!input.isConnected || this.root.ownerDocument.activeElement !== input) return;
+      const viewportTop = view.visualViewport?.offsetTop ?? 0;
+      const viewportBottom = viewportTop + (view.visualViewport?.height ?? view.innerHeight);
+      const topClearance = 16;
+      const bottomClearance = 84;
+      const bounds = input.getBoundingClientRect();
+      if (bounds.bottom > viewportBottom - bottomClearance) {
+        reader.scrollTop += bounds.bottom - (viewportBottom - bottomClearance);
+      } else if (bounds.top < viewportTop + topClearance) {
+        reader.scrollTop -= viewportTop + topClearance - bounds.top;
+      }
+    };
+    const visualViewport = view.visualViewport;
+    visualViewport?.addEventListener("resize", reposition);
+    visualViewport?.addEventListener("scroll", reposition);
+    view.addEventListener("resize", reposition);
+    const cleanup = () => {
+      input.removeEventListener("blur", cleanup);
+      visualViewport?.removeEventListener("resize", reposition);
+      visualViewport?.removeEventListener("scroll", reposition);
+      view.removeEventListener("resize", reposition);
+      if (this.stopTrackingFocusedLabelInput === cleanup) {
+        this.stopTrackingFocusedLabelInput = null;
+      }
+    };
+    this.stopTrackingFocusedLabelInput = cleanup;
+    input.addEventListener("blur", cleanup, { once: true });
+    reposition();
+  }
+
+  private closeFeedFilter(): void {
+    if (!this.feedFilterOpen) return;
+    this.feedFilterOpen = false;
+    this.render();
+    this.root.querySelector<HTMLElement>('[data-action="open-feed-filter"]')?.focus();
   }
 
   private isMobileViewport(): boolean {
@@ -1065,10 +1359,17 @@ export class InkRiverApp {
     const formData = new FormData(form);
     const url = String(formData.get("url") ?? "");
     const platform = String(formData.get("platform") ?? "") as Platform;
+    const categoryValue = String(formData.get("category") ?? "").trim();
+    const categoryName = categoryValue || null;
     this.error = null;
     try {
-      const addedFeed = await this.api.addFeed(url, platform);
-      this.feeds = await this.api.listFeeds();
+      const addedFeed = categoryName
+        ? await this.api.addFeed(url, platform, categoryName)
+        : await this.api.addFeed(url, platform);
+      [this.feeds, this.categories] = await Promise.all([
+        this.api.listFeeds(),
+        this.api.listCategories(),
+      ]);
       this.addSubscriptionOpen = false;
       form.reset();
       this.render();
@@ -1093,6 +1394,34 @@ export class InkRiverApp {
     this.render();
   }
 
+  private async setFeedCategory(form: HTMLFormElement): Promise<void> {
+    const feedId = form.dataset.feedId;
+    if (!feedId || this.updatingFeedCategoryIds.has(feedId)) return;
+    const value = new FormData(form).get("category");
+    const categoryName = typeof value === "string" && value.trim() ? value.trim() : null;
+    this.updatingFeedCategoryIds.add(feedId);
+    this.error = null;
+    this.clearNotice();
+    this.render();
+    try {
+      const updatedFeed = await this.api.setFeedCategory(feedId, categoryName);
+      const index = this.feeds.findIndex((feed) => feed.id === feedId);
+      if (index >= 0) this.feeds[index] = updatedFeed;
+      this.categories = await this.api.listCategories();
+      this.automaticSyncScheduler.localChange();
+      this.showNotice(
+        categoryName
+          ? `Catégorie « ${categoryName} » attribuée au flux.`
+          : "Catégorie retirée du flux.",
+      );
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.updatingFeedCategoryIds.delete(feedId);
+      this.render();
+    }
+  }
+
   private async deleteFeed(feedId: string): Promise<void> {
     const feed = this.feeds.find((candidate) => candidate.id === feedId);
     if (!feed) return;
@@ -1108,6 +1437,7 @@ export class InkRiverApp {
     try {
       const result = await this.api.deleteFeed(feedId);
       this.feeds = this.feeds.filter((candidate) => candidate.id !== feedId);
+      if (this.selectedFeedFilterId === feedId) this.selectedFeedFilterId = null;
       this.articles = this.articles.filter((article) => article.feedId !== feedId);
       if (this.selected?.feedId === feedId) this.selected = null;
       [this.feeds, this.articles] = await Promise.all([
@@ -1269,6 +1599,13 @@ export class InkRiverApp {
       if (this.articleView === "unread") {
         return '<div class="state" data-testid="unread-empty"><strong>Aucun article non lu.</strong><span>Sélectionnez « Tous » pour retrouver les articles lus.</span></div>';
       }
+      if (
+        this.selectedFeedFilter() !== null ||
+        this.selectedCategoryFilter() !== null ||
+        this.selectedLabelFilter() !== null
+      ) {
+        return '<div class="state" data-testid="scope-empty"><strong>Aucun article dans cette sélection.</strong><span>Choisissez « Tous les flux » pour revenir à la chronologie complète.</span></div>';
+      }
       return '<div class="state" data-testid="favorites-empty"><strong>Aucun article favori.</strong><span>Utilisez l’étoile pour retrouver un article ici.</span></div>';
     }
     return visibleArticles
@@ -1312,8 +1649,9 @@ export class InkRiverApp {
 
   private renderArticleViews(): string {
     if (this.selectedArticleIds.size > 0) return this.renderArticleSelectionToolbar();
-    const favoriteCount = this.articles.filter((article) => article.isFavorite).length;
-    const unreadCount = this.articles.filter((article) => !article.isRead).length;
+    const scopedArticles = this.articlesForSelectedScope();
+    const favoriteCount = scopedArticles.filter((article) => article.isFavorite).length;
+    const unreadCount = scopedArticles.filter((article) => !article.isRead).length;
     return `<div class="timeline-tabs">
       <nav class="timeline-view-tabs" aria-label="Vues des articles" role="tablist">
         <button type="button" class="timeline-tab ${this.articleView === "all" ? "active" : ""}" data-action="article-view" data-article-view="all" role="tab" aria-selected="${this.articleView === "all"}">Tous</button>
@@ -1356,6 +1694,31 @@ export class InkRiverApp {
     return this.feeds.find((feed) => feed.id === feedId)?.logoDataUrl ?? null;
   }
 
+  private renderArticleLabels(article: ArticleDetail, placement: "top" | "bottom"): string {
+    const inputId = `article-label-input-${placement}`;
+    const optionsId = `article-label-options-${placement}`;
+    const assignedIds = new Set(article.labels.map((label) => label.id));
+    const suggestions = this.labels
+      .filter((label) => !assignedIds.has(label.id))
+      .map((label) => `<button type="button" role="option" data-label-suggestion data-label-name="${escapeHtml(label.name)}">${escapeHtml(label.name)}</button>`)
+      .join("");
+    const chips = article.labels.length > 0
+      ? article.labels.map((label) =>
+        `<span class="article-label-chip"><span>${escapeHtml(label.name)}</span><button type="button" data-action="remove-article-label" data-label-id="${escapeHtml(label.id)}" title="Retirer l’étiquette ${escapeHtml(label.name)}" aria-label="Retirer l’étiquette ${escapeHtml(label.name)}" ${this.articleLabelPending ? "disabled" : ""}>×</button></span>`
+      ).join("")
+      : '<span class="article-label-empty">Aucune étiquette</span>';
+    return `<section class="article-label-editor ${placement}" aria-label="Étiquettes de l’article">
+      <div class="article-label-heading">${labelIcon()}<strong>Étiquettes</strong></div>
+      <div class="article-label-list">${chips}</div>
+      <form data-article-label-form>
+        <label class="visually-hidden" for="${inputId}">Ajouter une étiquette</label>
+        <input id="${inputId}" name="label" type="text" maxlength="80" autocomplete="off" placeholder="Ajouter une étiquette" role="combobox" aria-autocomplete="list" aria-controls="${optionsId}" aria-expanded="false" ${this.articleLabelPending ? "disabled" : ""}>
+        <button type="submit" class="article-label-add" title="Ajouter l’étiquette" aria-label="Ajouter l’étiquette" aria-busy="${this.articleLabelPending}" ${this.articleLabelPending ? "disabled" : ""}>+</button>
+        <div class="article-label-suggestions" id="${optionsId}" role="listbox" aria-label="Étiquettes existantes" ${suggestions ? "" : "hidden"}>${suggestions}</div>
+      </form>
+    </section>`;
+  }
+
   private renderReader(): string {
     if (!this.selected) {
       return '<div class="reader-placeholder"><img class="reader-placeholder-logo" src="/inkriver-wordmark.png" alt="InkRiver"><p>Sélectionnez un article dans la chronologie.</p></div>';
@@ -1373,9 +1736,11 @@ export class InkRiverApp {
       <h1>${escapeHtml(article.title ?? "Sans titre")}</h1>
       <p>${escapeHtml(article.author ?? "Auteur inconnu")} · ${displayDate(article.publishedAt)}</p>
       ${sourceLink}
+      ${this.renderArticleLabels(article, "top")}
       <!-- <div class="read-state" data-testid="read-state">État : <strong>${article.isRead ? "Lu" : "Non lu"}</strong></div> -->
       ${this.renderReaderActions(article, false)}</header>
       ${content}
+      ${this.renderArticleLabels(article, "bottom")}
       ${this.renderReaderFooter(article)}
     </article>`;
   }
@@ -1409,6 +1774,10 @@ export class InkRiverApp {
   }
 
   public handleBackNavigation(): boolean {
+    if (this.feedFilterOpen) {
+      this.closeFeedFilter();
+      return true;
+    }
     if (this.zoomedImage) {
       this.closeImageZoom();
       return true;
@@ -1488,6 +1857,55 @@ export class InkRiverApp {
     </div>`;
   }
 
+  private renderFeedFilterMenu(): string {
+    if (!this.feedFilterOpen) return "";
+    const selectedFeed = this.selectedFeedFilter();
+    const selectedCategory = this.selectedCategoryFilter();
+    const selectedLabel = this.selectedLabelFilter();
+    const feedOptions = this.feeds.map((feed) => {
+      const selected = selectedFeed?.id === feed.id;
+      const name = feed.title ?? "Flux non actualisé";
+      return `<button type="button" class="feed-filter-option${selected ? " active" : ""}" data-action="select-feed-filter" data-feed-id="${escapeHtml(feed.id)}" aria-current="${selected ? "true" : "false"}">${renderSourceBadge(feed.platform, feed.logoDataUrl)}<span>${escapeHtml(name)}</span></button>`;
+    }).join("");
+    const categoryOptions = this.categories.map((category) => {
+      const selected = selectedCategory?.id === category.id;
+      return `<button type="button" class="feed-filter-option category-filter-option${selected ? " active" : ""}" data-action="select-category-filter" data-category-id="${escapeHtml(category.id)}" aria-current="${selected ? "true" : "false"}"><span class="source-identity"><span class="source-logo category">${categoryIcon()}</span></span><span>${escapeHtml(category.name)}</span></button>`;
+    }).join("");
+    const labelOptions = this.labels.map((label) => {
+      const selected = selectedLabel?.id === label.id;
+      return `<button type="button" class="feed-filter-option label-filter-option${selected ? " active" : ""}" data-action="select-label-filter" data-label-id="${escapeHtml(label.id)}" aria-current="${selected ? "true" : "false"}"><span class="source-identity"><span class="source-logo label">${labelIcon()}</span></span><span>${escapeHtml(label.name)}</span></button>`;
+    }).join("");
+    const feedsExpanded = this.feedFilterFeedsExpanded;
+    const categoriesExpanded = this.feedFilterCategoriesExpanded;
+    const labelsExpanded = this.feedFilterLabelsExpanded;
+    return `<div class="feed-filter-backdrop" data-action="close-feed-filter-backdrop">
+      <aside class="feed-filter-menu" role="dialog" aria-modal="true" aria-labelledby="feed-filter-title">
+        <header><h2 id="feed-filter-title">Filtrer les articles</h2><button type="button" class="feed-filter-close" data-action="close-feed-filter" title="Fermer le menu" aria-label="Fermer le menu">×</button></header>
+        <nav aria-label="Filtre affiché">
+          <button type="button" class="feed-filter-option all-feeds${selectedFeed === null && selectedCategory === null && selectedLabel === null ? " active" : ""}" data-action="select-feed-filter" aria-current="${selectedFeed === null && selectedCategory === null && selectedLabel === null ? "true" : "false"}"><span class="source-identity"><span class="source-logo other">${allFeedsIcon()}</span></span><span>Tous les flux</span></button>
+          <section class="feed-filter-section${feedsExpanded ? " expanded" : ""}">
+            <button type="button" class="feed-filter-section-toggle" data-action="toggle-feed-filter-section" data-section="feeds" aria-expanded="${feedsExpanded}" aria-controls="feed-filter-feeds"><span>Flux</span><span class="feed-filter-section-arrow" aria-hidden="true"></span></button>
+            <div class="feed-filter-section-content" id="feed-filter-feeds" ${feedsExpanded ? "" : "hidden"}>
+              ${feedOptions}
+            </div>
+          </section>
+          <section class="feed-filter-section${categoriesExpanded ? " expanded" : ""}">
+            <button type="button" class="feed-filter-section-toggle" data-action="toggle-feed-filter-section" data-section="categories" aria-expanded="${categoriesExpanded}" aria-controls="feed-filter-categories"><span>Catégories</span><span class="feed-filter-section-arrow" aria-hidden="true"></span></button>
+            <div class="feed-filter-section-content" id="feed-filter-categories" ${categoriesExpanded ? "" : "hidden"}>
+              ${categoryOptions || '<p class="feed-filter-empty">Aucune catégorie</p>'}
+            </div>
+          </section>
+          <section class="feed-filter-section${labelsExpanded ? " expanded" : ""}">
+            <button type="button" class="feed-filter-section-toggle" data-action="toggle-feed-filter-section" data-section="labels" aria-expanded="${labelsExpanded}" aria-controls="feed-filter-labels"><span>Étiquettes</span><span class="feed-filter-section-arrow" aria-hidden="true"></span></button>
+            <div class="feed-filter-section-content" id="feed-filter-labels" ${labelsExpanded ? "" : "hidden"}>
+              ${labelOptions || '<p class="feed-filter-empty">Aucune étiquette</p>'}
+            </div>
+          </section>
+        </nav>
+      </aside>
+    </div>`;
+  }
+
   private renderFeedManagement(): string {
     const feeds = this.feeds.length
       ? this.feeds
@@ -1497,6 +1915,7 @@ export class InkRiverApp {
               const hasError = feed.lastError !== null;
               const healthLabel = hasError ? "Flux en erreur" : "Flux opérationnel";
               const detailsId = `feed-details-${feed.id}`;
+              const categoryPending = this.updatingFeedCategoryIds.has(feed.id);
               return `<article class="feed-card ${feed.isActive ? "active" : "inactive"}${expanded ? " expanded" : ""}" data-feed-card-id="${escapeHtml(feed.id)}">
               <header class="feed-summary"><button type="button" class="feed-summary-toggle" data-action="toggle-feed-details" data-feed-id="${escapeHtml(feed.id)}" aria-expanded="${expanded}" aria-controls="${escapeHtml(detailsId)}">
                 ${renderSourceBadge(feed.platform, feed.logoDataUrl)}
@@ -1506,6 +1925,7 @@ export class InkRiverApp {
               </button></header>
               <div class="feed-details" id="${escapeHtml(detailsId)}" ${expanded ? "" : "hidden"}>
               <span class="feed-status">${feed.isActive ? "Actif" : "Inactif"}</span>
+              <form class="feed-category-form" data-feed-category-form data-feed-id="${escapeHtml(feed.id)}"><label>Catégorie<input name="category" type="text" list="feed-category-options" maxlength="80" value="${escapeHtml(feed.category?.name ?? "")}" placeholder="Non classé" ${categoryPending ? "disabled" : ""}></label><button type="submit" ${categoryPending ? "disabled" : ""}>${categoryPending ? "Enregistrement…" : "Enregistrer"}</button></form>
               <dl>
                 <div><dt>URL du flux</dt><dd>${escapeHtml(feed.url)}</dd></div>
                 <div><dt>Auteur</dt><dd>${escapeHtml(feed.author ?? "Inconnu")}</dd></div>
@@ -1521,7 +1941,10 @@ export class InkRiverApp {
           )
           .join("")
       : '<div class="state" data-testid="feeds-empty">Aucun abonnement.<button class="text-button" data-action="add-subscription">Ajouter un abonnement</button></div>';
-    return `<section class="feed-management" data-testid="feed-management"><header><div><span class="eyebrow">Sources</span><h1>Gestion des abonnements</h1><p>Consultez l’état des flux et leur dernier rafraîchissement.</p></div><div class="feed-management-actions"><button data-action="open-sync" hidden>Synchronisation</button><button class="primary" data-action="add-subscription">Ajouter un abonnement</button></div></header><div class="feed-grid">${feeds}</div></section>`;
+    const categoryOptions = this.categories
+      .map((category) => `<option value="${escapeHtml(category.name)}"></option>`)
+      .join("");
+    return `<section class="feed-management" data-testid="feed-management"><header><div><span class="eyebrow">Sources</span><h1>Gestion des abonnements</h1><p>Consultez l’état des flux et leur dernier rafraîchissement.</p></div><div class="feed-management-actions"><button data-action="open-sync" hidden>Synchronisation</button><button class="primary" data-action="add-subscription">Ajouter un abonnement</button></div></header><div class="feed-grid">${feeds}</div><datalist id="feed-category-options">${categoryOptions}</datalist></section>`;
   }
 
   private toggleFeedDetails(feedId: string): void {
@@ -1895,9 +2318,12 @@ export class InkRiverApp {
 
   private renderAddSubscription(): string {
     if (!this.addSubscriptionOpen) return "";
+    const categoryOptions = this.categories
+      .map((category) => `<option value="${escapeHtml(category.name)}"></option>`)
+      .join("");
     return `<div class="modal-backdrop"><section class="subscriptions add-subscription" role="dialog" aria-modal="true" aria-labelledby="subscriptions-title">
       <header><div><span class="eyebrow">Nouvelle source</span><h2 id="subscriptions-title">Ajouter un abonnement</h2></div><button class="icon-button" data-action="close-add-subscription" aria-label="Fermer">×</button></header>
-      <form id="feed-form"><label>URL du flux<input name="url" type="url" required placeholder="https://publication.substack.com/feed"></label><label>Plateforme<select name="platform"><option value="other">RSS / autre</option><option value="medium">Medium</option><option value="substack">Substack</option></select></label><button class="primary" type="submit">Ajouter</button></form>
+      <form id="feed-form"><label>URL du flux<input name="url" type="url" required placeholder="https://publication.substack.com/feed"></label><label>Plateforme<select name="platform"><option value="other">RSS / autre</option><option value="medium">Medium</option><option value="substack">Substack</option></select></label><label class="feed-form-category">Catégorie (facultative)<input name="category" type="text" list="new-feed-category-options" maxlength="80" placeholder="Nouvelle ou existante"></label><datalist id="new-feed-category-options">${categoryOptions}</datalist><button class="primary" type="submit">Ajouter</button></form>
     </section></div>`;
   }
 
@@ -1932,6 +2358,8 @@ export class InkRiverApp {
   }
 
   render(): void {
+    this.stopTrackingFocusedLabelInput?.();
+    this.stopTrackingFocusedLabelInput = null;
     const timelineScrollTop =
       this.root.querySelector<HTMLElement>(".timeline")?.scrollTop;
     const feedManagementScrollTop =
@@ -1944,8 +2372,15 @@ export class InkRiverApp {
     const articleFrameHeight = preserveReaderPosition
       ? this.root.querySelector<HTMLIFrameElement>(".article-content")?.style.height
       : undefined;
+    const selectedFeed = this.selectedFeedFilter();
+    const selectedCategory = this.selectedCategoryFilter();
+    const selectedLabel = this.selectedLabelFilter();
+    const appContextTitle = selectedFeed
+      ? selectedFeed.title ?? "Flux non actualisé"
+      : selectedCategory?.name ?? selectedLabel?.name ?? "InkRiver";
     this.root.innerHTML = `<div class="shell"${this.pullRefreshing ? ' aria-busy="true"' : ""}>
-      <header class="topbar ${this.mainView === "feeds" ? "feeds-topbar" : ""}"><nav class="mobile-feed-topbar" aria-label="Navigation des abonnements"><button type="button" data-action="show-articles" title="Retour aux articles" aria-label="Retour aux articles">${backIcon()}</button><strong>Gestion des abonnements</strong><span aria-hidden="true"></span></nav><div class="brand"><img class="brand-logo" src="/inkriver-logo.png" alt=""><div><strong>InkRiver</strong><small>All your feeds. One flow.</small></div></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="mobile-top-action mobile-add-subscription" data-action="add-subscription" title="Ajouter un abonnement" aria-label="Ajouter un abonnement">${addIcon()}</button><button type="button" class="mobile-top-action mobile-settings ${this.mainView === "feeds" ? "active" : ""}" data-action="subscriptions" title="Gestion des abonnements" aria-label="Gestion des abonnements" aria-current="${this.mainView === "feeds" ? "page" : "false"}">${settingsIcon()}</button><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
+      <header class="topbar ${this.mainView === "feeds" ? "feeds-topbar" : ""}"><nav class="mobile-feed-topbar" aria-label="Navigation des abonnements"><button type="button" data-action="show-articles" title="Retour aux articles" aria-label="Retour aux articles">${backIcon()}</button><strong>Gestion des abonnements</strong><span aria-hidden="true"></span></nav><div class="brand"><button type="button" class="feed-menu-button" data-action="open-feed-filter" title="Filtrer les articles par flux" aria-label="Ouvrir le menu des flux" aria-expanded="${this.feedFilterOpen}">${menuIcon()}</button><strong class="app-context-title" title="${escapeHtml(appContextTitle)}">${escapeHtml(appContextTitle)}</strong></div><nav class="main-navigation" aria-label="Navigation principale"><button data-action="show-articles" aria-current="${this.mainView === "articles" ? "page" : "false"}" class="${this.mainView === "articles" ? "active" : ""}">Articles</button><button data-action="subscriptions" aria-current="${this.mainView === "feeds" ? "page" : "false"}" class="${this.mainView === "feeds" ? "active" : ""}">Abonnements</button></nav><div class="top-actions"><button type="button" class="mobile-top-action mobile-add-subscription" data-action="add-subscription" title="Ajouter un abonnement" aria-label="Ajouter un abonnement">${addIcon()}</button><button type="button" class="mobile-top-action mobile-settings ${this.mainView === "feeds" ? "active" : ""}" data-action="subscriptions" title="Gestion des abonnements" aria-label="Gestion des abonnements" aria-current="${this.mainView === "feeds" ? "page" : "false"}">${settingsIcon()}</button><button type="button" class="primary refresh-button" data-action="refresh" title="Actualiser" aria-label="${this.refreshing ? "Actualisation en cours" : "Actualiser"}" aria-busy="${this.refreshing}" ${this.refreshing ? "disabled" : ""}>${refreshIcon()}</button></div></header>
+      ${this.renderFeedFilterMenu()}
       <div class="banners">${this.error ? `<div class="banner error" role="alert">${escapeHtml(this.error)}</div>` : ""}${this.notice ? `<div class="banner notice${this.noticeKind === "error" ? " error-notice" : ""}${this.noticeAppearing ? " is-entering" : ""}${this.noticeDismissing ? " is-leaving" : ""}"><span class="notice-content" role="${this.noticeKind === "error" ? "alert" : "status"}">${this.noticeHasCheck ? `<span class="notice-check" aria-hidden="true">${checkIcon()}</span>` : ""}<span>${escapeHtml(this.notice)}</span></span><button type="button" class="banner-dismiss" data-action="dismiss-notice" title="Fermer la notification" aria-label="Fermer la notification">×</button></div>` : ""}</div>
       <main class="main-view ${this.mainView === "articles" ? `articles-view mobile-${this.mobileArticleScreen}${this.selectedArticleIds.size > 0 ? " article-selection-active" : ""}` : "feeds-view"}">${this.mainView === "articles" ? `<aside class="timeline" aria-label="Articles">${this.renderPullRefresh()}${this.renderArticleViews()}${this.renderArticleList()}</aside><section class="reader" data-reader-article-id="${escapeHtml(this.selected?.id ?? "")}">${this.renderMobileReaderToolbar()}${this.renderReader()}${this.renderMobileReaderNavigation()}</section>${this.renderReaderProgress()}${this.renderReaderTopButton()}${this.renderImageZoom()}` : this.renderFeedManagement()}</main>
       ${this.renderAddSubscription()}
@@ -2005,6 +2440,64 @@ export class InkRiverApp {
     this.root
       .querySelector<HTMLElement>('[data-action="dismiss-notice"]')
       ?.addEventListener("click", () => this.dismissNotice());
+    this.root.querySelector<HTMLElement>('[data-action="open-feed-filter"]')
+      ?.addEventListener("click", () => {
+        this.feedFilterOpen = true;
+        this.render();
+        this.root.querySelector<HTMLElement>('[data-action="close-feed-filter"]')?.focus();
+      });
+    this.root.querySelector<HTMLElement>('[data-action="close-feed-filter"]')
+      ?.addEventListener("click", () => this.closeFeedFilter());
+    this.root.querySelector<HTMLElement>('[data-action="close-feed-filter-backdrop"]')
+      ?.addEventListener("click", (event) => {
+        if (event.target === event.currentTarget) this.closeFeedFilter();
+      });
+    this.root.querySelectorAll<HTMLElement>('[data-action="select-feed-filter"]')
+      .forEach((element) => {
+        element.addEventListener("click", () => this.applyFeedFilter(element.dataset.feedId ?? null));
+      });
+    this.root.querySelectorAll<HTMLElement>('[data-action="select-category-filter"]')
+      .forEach((element) => {
+        element.addEventListener("click", () =>
+          this.applyCategoryFilter(element.dataset.categoryId!),
+        );
+      });
+    this.root.querySelectorAll<HTMLElement>('[data-action="select-label-filter"]')
+      .forEach((element) => {
+        element.addEventListener("click", () =>
+          this.applyLabelFilter(element.dataset.labelId!),
+        );
+      });
+    this.root.querySelectorAll<HTMLButtonElement>('[data-action="toggle-feed-filter-section"]')
+      .forEach((element) => {
+        element.addEventListener("click", () => {
+          const section = element.dataset.section;
+          if (section === "feeds") {
+            this.feedFilterFeedsExpanded = !this.feedFilterFeedsExpanded;
+          } else if (section === "categories") {
+            this.feedFilterCategoriesExpanded = !this.feedFilterCategoriesExpanded;
+          } else if (section === "labels") {
+            this.feedFilterLabelsExpanded = !this.feedFilterLabelsExpanded;
+          } else {
+            return;
+          }
+          const expanded = section === "feeds"
+            ? this.feedFilterFeedsExpanded
+            : section === "categories"
+              ? this.feedFilterCategoriesExpanded
+              : this.feedFilterLabelsExpanded;
+          element.setAttribute("aria-expanded", String(expanded));
+          element.closest(".feed-filter-section")?.classList.toggle("expanded", expanded);
+          const contentId = element.getAttribute("aria-controls");
+          const content = contentId ? this.root.querySelector<HTMLElement>(`#${contentId}`) : null;
+          if (content) content.hidden = !expanded;
+        });
+      });
+    this.root.querySelector<HTMLElement>(".feed-filter-menu")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.closeFeedFilter();
+    });
     noticeBanner?.addEventListener("mouseenter", () => {
       this.noticeHovered = true;
       this.pauseNoticeTimer();
@@ -2179,6 +2672,12 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="toggle-feed-details"]').forEach((element) => {
       element.addEventListener("click", () => this.toggleFeedDetails(element.dataset.feedId!));
     });
+    this.root.querySelectorAll<HTMLFormElement>("[data-feed-category-form]").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        void this.setFeedCategory(event.currentTarget as HTMLFormElement);
+      });
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="refresh-feed"]').forEach((element) => {
       element.addEventListener("click", () => void this.refreshFeed(element.dataset.feedId!));
     });
@@ -2188,6 +2687,59 @@ export class InkRiverApp {
     this.root.querySelectorAll<HTMLElement>('[data-action="favorite"]').forEach((element) => {
       element.addEventListener("click", () => void this.toggleFavorite());
     });
+    this.root.querySelectorAll<HTMLFormElement>('[data-article-label-form]')
+      .forEach((form) => {
+        const input = form.querySelector<HTMLInputElement>('input[name="label"]')!;
+        const suggestions = form.querySelector<HTMLElement>(".article-label-suggestions")!;
+        const options = Array.from(
+          suggestions.querySelectorAll<HTMLButtonElement>("[data-label-suggestion]"),
+        );
+        const updateSuggestions = () => {
+          const query = input.value.trim().normalize("NFKC").toLocaleLowerCase("fr-FR");
+          let matches = 0;
+          options.forEach((option) => {
+            const name = option.dataset.labelName ?? "";
+            const matchesQuery = name.normalize("NFKC").toLocaleLowerCase("fr-FR").includes(query);
+            option.hidden = !matchesQuery;
+            if (matchesQuery) matches += 1;
+          });
+          suggestions.hidden = matches === 0;
+          input.setAttribute("aria-expanded", String(matches > 0));
+        };
+        input.addEventListener("focus", () => {
+          updateSuggestions();
+          this.keepLabelInputAboveKeyboard(input);
+        });
+        input.addEventListener("input", () => {
+          updateSuggestions();
+          this.keepLabelInputAboveKeyboard(input);
+        });
+        form.addEventListener("focusout", () => {
+          queueMicrotask(() => {
+            if (!form.contains(this.root.ownerDocument.activeElement)) {
+              input.setAttribute("aria-expanded", "false");
+            }
+          });
+        });
+        options.forEach((option) => {
+          option.addEventListener("click", () => {
+            input.value = option.dataset.labelName ?? "";
+            suggestions.hidden = true;
+            input.setAttribute("aria-expanded", "false");
+            input.focus();
+          });
+        });
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          void this.addArticleLabel(event.currentTarget as HTMLFormElement);
+        });
+      });
+    this.root.querySelectorAll<HTMLElement>('[data-action="remove-article-label"]')
+      .forEach((element) => {
+        element.addEventListener("click", () =>
+          void this.removeArticleLabel(element.dataset.labelId!),
+        );
+      });
     this.root.querySelectorAll<HTMLElement>('[data-action="archive-article"]').forEach((element) => {
       element.addEventListener("click", () =>
         this.requestArchiveSelectedArticle(

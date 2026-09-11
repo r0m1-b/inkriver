@@ -1,3 +1,4 @@
+use crate::article_html::enrich_x_cards;
 use crate::content_extractor::extract_article_content;
 use crate::page_http::{DownloadedPage, download_article_page};
 use crate::storage::{ExtractionCandidate, Storage};
@@ -118,7 +119,8 @@ async fn store_download_result(
         extract_article_content(&page.html, &page.final_url).map_err(|error| error.to_string())
     });
     match extracted {
-        Ok(content) => {
+        Ok(mut content) => {
+            content.html = enrich_x_cards(&content.html).await;
             if storage
                 .record_extraction_success(
                     &candidate.article_id,

@@ -450,6 +450,7 @@ mod tests {
             source: Source::Substack,
             is_read: false,
             is_favorite: false,
+            labels: Vec::new(),
         }];
 
         assert_eq!(

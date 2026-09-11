@@ -1,4 +1,5 @@
 pub mod article;
+pub mod article_html;
 pub mod cli;
 pub mod config;
 pub mod content_extractor;

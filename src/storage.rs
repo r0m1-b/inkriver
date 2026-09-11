@@ -15,6 +15,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::{error::Error, fmt};
+use unicode_normalization::UnicodeNormalization;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub const ARTICLE_RETENTION_DAYS: i64 = 30;
@@ -32,6 +33,24 @@ fn unique_article_ids(article_ids: &[String]) -> Vec<&str> {
         .map(String::as_str)
         .filter(|article_id| seen.insert(*article_id))
         .collect()
+}
+
+fn normalize_label_name(raw_name: &str) -> std::result::Result<(String, String), LabelError> {
+    let compatible = raw_name.nfkc().collect::<String>();
+    let name = compatible.split_whitespace().collect::<Vec<_>>().join(" ");
+    let length = name.chars().count();
+    if length == 0 {
+        return Err(LabelError::InvalidName(
+            "le nom ne peut pas être vide".to_string(),
+        ));
+    }
+    if length > 80 {
+        return Err(LabelError::InvalidName(
+            "le nom ne peut pas dépasser 80 caractères".to_string(),
+        ));
+    }
+    let normalized = name.chars().flat_map(char::to_lowercase).collect();
+    Ok((name, normalized))
 }
 
 fn article_entry_key<'a>(article_id: &'a str, feed_id: &str) -> &'a str {
@@ -243,6 +262,21 @@ pub struct StoredFeed {
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_error: Option<StoredFeedError>,
     pub logo_png: Option<Vec<u8>>,
+    pub category: Option<StoredCategory>,
+}
+
+/// A user-defined topic shared by one or more subscriptions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCategory {
+    pub id: String,
+    pub name: String,
+}
+
+/// A reusable user-defined label assigned to zero or more articles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredLabel {
+    pub id: String,
+    pub name: String,
 }
 
 /// Describes the most recent failed refresh retained for a subscription.
@@ -292,12 +326,37 @@ impl fmt::Display for SubscriptionError {
 
 impl Error for SubscriptionError {}
 
+/// Errors produced while changing local article labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabelError {
+    InvalidName(String),
+    EmptySelection,
+    ArticleNotFound(String),
+    LabelNotFound(String),
+    Database(String),
+}
+
+impl fmt::Display for LabelError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidName(message) => write!(formatter, "Invalid label name: {message}"),
+            Self::EmptySelection => write!(formatter, "Article selection is empty"),
+            Self::ArticleNotFound(id) => write!(formatter, "Article not found: {id}"),
+            Self::LabelNotFound(id) => write!(formatter, "Label not found: {id}"),
+            Self::Database(message) => write!(formatter, "SQLite label error: {message}"),
+        }
+    }
+}
+
+impl Error for LabelError {}
+
 /// Combines remote article data with InkRiver-specific local state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredArticle {
     pub article: Article,
     pub is_read: bool,
     pub is_favorite: bool,
+    pub labels: Vec<StoredLabel>,
 }
 
 /// Contains the lightweight fields required to render an article list.
@@ -312,6 +371,7 @@ pub struct ArticleSummary {
     pub source: Source,
     pub is_read: bool,
     pub is_favorite: bool,
+    pub labels: Vec<StoredLabel>,
 }
 
 /// Counts rows inserted and rows refreshed by one article batch.
@@ -371,6 +431,8 @@ type StoredFeedRow = (
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
     Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
 );
 
 fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
@@ -388,6 +450,8 @@ fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
         last_error_at,
         last_published_at,
         logo_png,
+        category_id,
+        category_name,
     ) = row;
     let platform = Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
     let last_error = match (last_error_stage, last_error_message, last_error_at) {
@@ -411,6 +475,9 @@ fn stored_feed_from_row(row: StoredFeedRow) -> Result<StoredFeed> {
         last_success_at,
         last_error,
         logo_png,
+        category: category_id
+            .zip(category_name)
+            .map(|(id, name)| StoredCategory { id, name }),
     })
 }
 
@@ -582,6 +649,7 @@ fn stored_article_from_row(row: StoredArticleRow) -> Result<StoredArticle> {
         },
         is_read,
         is_favorite,
+        labels: Vec::new(),
     })
 }
 
@@ -2506,9 +2574,10 @@ impl Storage {
                        feeds.last_success_at, feeds.last_error_stage,
                        feeds.last_error_message, feeds.last_error_at,
                        MAX(articles.published_at) AS last_published_at,
-                       feeds.logo_png
+                       feeds.logo_png, categories.id, categories.name
                 FROM feeds
                 LEFT JOIN articles ON articles.feed_id = feeds.id
+                LEFT JOIN categories ON categories.id = feeds.category_id
                 GROUP BY feeds.id
                 ORDER BY feeds.is_active DESC,
                          COALESCE(feeds.title, feeds.url) COLLATE NOCASE ASC
@@ -2697,7 +2766,228 @@ impl Storage {
             last_success_at: None,
             last_error: None,
             logo_png: None,
+            category: None,
         })
+    }
+
+    /// Lists categories alphabetically, including categories not currently assigned.
+    pub async fn list_categories(&self) -> Result<Vec<StoredCategory>> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT id, name FROM categories ORDER BY name COLLATE NOCASE ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les catégories")
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(id, name)| StoredCategory { id, name })
+                .collect()
+        })
+    }
+
+    /// Lists every locally defined article label alphabetically.
+    pub async fn list_labels(&self) -> Result<Vec<StoredLabel>> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT id, name FROM labels ORDER BY name COLLATE NOCASE ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les étiquettes")
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(id, name)| StoredLabel { id, name })
+                .collect()
+        })
+    }
+
+    /// Creates or reuses a label and assigns it to visible articles atomically.
+    pub async fn add_label_to_articles(
+        &self,
+        article_ids: &[String],
+        raw_name: &str,
+    ) -> std::result::Result<StoredLabel, LabelError> {
+        let article_ids = unique_article_ids(article_ids);
+        if article_ids.is_empty() {
+            return Err(LabelError::EmptySelection);
+        }
+        let (name, normalized_name) = normalize_label_name(raw_name)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+        for article_id in &article_ids {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM articles WHERE id = ? AND is_archived = 0)",
+            )
+            .bind(article_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+            if !exists {
+                return Err(LabelError::ArticleNotFound((*article_id).to_string()));
+            }
+        }
+        let existing: Option<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM labels WHERE normalized_name = ?")
+                .bind(&normalized_name)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|error| LabelError::Database(error.to_string()))?;
+        let label = match existing {
+            Some((id, name)) => StoredLabel { id, name },
+            None => {
+                let label = StoredLabel {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name,
+                };
+                sqlx::query("INSERT INTO labels (id, name, normalized_name) VALUES (?, ?, ?)")
+                    .bind(&label.id)
+                    .bind(&label.name)
+                    .bind(&normalized_name)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| LabelError::Database(error.to_string()))?;
+                label
+            }
+        };
+        for article_id in article_ids {
+            sqlx::query(
+                "INSERT OR IGNORE INTO article_labels (article_id, label_id) VALUES (?, ?)",
+            )
+            .bind(article_id)
+            .bind(&label.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+        Ok(label)
+    }
+
+    /// Removes one label from visible articles atomically.
+    pub async fn remove_label_from_articles(
+        &self,
+        article_ids: &[String],
+        label_id: &str,
+    ) -> std::result::Result<bool, LabelError> {
+        let article_ids = unique_article_ids(article_ids);
+        if article_ids.is_empty() {
+            return Err(LabelError::EmptySelection);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+        let label_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM labels WHERE id = ?)")
+                .bind(label_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|error| LabelError::Database(error.to_string()))?;
+        if !label_exists {
+            return Err(LabelError::LabelNotFound(label_id.to_string()));
+        }
+        let mut removed = false;
+        for article_id in article_ids {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM articles WHERE id = ? AND is_archived = 0)",
+            )
+            .bind(article_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+            if !exists {
+                return Err(LabelError::ArticleNotFound(article_id.to_string()));
+            }
+            removed |=
+                sqlx::query("DELETE FROM article_labels WHERE article_id = ? AND label_id = ?")
+                    .bind(article_id)
+                    .bind(label_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| LabelError::Database(error.to_string()))?
+                    .rows_affected()
+                    > 0;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+        Ok(removed)
+    }
+
+    /// Assigns an existing or newly created category to a feed, or removes it.
+    pub async fn set_feed_category(
+        &self,
+        feed_id: &str,
+        category_name: Option<&str>,
+    ) -> std::result::Result<StoredFeed, SubscriptionError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM feeds WHERE id = ?)")
+            .bind(feed_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        if !exists {
+            return Err(SubscriptionError::NotFound(feed_id.to_string()));
+        }
+
+        let normalized_name = category_name.map(str::trim).filter(|name| !name.is_empty());
+        let category_id = if let Some(name) = normalized_name {
+            if name.chars().count() > 80 {
+                return Err(SubscriptionError::Database(
+                    "Le nom de catégorie ne peut pas dépasser 80 caractères".to_string(),
+                ));
+            }
+            let existing_id: Option<String> =
+                sqlx::query_scalar("SELECT id FROM categories WHERE name = ? COLLATE NOCASE")
+                    .bind(name)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+            match existing_id {
+                Some(id) => Some(id),
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    sqlx::query("INSERT INTO categories (id, name) VALUES (?, ?)")
+                        .bind(&id)
+                        .bind(name)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+                    Some(id)
+                }
+            }
+        } else {
+            None
+        };
+
+        sqlx::query("UPDATE feeds SET category_id = ? WHERE id = ?")
+            .bind(category_id)
+            .bind(feed_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+
+        self.list_feeds()
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+            .into_iter()
+            .find(|feed| feed.id == feed_id)
+            .ok_or_else(|| SubscriptionError::NotFound(feed_id.to_string()))
     }
 
     /// Activates or deactivates a retained subscription without deleting history.
@@ -3393,7 +3683,15 @@ impl Storage {
         .await
         .context("Impossible de charger les articles")?;
 
-        rows.into_iter().map(stored_article_from_row).collect()
+        let mut articles = rows
+            .into_iter()
+            .map(stored_article_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        let mut labels = self.visible_article_labels().await?;
+        for article in &mut articles {
+            article.labels = labels.remove(&article.article.id).unwrap_or_default();
+        }
+        Ok(articles)
     }
 
     /// Lists lightweight article summaries without loading their HTML bodies.
@@ -3427,7 +3725,8 @@ impl Storage {
         .await
         .context("Impossible de charger les résumés d'articles")?;
 
-        rows.into_iter()
+        let mut articles = rows
+            .into_iter()
             .map(
                 |(id, feed_id, title, author, published_at, url, source, is_read, is_favorite)| {
                     let source = Source::try_from(source.as_str()).map_err(anyhow::Error::msg)?;
@@ -3441,10 +3740,16 @@ impl Storage {
                         source,
                         is_read,
                         is_favorite,
+                        labels: Vec::new(),
                     })
                 },
             )
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let mut labels = self.visible_article_labels().await?;
+        for article in &mut articles {
+            article.labels = labels.remove(&article.id).unwrap_or_default();
+        }
+        Ok(articles)
     }
 
     /// Loads one complete article and its local state.
@@ -3466,7 +3771,103 @@ impl Storage {
         .await
         .with_context(|| format!("Impossible de charger l'article {article_id:?}"))?;
 
-        row.map(stored_article_from_row).transpose()
+        let Some(mut article) = row.map(stored_article_from_row).transpose()? else {
+            return Ok(None);
+        };
+        article.labels = self.article_labels(article_id).await?;
+        Ok(Some(article))
+    }
+
+    async fn visible_article_labels(&self) -> Result<HashMap<String, Vec<StoredLabel>>> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+                SELECT article_labels.article_id, labels.id, labels.name
+                FROM article_labels
+                JOIN labels ON labels.id = article_labels.label_id
+                JOIN articles ON articles.id = article_labels.article_id
+                WHERE articles.is_archived = 0
+                ORDER BY labels.name COLLATE NOCASE ASC, labels.id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les étiquettes des articles")?;
+        let mut labels = HashMap::<String, Vec<StoredLabel>>::new();
+        for (article_id, id, name) in rows {
+            labels
+                .entry(article_id)
+                .or_default()
+                .push(StoredLabel { id, name });
+        }
+        Ok(labels)
+    }
+
+    async fn article_labels(&self, article_id: &str) -> Result<Vec<StoredLabel>> {
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+                SELECT labels.id, labels.name
+                FROM labels
+                JOIN article_labels ON article_labels.label_id = labels.id
+                WHERE article_labels.article_id = ?
+                ORDER BY labels.name COLLATE NOCASE ASC, labels.id ASC
+            "#,
+        )
+        .bind(article_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les étiquettes de l'article")
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(id, name)| StoredLabel { id, name })
+                .collect()
+        })
+    }
+
+    /// Lists visible article bodies that still contain unresolved X cards.
+    pub async fn unresolved_x_embed_articles(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            r#"
+                SELECT id, content
+                FROM articles
+                WHERE is_archived = 0
+                  AND content LIKE '%<blockquote%'
+                  AND (
+                    content LIKE '%Voir la publication sur X%'
+                    OR content LIKE '%x.com/%/status/%'
+                    OR content LIKE '%twitter.com/%/status/%'
+                  )
+                ORDER BY published_at IS NULL ASC, published_at DESC, id ASC
+                LIMIT ?
+            "#,
+        )
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .context("Impossible de charger les cartes X à enrichir")?;
+        Ok(rows)
+    }
+
+    /// Replaces an article body only when no concurrent refresh changed it.
+    pub async fn replace_article_content_if_current(
+        &self,
+        article_id: &str,
+        current_content: &str,
+        replacement: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+                UPDATE articles
+                SET content = ?
+                WHERE id = ? AND is_archived = 0 AND content = ?
+            "#,
+        )
+        .bind(replacement)
+        .bind(article_id)
+        .bind(current_content)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("Impossible d'enrichir les cartes X de {article_id:?}"))?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Changes the read state of an article.
@@ -3846,6 +4247,7 @@ mod tests {
             last_success_at: None,
             last_error: None,
             logo_png: None,
+            category: None,
         }
     }
 
@@ -4593,6 +4995,8 @@ mod tests {
         assert!(table_names.contains(&"sync_snapshot_publications".to_string()));
         assert!(table_names.contains(&"sync_snapshot_imports".to_string()));
         assert!(table_names.contains(&"sync_roster_members".to_string()));
+        assert!(table_names.contains(&"labels".to_string()));
+        assert!(table_names.contains(&"article_labels".to_string()));
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&storage.pool)
@@ -4613,7 +5017,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migration_count, 17);
+        assert_eq!(migration_count, 19);
 
         storage.close().await;
     }
@@ -6786,6 +7190,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_categories_are_created_reused_assigned_and_removed() {
+        let storage = Storage::open_in_memory().await.unwrap();
+        let first = storage
+            .add_feed("https://ai.example/feed", None)
+            .await
+            .unwrap();
+        let second = storage
+            .add_feed("https://research.example/feed", None)
+            .await
+            .unwrap();
+
+        let categorized = storage
+            .set_feed_category(&first.id, Some(" Intelligence artificielle "))
+            .await
+            .unwrap();
+        let category = categorized.category.unwrap();
+        assert_eq!(category.name, "Intelligence artificielle");
+        assert!(uuid::Uuid::parse_str(&category.id).is_ok());
+
+        let reused = storage
+            .set_feed_category(&second.id, Some("intelligence artificielle"))
+            .await
+            .unwrap()
+            .category
+            .unwrap();
+        assert_eq!(reused.id, category.id);
+        assert_eq!(
+            storage.list_categories().await.unwrap(),
+            vec![category.clone()]
+        );
+
+        let uncategorized = storage.set_feed_category(&first.id, None).await.unwrap();
+        assert!(uncategorized.category.is_none());
+        assert_eq!(storage.list_categories().await.unwrap(), vec![category]);
+        assert_eq!(
+            storage
+                .set_feed_category("missing", Some("IA"))
+                .await
+                .unwrap_err(),
+            SubscriptionError::NotFound("missing".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn article_labels_are_local_reused_and_loaded_with_articles() {
+        let storage = storage_with_feed().await;
+        let mars = article("astronomy::mars", "astronomy", None);
+        let venus = article("astronomy::venus", "astronomy", None);
+        storage
+            .upsert_articles(&[mars.clone(), venus.clone()])
+            .await
+            .unwrap();
+        let sync_events_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_events")
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+
+        let label = storage
+            .add_label_to_articles(&[mars.id.clone(), venus.id.clone()], "  À   approfondir  ")
+            .await
+            .unwrap();
+        assert_eq!(label.name, "À approfondir");
+        assert!(uuid::Uuid::parse_str(&label.id).is_ok());
+        let reused = storage
+            .add_label_to_articles(std::slice::from_ref(&mars.id), "à approfondir")
+            .await
+            .unwrap();
+        assert_eq!(reused, label);
+        assert_eq!(storage.list_labels().await.unwrap(), vec![label.clone()]);
+
+        let summaries = storage.list_article_summaries().await.unwrap();
+        assert!(
+            summaries
+                .iter()
+                .all(|article| article.labels == vec![label.clone()])
+        );
+        assert_eq!(
+            storage.get_article(&mars.id).await.unwrap().unwrap().labels,
+            vec![label.clone()]
+        );
+
+        storage
+            .upsert_articles(std::slice::from_ref(&mars))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_article(&mars.id).await.unwrap().unwrap().labels,
+            vec![label.clone()]
+        );
+        assert!(
+            storage
+                .remove_label_from_articles(std::slice::from_ref(&mars.id), &label.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .get_article(&mars.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .labels
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .get_article(&venus.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .labels,
+            vec![label]
+        );
+
+        let sync_events_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_events")
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(sync_events_after, sync_events_before);
+    }
+
+    #[tokio::test]
+    async fn article_label_batches_reject_invalid_targets_atomically() {
+        let storage = storage_with_feed().await;
+        let mars = article("astronomy::mars", "astronomy", None);
+        storage
+            .upsert_articles(std::slice::from_ref(&mars))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .add_label_to_articles(&[mars.id.clone(), "missing".to_string()], "Important")
+                .await
+                .unwrap_err(),
+            LabelError::ArticleNotFound("missing".to_string())
+        );
+        assert!(storage.list_labels().await.unwrap().is_empty());
+        assert!(
+            storage
+                .get_article(&mars.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .labels
+                .is_empty()
+        );
+        assert!(matches!(
+            storage.add_label_to_articles(&[], "Important").await,
+            Err(LabelError::EmptySelection)
+        ));
+        assert!(matches!(
+            storage
+                .add_label_to_articles(std::slice::from_ref(&mars.id), "   ")
+                .await,
+            Err(LabelError::InvalidName(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn delete_feed_removes_its_articles_and_local_states_only() {
         let storage = Storage::open_in_memory().await.unwrap();
         storage
@@ -6970,6 +7534,7 @@ mod tests {
                 article: expected.clone(),
                 is_read: false,
                 is_favorite: false,
+                labels: Vec::new(),
             }]
         );
         let entry_key: String = sqlx::query_scalar("SELECT entry_key FROM articles WHERE id = ?")
@@ -7370,6 +7935,51 @@ mod tests {
         assert!(!stored.is_read);
         assert!(stored.is_favorite);
         assert!(storage.get_article("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_x_content_can_be_selected_and_replaced_without_lost_updates() {
+        let storage = storage_with_feed().await;
+        let mut expected = article("astronomy::x-post", "astronomy", None);
+        let empty_embed = r#"<blockquote><a href="https://x.com/example/status/123" rel="noopener noreferrer"></a></blockquote>"#;
+        expected.content = Some(empty_embed.to_string());
+        storage
+            .upsert_articles(std::slice::from_ref(&expected))
+            .await
+            .unwrap();
+
+        let candidates = storage.unresolved_x_embed_articles(20).await.unwrap();
+        assert_eq!(
+            candidates,
+            vec![(expected.id.clone(), empty_embed.to_string())]
+        );
+        assert!(
+            storage
+                .replace_article_content_if_current(
+                    &expected.id,
+                    empty_embed,
+                    "<p>Tweet complet</p>"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .replace_article_content_if_current(&expected.id, empty_embed, "<p>Obsolète</p>")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            storage
+                .get_article(&expected.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .article
+                .content
+                .as_deref(),
+            Some("<p>Tweet complet</p>")
+        );
     }
 
     #[tokio::test]
