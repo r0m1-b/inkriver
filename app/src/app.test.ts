@@ -3493,6 +3493,43 @@ describe("InkRiverApp", () => {
     }
   });
 
+  it("debounces automatic synchronization after an article label change", async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("inkriver.automaticSyncEnabled", "true");
+      const configured = {
+        ...emptySyncRuntime,
+        configured: true,
+        webdavBaseUrl: "https://cloud.example/dav/inkriver",
+        webdavUsername: "alice",
+        keyId: "key-123",
+        devices: [],
+      };
+      const readSummary = { ...structuredClone(summary), isRead: true };
+      const readDetail = { ...structuredClone(detail), isRead: true };
+      const api = fakeApi({
+        listArticles: vi.fn(async () => [structuredClone(readSummary)]),
+        getArticle: vi.fn(async () => structuredClone(readDetail)),
+        syncPairingStatus: vi.fn(async () => configured),
+      });
+      const { root } = await mounted(api);
+      root.querySelector<HTMLButtonElement>('[data-action="select-article"]')!.click();
+      await flushMicrotasks();
+      const form = root.querySelector<HTMLFormElement>("[data-article-label-form]")!;
+      form.querySelector<HTMLInputElement>('input[name="label"]')!.value = "Recherche";
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await flushMicrotasks();
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(api.synchronizeNow).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushMicrotasks();
+      expect(api.synchronizeNow).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("deletes only the local synchronization configuration after confirmation", async () => {
     const configured = {
       ...emptySyncRuntime,

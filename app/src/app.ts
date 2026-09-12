@@ -637,6 +637,7 @@ export class InkRiverApp {
     try {
       await this.api.addArticleLabel([articleId], name);
       await this.reloadArticleAndLabels(articleId);
+      this.automaticSyncScheduler.localChange();
       this.showNotice(`Étiquette « ${name} » ajoutée.`);
     } catch (error) {
       this.error = errorMessage(error);
@@ -658,6 +659,7 @@ export class InkRiverApp {
     try {
       await this.api.removeArticleLabel([articleId], labelId);
       await this.reloadArticleAndLabels(articleId);
+      this.automaticSyncScheduler.localChange();
       this.showNotice(`Étiquette « ${label.name} » retirée.`);
     } catch (error) {
       this.error = errorMessage(error);

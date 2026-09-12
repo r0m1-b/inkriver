@@ -7,12 +7,15 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::collections::{BTreeSet, HashSet};
+use unicode_normalization::UnicodeNormalization;
 
 const MAX_DEVICE_ID_LENGTH: usize = 64;
 const MAX_ENTITY_ID_LENGTH: usize = 4_096;
 const MAX_URL_LENGTH: usize = 8_192;
 const MAX_TITLE_LENGTH: usize = 16_384;
 const MAX_AUTHOR_LENGTH: usize = 4_096;
+const MAX_LABEL_LENGTH: usize = 80;
+const MAX_NORMALIZED_LABEL_LENGTH: usize = 160;
 const MAX_EVENTS_PER_IMPORT: usize = 1_000;
 
 type EventRow = (String, i64, i64, i64, i64, String, String);
@@ -214,14 +217,45 @@ fn validate_event(event: &SyncEvent) -> Result<()> {
         | SyncEventPayload::SubscriptionPlatformSet {
             subscription_id, ..
         }
+        | SyncEventPayload::SubscriptionCategorySet {
+            subscription_id, ..
+        }
         | SyncEventPayload::SubscriptionDeleted { subscription_id } => {
             validate_non_empty("subscription id", subscription_id, MAX_ENTITY_ID_LENGTH)?;
         }
         SyncEventPayload::ArticleReadSet { article, .. }
         | SyncEventPayload::ArticleFavoriteSet { article, .. }
+        | SyncEventPayload::ArticleLabelSet { article, .. }
         | SyncEventPayload::ArticleArchived { article } => validate_article_ref(article)?,
     }
+    if let SyncEventPayload::SubscriptionCategorySet {
+        category_name: Some(name),
+        ..
+    } = &event.payload
+        && (name.trim() != name || name.is_empty() || name.chars().count() > 80)
+    {
+        bail!("Synchronization category name must contain 1 to 80 trimmed characters");
+    }
+    if let SyncEventPayload::ArticleLabelSet { label_name, .. } = &event.payload {
+        normalized_sync_label_name(label_name)?;
+    }
     Ok(())
+}
+
+fn normalized_sync_label_name(raw_name: &str) -> Result<(String, String)> {
+    let compatible = raw_name.nfkc().collect::<String>();
+    let name = compatible.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name != raw_name || name.is_empty() || name.chars().count() > MAX_LABEL_LENGTH {
+        bail!("Synchronization label name must contain 1 to 80 normalized characters");
+    }
+    let normalized = name
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if normalized.chars().count() > MAX_NORMALIZED_LABEL_LENGTH {
+        bail!("Synchronization normalized label name is too long");
+    }
+    Ok((name, normalized))
 }
 
 fn validate_event_id(event: &SyncEventId) -> Result<()> {
@@ -498,6 +532,18 @@ async fn apply_event(
             )
             .await
         }
+        SyncEventPayload::SubscriptionCategorySet {
+            subscription_id,
+            category_name,
+        } => {
+            apply_subscription_category(
+                transaction,
+                event,
+                subscription_id,
+                category_name.as_deref(),
+            )
+            .await
+        }
         SyncEventPayload::SubscriptionDeleted { subscription_id } => {
             apply_subscription_deleted(transaction, event, subscription_id).await
         }
@@ -508,6 +554,11 @@ async fn apply_event(
             article,
             is_favorite,
         } => apply_article_field(transaction, event, article, "favorite", *is_favorite).await,
+        SyncEventPayload::ArticleLabelSet {
+            article,
+            label_name,
+            is_present,
+        } => apply_article_label(transaction, event, article, label_name, *is_present).await,
         SyncEventPayload::ArticleArchived { article } => {
             apply_article_archived(transaction, event, article).await
         }
@@ -920,6 +971,58 @@ async fn apply_subscription_register(
     store_event_version(transaction, "subscription", canonical, field, event).await
 }
 
+async fn apply_subscription_category(
+    transaction: &mut Transaction<'_, Sqlite>,
+    event: &SyncEvent,
+    subscription_id: &str,
+    category_name: Option<&str>,
+) -> Result<ApplyOutcome> {
+    let Some(canonical) = canonical_subscription_id(transaction, subscription_id).await? else {
+        return Ok(ApplyOutcome::Pending("missing_subscription"));
+    };
+    if subscription_is_deleted(transaction, &canonical).await? {
+        return Ok(ApplyOutcome::Applied);
+    }
+    let Some(feed_id) = projection_feed_id(transaction, &canonical).await? else {
+        return Ok(ApplyOutcome::Pending("missing_subscription_projection"));
+    };
+    if !event_is_newer(transaction, "subscription", &canonical, "category", event).await? {
+        return Ok(ApplyOutcome::Applied);
+    }
+    let category_id = match category_name {
+        Some(name) => {
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT id FROM categories WHERE name = ? COLLATE NOCASE")
+                    .bind(name)
+                    .fetch_optional(&mut **transaction)
+                    .await
+                    .context("Impossible de rechercher la catégorie synchronisée")?;
+            match existing {
+                Some(id) => Some(id),
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    sqlx::query("INSERT INTO categories (id, name) VALUES (?, ?)")
+                        .bind(&id)
+                        .bind(name)
+                        .execute(&mut **transaction)
+                        .await
+                        .context("Impossible de créer la catégorie synchronisée")?;
+                    Some(id)
+                }
+            }
+        }
+        None => None,
+    };
+    sqlx::query("UPDATE feeds SET category_id = ? WHERE id = ?")
+        .bind(category_id)
+        .bind(feed_id)
+        .execute(&mut **transaction)
+        .await
+        .context("Impossible d'appliquer la catégorie synchronisée")?;
+    store_event_version(transaction, "subscription", &canonical, "category", event).await?;
+    Ok(ApplyOutcome::Applied)
+}
+
 async fn apply_subscription_deleted(
     transaction: &mut Transaction<'_, Sqlite>,
     event: &SyncEvent,
@@ -1185,6 +1288,82 @@ async fn apply_article_field(
         }
         store_event_version(transaction, "article", &entity_key, field, event).await?;
     }
+    Ok(ApplyOutcome::Applied)
+}
+
+async fn apply_article_label(
+    transaction: &mut Transaction<'_, Sqlite>,
+    event: &SyncEvent,
+    article: &SyncArticleRef,
+    label_name: &str,
+    is_present: bool,
+) -> Result<ApplyOutcome> {
+    let Some(canonical) = canonical_subscription_id(transaction, &article.subscription_id).await?
+    else {
+        return Ok(ApplyOutcome::Pending("missing_subscription"));
+    };
+    if subscription_is_deleted(transaction, &canonical).await? {
+        return Ok(ApplyOutcome::Applied);
+    }
+    let entity_key = article_entity_key(&canonical, &article.entry_key)?;
+    if tombstone_exists(transaction, "article", &entity_key).await? {
+        return Ok(ApplyOutcome::Applied);
+    }
+    let Some(article_id) = ensure_article_projection(transaction, &canonical, article).await?
+    else {
+        return Ok(ApplyOutcome::Pending("missing_subscription_projection"));
+    };
+    fill_article_metadata(transaction, &article_id, article).await?;
+    let (name, normalized_name) = normalized_sync_label_name(label_name)?;
+    let field = format!("label:{normalized_name}");
+    if !event_is_newer(transaction, "article", &entity_key, &field, event).await? {
+        return Ok(ApplyOutcome::Applied);
+    }
+
+    if is_present {
+        let label_id: Option<String> =
+            sqlx::query_scalar("SELECT id FROM labels WHERE normalized_name = ?")
+                .bind(&normalized_name)
+                .fetch_optional(&mut **transaction)
+                .await
+                .context("Impossible de rechercher l'étiquette synchronisée")?;
+        let label_id = match label_id {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                sqlx::query("INSERT INTO labels (id, name, normalized_name) VALUES (?, ?, ?)")
+                    .bind(&id)
+                    .bind(&name)
+                    .bind(&normalized_name)
+                    .execute(&mut **transaction)
+                    .await
+                    .context("Impossible de créer l'étiquette synchronisée")?;
+                id
+            }
+        };
+        sqlx::query("INSERT OR IGNORE INTO article_labels (article_id, label_id) VALUES (?, ?)")
+            .bind(&article_id)
+            .bind(label_id)
+            .execute(&mut **transaction)
+            .await
+            .context("Impossible d'affecter l'étiquette synchronisée")?;
+    } else {
+        sqlx::query(
+            r#"
+                DELETE FROM article_labels
+                WHERE article_id = ?
+                  AND label_id IN (
+                      SELECT id FROM labels WHERE normalized_name = ?
+                  )
+            "#,
+        )
+        .bind(&article_id)
+        .bind(&normalized_name)
+        .execute(&mut **transaction)
+        .await
+        .context("Impossible de retirer l'étiquette synchronisée")?;
+    }
+    store_event_version(transaction, "article", &entity_key, &field, event).await?;
     Ok(ApplyOutcome::Applied)
 }
 

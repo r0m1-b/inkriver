@@ -6238,3 +6238,72 @@ zone d'affichage sur mobile.
 
 Ces changements ont été créés avec l'assistance d'une IA. Aucun commit associé
 à cette intervention.
+
+## 2026-09-12 — Synchronisation des catégories de flux
+
+### Objectif
+
+Répliquer l'affectation et le retrait de la catégorie d'un flux entre appareils,
+sans exposer les identifiants SQLite locaux ni changer la version du protocole
+encore inutilisé en production.
+
+### Actions et choix
+
+- ajout de l'événement typé `subscription_category_set`, portant l'identifiant
+  logique du flux et un nom de catégorie optionnel ;
+- journalisation transactionnelle des changements locaux et inclusion des
+  catégories déjà présentes dans le bootstrap d'activation ;
+- projection distante avec attente des dépendances, réutilisation insensible à
+  la casse des catégories locales et création d'un UUID propre à l'appareil si
+  nécessaire ;
+- résolution des changements concurrents par un registre LWW indépendant et
+  prise en charge explicite du retrait de catégorie ;
+- absence de journalisation retour lors d'un import, validation des noms reçus
+  et documentation du nouveau périmètre de synchronisation ;
+- tests du format sérialisé, du rollback atomique, du bootstrap, de toutes les
+  permutations d'événements et de la convergence après retrait.
+
+### Vérifications
+
+- `cargo test` : succès, 251 tests unitaires et 2 tests d'intégration passés ;
+  1 test de corpus local ignoré comme prévu ;
+- `cargo test` dans `app/src-tauri` : succès, 24 tests passés ;
+- `cargo clippy --all-targets -- -D warnings` : succès ;
+- `cargo clippy --manifest-path app/src-tauri/Cargo.toml --all-targets -- -D warnings` : succès ;
+- `cargo fmt --all` et `git diff --check` : succès.
+
+Ces changements ont été créés avec l'assistance d'une IA. Aucun commit associé
+à cette intervention.
+
+## 2026-09-12 — Synchronisation des étiquettes d'articles
+
+### Objectif
+
+Répliquer les ajouts et retraits d'étiquettes d'articles entre appareils tout
+en conservant des identifiants SQLite propres à chaque installation.
+
+### Actions et choix
+
+- ajout de l'événement typé `article_label_set`, contenant la référence logique
+  de l'article, le nom normalisé de l'étiquette et son état d'appartenance ;
+- création d'un registre LWW indépendant par article et nom d'étiquette en
+  minuscules, afin que des étiquettes différentes ne se remplacent pas ;
+- journalisation transactionnelle des opérations groupées, bootstrap des
+  associations existantes et rollback conjoint des données et du journal ;
+- projection des événements distants avec attente des dépendances, création ou
+  réutilisation locale de l'étiquette et absence d'événement retour ;
+- validation NFKC, des espaces et de la longueur des noms reçus ;
+- déclenchement de la synchronisation automatique après ajout ou retrait depuis
+  l'interface, puis mise à jour des documentations française et anglaise.
+
+### Vérifications
+
+- `cargo test` : succès, 253 tests unitaires et 2 tests d'intégration passés ;
+  1 test de corpus local ignoré comme prévu ;
+- `cargo test` dans `app/src-tauri` : succès, 24 tests passés ;
+- Clippy sans avertissement sur le cœur et l'adaptateur Tauri ;
+- `npm test -- --run` : succès, 135 tests passés ;
+- `npm run build`, `cargo fmt --all` et `git diff --check` : succès.
+
+Ces changements ont été créés avec l'assistance d'une IA. Aucun commit associé
+à cette intervention.

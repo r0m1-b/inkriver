@@ -636,7 +636,13 @@ nouveau changement ou événement réseau/premier plan. L'action manuelle reste
 toujours disponible. La dernière tentative, les compteurs du dernier succès,
 l'état partiel et l'erreur détaillée sont persistés après redémarrage. Supprimer
 la configuration locale conserve
-les abonnements, les articles et les fichiers WebDAV distants. La même boîte de
+les abonnements, les articles et les fichiers WebDAV distants. Les changements
+de catégorie d'un flux sont synchronisés dans un registre LWW indépendant :
+seul le nom est échangé, tandis que les UUID SQLite restent des détails locaux
+propres à chaque appareil. Les étiquettes d'articles suivent le même principe :
+chaque couple article/nom normalisé possède un registre d'appartenance LWW
+indépendant, ce qui préserve les changements concurrents d'étiquettes
+différentes. La même boîte de
 dialogue peut enregistrer un diagnostic d'assistance JSON avec le sélecteur de
 fichiers du système. Il contient seulement les versions de l'application et du
 protocole, les dates, des compteurs agrégés, l'activité des checkpoints et les

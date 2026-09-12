@@ -60,6 +60,10 @@ pub enum SyncEventPayload {
         subscription_id: String,
         platform_hint: Platform,
     },
+    SubscriptionCategorySet {
+        subscription_id: String,
+        category_name: Option<String>,
+    },
     SubscriptionDeleted {
         subscription_id: String,
     },
@@ -70,6 +74,11 @@ pub enum SyncEventPayload {
     ArticleFavoriteSet {
         article: SyncArticleRef,
         is_favorite: bool,
+    },
+    ArticleLabelSet {
+        article: SyncArticleRef,
+        label_name: String,
+        is_present: bool,
     },
     ArticleArchived {
         article: SyncArticleRef,
@@ -83,9 +92,11 @@ impl SyncEventPayload {
             Self::SubscriptionCreated { .. } => "subscription_created",
             Self::SubscriptionActiveSet { .. } => "subscription_active_set",
             Self::SubscriptionPlatformSet { .. } => "subscription_platform_set",
+            Self::SubscriptionCategorySet { .. } => "subscription_category_set",
             Self::SubscriptionDeleted { .. } => "subscription_deleted",
             Self::ArticleReadSet { .. } => "article_read_set",
             Self::ArticleFavoriteSet { .. } => "article_favorite_set",
+            Self::ArticleLabelSet { .. } => "article_label_set",
             Self::ArticleArchived { .. } => "article_archived",
         }
     }
@@ -138,5 +149,37 @@ mod tests {
             payload
         );
         assert_eq!(payload.kind(), "subscription_created");
+
+        let category = SyncEventPayload::SubscriptionCategorySet {
+            subscription_id: "feed-id".to_string(),
+            category_name: Some("Cybersécurité".to_string()),
+        };
+        let json = serde_json::to_string(&category).unwrap();
+        assert!(json.contains(r#""kind":"subscription_category_set""#));
+        assert_eq!(
+            serde_json::from_str::<SyncEventPayload>(&json).unwrap(),
+            category
+        );
+        assert_eq!(category.kind(), "subscription_category_set");
+
+        let label = SyncEventPayload::ArticleLabelSet {
+            article: SyncArticleRef {
+                subscription_id: "feed-id".to_string(),
+                entry_key: "article-id".to_string(),
+                title: None,
+                url: None,
+                author: None,
+                published_at: None,
+            },
+            label_name: "À approfondir".to_string(),
+            is_present: true,
+        };
+        let json = serde_json::to_string(&label).unwrap();
+        assert!(json.contains(r#""kind":"article_label_set""#));
+        assert_eq!(
+            serde_json::from_str::<SyncEventPayload>(&json).unwrap(),
+            label
+        );
+        assert_eq!(label.kind(), "article_label_set");
     }
 }

@@ -1454,6 +1454,20 @@ impl Storage {
                 )
                 .await?;
             }
+            SyncEventPayload::SubscriptionCategorySet {
+                subscription_id, ..
+            } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, subscription_id).await?;
+                store_local_sync_version_in(
+                    transaction,
+                    "subscription",
+                    &canonical,
+                    "category",
+                    event,
+                )
+                .await?;
+            }
             SyncEventPayload::SubscriptionDeleted { subscription_id } => {
                 let canonical =
                     canonical_sync_subscription_id_in(transaction, subscription_id).await?;
@@ -1476,6 +1490,21 @@ impl Storage {
                     .context("Impossible de sérialiser l'identité logique de l'article")?;
                 store_local_sync_version_in(transaction, "article", &key, "favorite", event)
                     .await?;
+            }
+            SyncEventPayload::ArticleLabelSet {
+                article,
+                label_name,
+                ..
+            } => {
+                let canonical =
+                    canonical_sync_subscription_id_in(transaction, &article.subscription_id)
+                        .await?;
+                let key = serde_json::to_string(&(&canonical, &article.entry_key))
+                    .context("Impossible de sérialiser l'identité logique de l'article")?;
+                let (_, normalized_name) = normalize_label_name(label_name)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let field = format!("label:{normalized_name}");
+                store_local_sync_version_in(transaction, "article", &key, &field, event).await?;
             }
             SyncEventPayload::ArticleArchived { article } => {
                 let canonical =
@@ -1552,12 +1581,19 @@ impl Storage {
         }
 
         let observed_at = Utc::now();
-        let feeds: Vec<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, platform, url, is_active FROM feeds ORDER BY id")
-                .fetch_all(&mut *transaction)
-                .await
-                .context("Impossible de charger les abonnements pour le bootstrap")?;
-        for (id, platform, url, is_active) in feeds {
+        let feeds: Vec<(String, String, String, bool, Option<String>)> = sqlx::query_as(
+            r#"
+                SELECT feeds.id, feeds.platform, feeds.url, feeds.is_active,
+                       categories.name
+                FROM feeds
+                LEFT JOIN categories ON categories.id = feeds.category_id
+                ORDER BY feeds.id
+            "#,
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de charger les abonnements pour le bootstrap")?;
+        for (id, platform, url, is_active, category_name) in feeds {
             let platform_hint =
                 Platform::try_from(platform.as_str()).map_err(anyhow::Error::msg)?;
             Self::append_local_sync_event_in(
@@ -1585,6 +1621,36 @@ impl Storage {
             .execute(&mut *transaction)
             .await
             .context("Impossible d'initialiser l'identité de l'abonnement")?;
+            if let Some(category_name) = category_name {
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::SubscriptionCategorySet {
+                        subscription_id: id.clone(),
+                        category_name: Some(category_name),
+                    },
+                    observed_at,
+                )
+                .await?;
+            }
+        }
+
+        let label_rows: Vec<(String, String)> = sqlx::query_as(
+            r#"
+                SELECT article_labels.article_id, labels.name
+                FROM article_labels
+                JOIN labels ON labels.id = article_labels.label_id
+                ORDER BY article_labels.article_id, labels.normalized_name
+            "#,
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Impossible de charger les étiquettes pour le bootstrap")?;
+        let mut labels_by_article = HashMap::<String, Vec<String>>::new();
+        for (article_id, label_name) in label_rows {
+            labels_by_article
+                .entry(article_id)
+                .or_default()
+                .push(label_name);
         }
 
         type BootstrapArticleRow = (
@@ -1666,6 +1732,18 @@ impl Storage {
                 observed_at,
             )
             .await?;
+            for label_name in labels_by_article.remove(&article_id).unwrap_or_default() {
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::ArticleLabelSet {
+                        article: article.clone(),
+                        label_name,
+                        is_present: true,
+                    },
+                    observed_at,
+                )
+                .await?;
+            }
             if is_archived && archive_reason.as_deref() == Some("manual") {
                 Self::append_local_sync_event_in(
                     &mut transaction,
@@ -2816,17 +2894,27 @@ impl Storage {
             .begin()
             .await
             .map_err(|error| LabelError::Database(error.to_string()))?;
-        for article_id in &article_ids {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM articles WHERE id = ? AND is_archived = 0)",
-            )
-            .bind(article_id)
-            .fetch_one(&mut *transaction)
+        let sync_enabled = Self::sync_is_enabled_in(&mut transaction)
             .await
             .map_err(|error| LabelError::Database(error.to_string()))?;
-            if !exists {
+        let mut article_refs = Vec::with_capacity(article_ids.len());
+        for article_id in &article_ids {
+            let row: Option<SyncArticleRefRow> = sqlx::query_as(
+                r#"
+                    SELECT feed_id, COALESCE(entry_key, id), title, url, author,
+                           published_at
+                    FROM articles
+                    WHERE id = ? AND is_archived = 0
+                "#,
+            )
+            .bind(article_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+            let Some(row) = row else {
                 return Err(LabelError::ArticleNotFound((*article_id).to_string()));
-            }
+            };
+            article_refs.push(sync_article_ref_from_row(row));
         }
         let existing: Option<(String, String)> =
             sqlx::query_as("SELECT id, name FROM labels WHERE normalized_name = ?")
@@ -2851,7 +2939,8 @@ impl Storage {
                 label
             }
         };
-        for article_id in article_ids {
+        let observed_at = Utc::now();
+        for (article_id, article) in article_ids.into_iter().zip(article_refs) {
             sqlx::query(
                 "INSERT OR IGNORE INTO article_labels (article_id, label_id) VALUES (?, ?)",
             )
@@ -2860,6 +2949,19 @@ impl Storage {
             .execute(&mut *transaction)
             .await
             .map_err(|error| LabelError::Database(error.to_string()))?;
+            if sync_enabled {
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::ArticleLabelSet {
+                        article,
+                        label_name: label.name.clone(),
+                        is_present: true,
+                    },
+                    observed_at,
+                )
+                .await
+                .map_err(|error| LabelError::Database(error.to_string()))?;
+            }
         }
         transaction
             .commit()
@@ -2883,27 +2985,35 @@ impl Storage {
             .begin()
             .await
             .map_err(|error| LabelError::Database(error.to_string()))?;
-        let label_exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM labels WHERE id = ?)")
-                .bind(label_id)
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|error| LabelError::Database(error.to_string()))?;
-        if !label_exists {
-            return Err(LabelError::LabelNotFound(label_id.to_string()));
-        }
-        let mut removed = false;
-        for article_id in article_ids {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM articles WHERE id = ? AND is_archived = 0)",
-            )
-            .bind(article_id)
-            .fetch_one(&mut *transaction)
+        let label_name: Option<String> = sqlx::query_scalar("SELECT name FROM labels WHERE id = ?")
+            .bind(label_id)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(|error| LabelError::Database(error.to_string()))?;
-            if !exists {
+        let Some(label_name) = label_name else {
+            return Err(LabelError::LabelNotFound(label_id.to_string()));
+        };
+        let sync_enabled = Self::sync_is_enabled_in(&mut transaction)
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+        let observed_at = Utc::now();
+        let mut removed = false;
+        for article_id in article_ids {
+            let row: Option<SyncArticleRefRow> = sqlx::query_as(
+                r#"
+                    SELECT feed_id, COALESCE(entry_key, id), title, url, author,
+                           published_at
+                    FROM articles
+                    WHERE id = ? AND is_archived = 0
+                "#,
+            )
+            .bind(article_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| LabelError::Database(error.to_string()))?;
+            let Some(row) = row else {
                 return Err(LabelError::ArticleNotFound(article_id.to_string()));
-            }
+            };
             removed |=
                 sqlx::query("DELETE FROM article_labels WHERE article_id = ? AND label_id = ?")
                     .bind(article_id)
@@ -2913,6 +3023,19 @@ impl Storage {
                     .map_err(|error| LabelError::Database(error.to_string()))?
                     .rows_affected()
                     > 0;
+            if sync_enabled {
+                Self::append_local_sync_event_in(
+                    &mut transaction,
+                    &SyncEventPayload::ArticleLabelSet {
+                        article: sync_article_ref_from_row(row),
+                        label_name: label_name.clone(),
+                        is_present: false,
+                    },
+                    observed_at,
+                )
+                .await
+                .map_err(|error| LabelError::Database(error.to_string()))?;
+            }
         }
         transaction
             .commit()
@@ -2977,6 +3100,21 @@ impl Storage {
             .execute(&mut *transaction)
             .await
             .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        if Self::sync_is_enabled_in(&mut transaction)
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?
+        {
+            Self::append_local_sync_event_in(
+                &mut transaction,
+                &SyncEventPayload::SubscriptionCategorySet {
+                    subscription_id: feed_id.to_string(),
+                    category_name: normalized_name.map(str::to_string),
+                },
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| SubscriptionError::Database(error.to_string()))?;
+        }
         transaction
             .commit()
             .await
@@ -5256,10 +5394,18 @@ mod tests {
             .upsert_articles(&[article("article", &feed.id, None)])
             .await
             .unwrap();
+        storage
+            .add_label_to_articles(&["article".to_string()], "Science")
+            .await
+            .unwrap();
         storage.set_read("article", true).await.unwrap();
         storage.set_favorite("article", true).await.unwrap();
         storage.archive_article_now("article").await.unwrap();
         storage.set_feed_active(&feed.id, false).await.unwrap();
+        storage
+            .set_feed_category(&feed.id, Some("Science"))
+            .await
+            .unwrap();
 
         assert!(
             storage
@@ -5293,6 +5439,10 @@ mod tests {
             .await
             .unwrap();
         storage
+            .add_label_to_articles(&["astronomy::manual".to_string()], "À relire")
+            .await
+            .unwrap();
+        storage
             .archive_article("astronomy::manual", now)
             .await
             .unwrap();
@@ -5301,6 +5451,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(storage.archive_expired_read_articles(now).await.unwrap(), 1);
+        storage
+            .set_feed_category("astronomy", Some("Astronomie"))
+            .await
+            .unwrap();
 
         assert!(storage.enable_sync().await.unwrap());
         assert!(!storage.enable_sync().await.unwrap());
@@ -5312,8 +5466,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "subscription_created",
+                "subscription_category_set",
                 "article_read_set",
                 "article_favorite_set",
+                "article_label_set",
                 "article_archived",
                 "article_read_set",
                 "article_favorite_set",
@@ -5331,7 +5487,22 @@ mod tests {
                 && normalized_url == "https://astronomy.example/feed"
         ));
         assert!(matches!(
-            &events[3].payload,
+            &events[1].payload,
+            SyncEventPayload::SubscriptionCategorySet {
+                subscription_id,
+                category_name: Some(category_name),
+            } if subscription_id == "astronomy" && category_name == "Astronomie"
+        ));
+        assert!(matches!(
+            &events[4].payload,
+            SyncEventPayload::ArticleLabelSet {
+                article,
+                label_name,
+                is_present: true,
+            } if article.entry_key == "manual" && label_name == "À relire"
+        ));
+        assert!(matches!(
+            &events[5].payload,
             SyncEventPayload::ArticleArchived { article }
                 if article.entry_key == "manual" && article.subscription_id == "astronomy"
         ));
@@ -5344,7 +5515,7 @@ mod tests {
         }));
         let identity = storage.sync_identity().await.unwrap();
         assert!(identity.is_enabled);
-        assert_eq!(identity.next_sequence, 7);
+        assert_eq!(identity.next_sequence, 9);
         let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_subscription_aliases")
             .fetch_one(&storage.pool)
             .await
@@ -5414,6 +5585,329 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tombstones, 1);
+    }
+
+    #[tokio::test]
+    async fn category_mutations_produce_transactional_typed_events() {
+        let storage = storage_with_feed().await;
+        storage.enable_sync().await.unwrap();
+        let baseline = storage.sync_identity().await.unwrap().next_sequence - 1;
+
+        storage
+            .set_feed_category("astronomy", Some("Cybersécurité"))
+            .await
+            .unwrap();
+        storage.set_feed_category("astronomy", None).await.unwrap();
+
+        let events = storage.local_sync_events_after(baseline, 10).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["subscription_category_set", "subscription_category_set"]
+        );
+        assert!(matches!(
+            &events[0].payload,
+            SyncEventPayload::SubscriptionCategorySet {
+                subscription_id,
+                category_name: Some(category_name),
+            } if subscription_id == "astronomy" && category_name == "Cybersécurité"
+        ));
+        assert!(matches!(
+            &events[1].payload,
+            SyncEventPayload::SubscriptionCategorySet {
+                subscription_id,
+                category_name: None,
+            } if subscription_id == "astronomy"
+        ));
+        assert!(storage.list_feeds().await.unwrap()[0].category.is_none());
+
+        let identity_before_failure = storage.sync_identity().await.unwrap();
+        sqlx::raw_sql(
+            r#"
+                CREATE TRIGGER reject_category_sync_event
+                BEFORE INSERT ON sync_events
+                WHEN NEW.event_kind = 'subscription_category_set'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated category journal failure');
+                END;
+            "#,
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+        assert!(
+            storage
+                .set_feed_category("astronomy", Some("Intelligence artificielle"))
+                .await
+                .is_err()
+        );
+        assert!(storage.list_feeds().await.unwrap()[0].category.is_none());
+        let identity_after_failure = storage.sync_identity().await.unwrap();
+        assert_eq!(
+            identity_after_failure.next_sequence,
+            identity_before_failure.next_sequence
+        );
+        assert_eq!(identity_after_failure.clock, identity_before_failure.clock);
+    }
+
+    #[tokio::test]
+    async fn synchronized_category_is_lww_dependency_safe_and_does_not_echo() {
+        const CREATOR: &str = "00000000-0000-4000-8000-000000000071";
+        const EARLY_WRITER: &str = "00000000-0000-4000-8000-000000000072";
+        const LATE_WRITER: &str = "00000000-0000-4000-8000-000000000073";
+        let events = vec![
+            remote_event(
+                EARLY_WRITER,
+                1,
+                1_000,
+                SyncEventPayload::SubscriptionCategorySet {
+                    subscription_id: "remote-feed".to_string(),
+                    category_name: Some("Politique".to_string()),
+                },
+            ),
+            remote_subscription_created(CREATOR, 1, 2_000, "remote-feed"),
+            remote_event(
+                LATE_WRITER,
+                1,
+                3_000,
+                SyncEventPayload::SubscriptionCategorySet {
+                    subscription_id: "remote-feed".to_string(),
+                    category_name: Some("Cybersécurité".to_string()),
+                },
+            ),
+        ];
+
+        for permutation in event_permutations(&events) {
+            let storage = Storage::open_in_memory().await.unwrap();
+            storage.enable_sync().await.unwrap();
+            let report = storage
+                .import_sync_events(
+                    &permutation,
+                    Utc.timestamp_millis_opt(4_000).single().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(report.applied, 3);
+            let feeds = storage.list_feeds().await.unwrap();
+            assert_eq!(feeds.len(), 1);
+            assert_eq!(
+                feeds[0]
+                    .category
+                    .as_ref()
+                    .map(|category| category.name.as_str()),
+                Some("Cybersécurité")
+            );
+            assert!(
+                storage
+                    .local_sync_events_after(0, 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let removal = remote_event(
+                LATE_WRITER,
+                2,
+                4_000,
+                SyncEventPayload::SubscriptionCategorySet {
+                    subscription_id: "remote-feed".to_string(),
+                    category_name: None,
+                },
+            );
+            storage
+                .import_sync_events(
+                    &[removal],
+                    Utc.timestamp_millis_opt(5_000).single().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(storage.list_feeds().await.unwrap()[0].category.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn label_mutations_produce_transactional_typed_events() {
+        let storage = storage_with_feed().await;
+        storage
+            .upsert_articles(&[
+                article("astronomy::mars", "astronomy", None),
+                article("astronomy::venus", "astronomy", None),
+            ])
+            .await
+            .unwrap();
+        storage.enable_sync().await.unwrap();
+        let baseline = storage.sync_identity().await.unwrap().next_sequence - 1;
+
+        let label = storage
+            .add_label_to_articles(
+                &[
+                    "astronomy::mars".to_string(),
+                    "astronomy::venus".to_string(),
+                ],
+                "  À   approfondir  ",
+            )
+            .await
+            .unwrap();
+        storage
+            .remove_label_from_articles(&["astronomy::mars".to_string()], &label.id)
+            .await
+            .unwrap();
+
+        let events = storage.local_sync_events_after(baseline, 10).await.unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| event.kind == "article_label_set"));
+        assert!(matches!(
+            &events[0].payload,
+            SyncEventPayload::ArticleLabelSet {
+                article,
+                label_name,
+                is_present: true,
+            } if article.entry_key == "mars" && label_name == "À approfondir"
+        ));
+        assert!(matches!(
+            &events[1].payload,
+            SyncEventPayload::ArticleLabelSet {
+                article,
+                label_name,
+                is_present: true,
+            } if article.entry_key == "venus" && label_name == "À approfondir"
+        ));
+        assert!(matches!(
+            &events[2].payload,
+            SyncEventPayload::ArticleLabelSet {
+                article,
+                label_name,
+                is_present: false,
+            } if article.entry_key == "mars" && label_name == "À approfondir"
+        ));
+
+        let identity_before_failure = storage.sync_identity().await.unwrap();
+        sqlx::raw_sql(
+            r#"
+                CREATE TRIGGER reject_label_sync_event
+                BEFORE INSERT ON sync_events
+                WHEN NEW.event_kind = 'article_label_set'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated label journal failure');
+                END;
+            "#,
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+        assert!(
+            storage
+                .add_label_to_articles(&["astronomy::mars".to_string()], "Important")
+                .await
+                .is_err()
+        );
+        assert_eq!(storage.list_labels().await.unwrap(), vec![label]);
+        let identity_after_failure = storage.sync_identity().await.unwrap();
+        assert_eq!(
+            identity_after_failure.next_sequence,
+            identity_before_failure.next_sequence
+        );
+        assert_eq!(identity_after_failure.clock, identity_before_failure.clock);
+    }
+
+    #[tokio::test]
+    async fn synchronized_labels_are_lww_dependency_safe_and_do_not_echo() {
+        const CREATOR: &str = "00000000-0000-4000-8000-000000000081";
+        const EARLY_WRITER: &str = "00000000-0000-4000-8000-000000000082";
+        const LATE_WRITER: &str = "00000000-0000-4000-8000-000000000083";
+        const OTHER_WRITER: &str = "00000000-0000-4000-8000-000000000084";
+        let article = SyncArticleRef {
+            subscription_id: "remote-feed".to_string(),
+            entry_key: "entry".to_string(),
+            title: Some("Article distant".to_string()),
+            url: None,
+            author: None,
+            published_at: None,
+        };
+        let events = vec![
+            remote_event(
+                EARLY_WRITER,
+                1,
+                1_000,
+                SyncEventPayload::ArticleLabelSet {
+                    article: article.clone(),
+                    label_name: "Important".to_string(),
+                    is_present: true,
+                },
+            ),
+            remote_subscription_created(CREATOR, 1, 2_000, "remote-feed"),
+            remote_event(
+                OTHER_WRITER,
+                1,
+                2_500,
+                SyncEventPayload::ArticleLabelSet {
+                    article: article.clone(),
+                    label_name: "Recherche".to_string(),
+                    is_present: true,
+                },
+            ),
+            remote_event(
+                LATE_WRITER,
+                1,
+                3_000,
+                SyncEventPayload::ArticleLabelSet {
+                    article: article.clone(),
+                    label_name: "important".to_string(),
+                    is_present: false,
+                },
+            ),
+        ];
+
+        for permutation in event_permutations(&events) {
+            let storage = Storage::open_in_memory().await.unwrap();
+            storage.enable_sync().await.unwrap();
+            let report = storage
+                .import_sync_events(
+                    &permutation,
+                    Utc.timestamp_millis_opt(4_000).single().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(report.applied, 4);
+            let articles = storage.list_articles().await.unwrap();
+            assert_eq!(articles.len(), 1);
+            assert_eq!(
+                articles[0]
+                    .labels
+                    .iter()
+                    .map(|label| label.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Recherche"]
+            );
+            assert!(
+                storage
+                    .local_sync_events_after(0, 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let readdition = remote_event(
+                LATE_WRITER,
+                2,
+                4_000,
+                SyncEventPayload::ArticleLabelSet {
+                    article: article.clone(),
+                    label_name: "Important".to_string(),
+                    is_present: true,
+                },
+            );
+            storage
+                .import_sync_events(
+                    &[readdition],
+                    Utc.timestamp_millis_opt(5_000).single().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(storage.list_articles().await.unwrap()[0].labels.len(), 2);
+        }
     }
 
     /// Verifies explicit article mutations emit one event per logical article,
@@ -6172,6 +6666,40 @@ mod tests {
         assert!(
             storage
                 .import_sync_events(&[invalid], Utc.timestamp_millis_opt(1_000).unwrap())
+                .await
+                .is_err()
+        );
+        let invalid_category = remote_event(
+            DEVICE,
+            2,
+            200,
+            SyncEventPayload::SubscriptionCategorySet {
+                subscription_id: "remote-feed".to_string(),
+                category_name: Some(" catégorie non normalisée ".to_string()),
+            },
+        );
+        assert!(
+            storage
+                .import_sync_events(
+                    &[invalid_category],
+                    Utc.timestamp_millis_opt(1_000).unwrap(),
+                )
+                .await
+                .is_err()
+        );
+        let invalid_label = remote_event(
+            DEVICE,
+            3,
+            300,
+            SyncEventPayload::ArticleLabelSet {
+                article: sync_article_ref("remote-article"),
+                label_name: " étiquette non normalisée ".to_string(),
+                is_present: true,
+            },
+        );
+        assert!(
+            storage
+                .import_sync_events(&[invalid_label], Utc.timestamp_millis_opt(1_000).unwrap())
                 .await
                 .is_err()
         );

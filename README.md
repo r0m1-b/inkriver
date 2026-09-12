@@ -609,6 +609,12 @@ online, or foreground event occurs. The manual action always remains available.
 The last attempt, successful counters, pending state, and detailed error are
 persisted across restarts. Removing the local configuration keeps
 subscriptions, articles, and remote WebDAV files.
+Assigning or removing a feed category is synchronized as an independent
+last-writer-wins field; category names are exchanged while local SQLite UUIDs
+remain device-specific implementation details.
+Article labels use the same local-UUID principle. Each article and normalized
+label name has an independent last-writer-wins membership, so unrelated labels
+can be edited concurrently without overwriting one another.
 The same dialog can save a JSON support diagnostic through the system file
 picker. It contains only application and protocol versions, dates, aggregate
 counts, checkpoint activity, and compaction results; it excludes credentials,

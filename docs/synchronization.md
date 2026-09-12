@@ -120,9 +120,11 @@ replicated operations.
 | Add or re-add a subscription | `subscription_created` | Contains the normalized URL, current platform hint and optional parent tombstone. |
 | Activate or deactivate a subscription | `subscription_active_set` | A field-level last-writer-wins register. |
 | Change a retained subscription's platform hint | `subscription_platform_set` | Emitted when reactivation also changes the user-overridden provider hint. |
+| Assign or remove a subscription category | `subscription_category_set` | An optional-name last-writer-wins register; category UUIDs remain local projection details. |
 | Delete a subscription | `subscription_deleted` | Permanent tombstone for that incarnation. |
 | Mark an article read or unread | `article_read_set` | Opening an unread article counts as user intent and produces `true`. |
 | Add or remove a favorite | `article_favorite_set` | Independent from the read register. |
+| Add or remove an article label | `article_label_set` | One last-writer-wins membership register per normalized label name; label UUIDs remain local. |
 | Archive an article manually | `article_archived` | Permanent tombstone in version 1. |
 
 ### Audited storage entry points
@@ -133,18 +135,20 @@ The contract above covers the current mutation paths as follows:
 | --- | --- |
 | `add_feed` | Replicated create, including reactivation of a retained inactive feed as an activation change. |
 | `set_feed_active` | Replicated activation register. |
+| `set_feed_category` | Replicated optional category-name register. |
 | `delete_feed` | Replicated subscription tombstone; physical deletion must change once synchronization is enabled. |
 | `set_read`, `set_read_many` | Replicated read register. |
 | `set_favorite` | Replicated favorite register. |
+| `add_label_to_articles`, `remove_label_from_articles` | Replicated label-membership register for each affected article. |
 | `archive_article`, `archive_article_now`, `archive_articles_now` | Replicated manual article tombstone. |
 | `import_feeds` | Local CLI configuration import, not replicated. |
 | `upsert_articles`, `record_feed_refreshes` | Local remote-cache maintenance, not replicated. |
 | `archive_expired_read_articles*`, `apply_article_retention` | Local retention only, not replicated. |
 | extraction and feed-logo recording operations | Local cache and diagnostics only, not replicated. |
 
-A grouped read or archive action produces one event per affected article, with
-consecutive sequences, in the same transaction as all affected rows. This keeps
-conflict resolution per article while preserving atomic local behavior.
+A grouped read, label or archive action produces one event per affected article,
+with consecutive sequences, in the same transaction as all affected rows. This
+keeps conflict resolution per article while preserving atomic local behavior.
 
 The following operations remain local and produce no event:
 
@@ -174,10 +178,12 @@ subscription_created {
 
 subscription_active_set { subscription_id, is_active }
 subscription_platform_set { subscription_id, platform_hint }
+subscription_category_set { subscription_id, category_name? }
 subscription_deleted    { subscription_id }
 
 article_read_set     { article_ref, is_read }
 article_favorite_set { article_ref, is_favorite }
+article_label_set    { article_ref, label_name, is_present }
 article_archived     { article_ref }
 ```
 
@@ -192,17 +198,21 @@ are not last-writer-wins registers and do not generate events when refreshed.
 
 ## Merge registers and tombstones
 
-Read state, favorite state, subscription activation and the platform hint are
-independent last-writer-wins registers. Only events for the same logical entity
-and field compete. The greatest total `version` wins, so concurrent changes to
-different fields are both preserved.
+Read state, favorite state, each normalized label membership, subscription
+activation, platform hint and optional category name are independent
+last-writer-wins registers. Category and label UUIDs are never exchanged: a
+winning name is resolved to an existing local object or creates one on demand.
+Label display names use NFKC and collapsed-whitespace normalization, while their
+lowercase normalized names define membership identity. Only events for the
+same logical entity and field compete. The greatest total `version` wins, so
+concurrent changes to different fields are both preserved.
 
 Deletion and manual archiving are permanent tombstones in protocol version 1:
 
 - a subscription tombstone dominates every create or activation event in the
   same incarnation, regardless of arrival order;
-- an article tombstone dominates every read, favorite or refresh update for
-  that article;
+- an article tombstone dominates every read, favorite, label or refresh update
+  for that article;
 - an older device cannot undo either tombstone;
 - manual article restoration is not supported in version 1;
 - a deleted subscription can only return as a new incarnation explicitly
@@ -222,13 +232,17 @@ restore its body. A manual archive is never removed this way.
 | Add two different normalized URLs | Both subscriptions remain. |
 | Activate vs deactivate the same subscription | The value with the greatest version wins. |
 | Change platform hints on aliased concurrent additions or a retained subscription | The hint from the greatest create or platform-set event version wins. |
+| Assign different categories to the same subscription | The category name with the greatest version wins. |
+| Assign a category vs remove it | The optional value with the greatest version wins. |
 | Activate/deactivate vs delete | Deletion wins for that incarnation. |
 | Stale add vs an already issued delete | Deletion wins; the stale device cannot resurrect the incarnation. |
 | Re-add after observing deletion | A new incarnation is created through `parent_tombstone`. |
 | Mark read vs mark unread | The value with the greatest version wins. |
 | Add favorite vs remove favorite | The value with the greatest version wins. |
+| Add vs remove the same normalized article label | The membership value with the greatest version wins. |
+| Change two different article labels concurrently | Both changes survive in independent registers. |
 | Change read and favorite concurrently | Both changes survive in their independent registers. |
-| Read/favorite change vs manual archive | Manual archive wins and the article remains hidden. |
+| Read/favorite/label change vs manual archive | Manual archive wins and the article remains hidden. |
 | Feed refresh vs manual archive | The tombstone remains; downloaded content cannot restore the article. |
 | Automatic retention vs imported unread or favorite | Imported user state wins and removes the local retention archive. |
 | Article state received before its article | The event is retained; a metadata-only article is projected once its subscription dependency exists. |
@@ -450,7 +464,7 @@ trade away recoverability.
 
 - synchronizing SQLite, WAL or SHM files;
 - article HTML, images, extracted content and feed logos;
-- application settings, filters, tags, ordering and reading position;
+- application settings, filters, ordering and reading position;
 - a hosted InkRiver account or server;
 - authenticated Medium or Substack content;
 - shared multi-user editing and permissions;
